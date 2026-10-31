@@ -1,5 +1,9 @@
 # pi-comms
 
+> pi-comms provides shared communication for independently managed agents. Improve continuity, clarity and reach while keeping its concepts small and its behavior consistent.
+
+Read the [product and development principles](https://github.com/tranhoangnguyen03/pi-comms/blob/main/docs/PRINCIPLES.md), [proposed features and milestones](https://github.com/tranhoangnguyen03/pi-comms/blob/main/docs/ROADMAP.md), and [contributor guidance](https://github.com/tranhoangnguyen03/pi-comms/blob/main/AGENTS.md). The roadmap describes proposals; the usage guide below describes current behavior.
+
 Communication between existing Pi sessions: user-approved contacts, exact native session addresses, replies across turns/tools, and human-first batches. It does not launch agents or own their work.
 
 User-approved communication for Pi. Install the published package with `pi install npm:pi-comms`. Release availability is shown on [npm](https://www.npmjs.com/package/pi-comms) and [GitHub Releases](https://github.com/tranhoangnguyen03/pi-comms/releases). Tested with Pi 1.4.0; CI verifies Node 22.19.0/24 on Linux and Node 24 on macOS. Other Pi versions are not claimed. [Base integration evidence and limits](docs/BASE-3.md). Historical [spike delivery](docs/GATE-C-DELIVERY.md) and [Gate A/B report](docs/SPIKE-2-REPORT.md) remain unchanged.
