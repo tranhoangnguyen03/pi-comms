@@ -375,7 +375,7 @@ export default function comms(pi: ExtensionAPI) {
     // Native validation/permission errors happen before execute and have no pi-comms details.
     if (typeof body?.ok !== 'boolean') return new Text(value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n') || 'No textual communication result available.', 0, 0);
     const summary = body.data?.timeoutSeconds !== undefined
-      ? body.data.items.map((item: AskItem) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}${item.response?.message.report ? ` · Peer reports ${item.response.message.report.state}` : ''}`).join('\n')
+      ? body.data.items.map((item: AskItem & { response?: { message: { report?: { state: string } } } }) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}${item.response?.message.report ? ` · Peer reports ${item.response.message.report.state}` : ''}`).join('\n')
       : value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n').split('\n').slice(0, 3).join('\n');
     return new Text(body?.ok ? `${summary}${(_options as { expanded?: boolean }).expanded ? `\n${JSON.stringify(body.data, null, 2)}` : '\nCtrl+O expands evidence'}` : theme.fg('error', body?.error ? `${body.error.message}\n${body.error.nextAction}` : 'Communication failed'), 0, 0);
   };
