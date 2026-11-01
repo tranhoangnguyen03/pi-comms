@@ -784,7 +784,7 @@ test('native serialized host: one ask dispatches all reviewers, returns full rep
     const result = a.observed.at(-1)!.find((m: any) => m.role === 'toolResult' && m.toolName === 'comms_ask');
     const renderer = a.runtime.session.extensionRunner!.getToolDefinition('comms_ask')!.renderResult!;
     const rendered = renderer({ content: result.content, details: result.details } as any, { expanded: false } as any, { fg: (_: string, value: string) => value } as any);
-    assert.match(rendered.render(120).join('\n'), /replied/);
+    assert.match(rendered.render(120).join('\n'), /Reply received/);
     const response = data(await a.tool('comms_inspect', { message: outbox[0].responses[0] })).data;
     b.responses([fauxAssistantMessage('Useful follow-up received.')]);
     assert.equal(data(await a.tool('comms_message', { respondTo: response.returnHandle, text: 'Necessary correction, not courtesy.' })).ok, true);
