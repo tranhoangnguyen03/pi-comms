@@ -16,6 +16,38 @@ const Report = Type.Object({
     Type.Literal('blocked'), Type.Literal('complete'),
   ], { description: 'Colleague-reported work state; not work acceptance or runtime evidence.' }),
 }, { additionalProperties: false, description: 'Optional work report tied to an existing request in this exchange.' });
+// Validate the values actually representable on the JSON wire, before serializing.
+// An outer Type.Object check alone accepts Infinity and nested values that JSON
+// would coerce or drop. Walk only `structured` so existing message forms stay intact.
+function isJsonValue(value: unknown, active = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || active.has(value)) return false;
+  if (!Array.isArray(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+  }
+  active.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Array.isArray(value)) {
+    // Sparse array slots become null on the wire; extra own keys are dropped.
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== value.length + 1) return false;
+    for (let i = 0; i < value.length; i++) {
+      const descriptor = descriptors[String(i)];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isJsonValue(descriptor.value, active)) return false;
+    }
+  } else {
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return false;
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isJsonValue(descriptor.value, active)) return false;
+    }
+  }
+  active.delete(value);
+  return true;
+}
+
 export const MessageInput = Type.Object({
   to: Type.Optional(Type.String({ ...Text, description: 'Native session ID or current exact unique name. Use only for a new exchange.' })),
   subject: Type.Optional(Type.String({ ...Text, description: 'Subject required with to; omit for a reply.' })),
@@ -57,6 +89,11 @@ export type Envelope = Static<typeof EnvelopeSchema>;
 export const Output = Type.Object({ ok: Type.Boolean(), data: Type.Optional(Type.Unknown()), error: Type.Optional(Type.Object({ code: Type.String(), message: Type.String(), nextAction: Type.String() })), observedAt: Type.String() });
 export function validate(schema: TSchema, value: unknown) {
   if (!Check<TSchema, unknown>(schema, value)) throw new Error('INVALID_INPUT');
+  if ((schema === MessageInput || schema === EnvelopeSchema) &&
+      (value as { structured?: unknown }).structured !== undefined &&
+      !isJsonValue((value as { structured: unknown }).structured)) {
+    throw new Error('INVALID_INPUT: structured must contain only JSON values with finite numbers. No message was sent.');
+  }
   if (schema === MessageInput) {
     const input = value as MessageInput;
     if (input.respondTo && (input.to !== undefined || input.subject !== undefined)) throw new Error('INVALID_INPUT: reply routing was combined with new-message routing. For a new message use { to, subject, text }; omit respondTo. For a reply use { respondTo, text } with a real incoming return handle; omit to and subject. refs and corrects are optional; use corrects only for a real earlier message ID. No message was sent for this input.');

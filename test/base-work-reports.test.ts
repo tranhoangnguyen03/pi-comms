@@ -35,6 +35,44 @@ test('structured data is optional JSON object; work reports require an exact rep
   ]) assert.throws(() => validate(MessageInput, input), /INVALID_INPUT/);
 });
 
+test('rejects non-JSON nested structured values before sending or recording messages', async () => {
+  let transports = 0;
+  const runtime = new Runtime(a, async () => { transports++; return { outcome: 'accepted' }; });
+  runtime.approveFromOwner(approval(b));
+
+  const nestedOverflow = JSON.parse('{"metrics":{"count":1e400}}');
+  assert.equal(nestedOverflow.metrics.count, Infinity, 'parsed JSON may contain non-finite JS numbers');
+  const sparse = [1, , 3];
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  const invalid: unknown[] = [
+    nestedOverflow, { count: Number.NaN }, { count: -Infinity }, { metrics: [0, Infinity] },
+    { items: [true, undefined] }, { items: sparse }, { missing: undefined },
+    { count: 12n }, { handler: () => 1 }, { when: new Date() }, circular,
+  ];
+  for (const structured of invalid) {
+    await assert.rejects(
+      runtime.send({ to: b, subject: 'Payload fidelity', text: 'Check this', structured } as any),
+      /INVALID_INPUT: structured must contain only JSON values with finite numbers/,
+    );
+  }
+  assert.equal(transports, 0, 'validation must reject before invoking transport');
+  assert.deepEqual(runtime.inspect({ outbox: 'self' }).items, [], 'invalid data must not create outbox records');
+
+  const valid = { metrics: { count: 14, passed: true, details: ['one', null, { depth: [1.25] }] } };
+  const sent = await runtime.send({ to: b, subject: 'Valid JSON', text: 'Details', structured: valid });
+  assert.deepEqual(sent.message.structured, valid);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.message.structured)), valid);
+  assert.equal(transports, 1, 'valid nested data still sends normally');
+
+  const incoming = { id: randomUUID(), exchange: randomUUID(), subject: 'Incoming',
+    text: 'Bad wire value', refs: [], replyTo: null, corrects: null,
+    createdAt: new Date().toISOString(), structured: nestedOverflow };
+  const receiver = new Runtime(b, async () => ({ outcome: 'accepted' }));
+  assert.throws(() => receiver.receive(a, incoming), /INVALID_INPUT: structured/);
+  assert.deepEqual(receiver.waiting, [], 'invalid inbound data must not enter the receiver queue');
+});
+
 test('final work report can refer to original request after clarification rounds', async () => {
   const { lead, reviewer, sentA, sentB } = pair();
   const request = await lead.send({ to: b, subject: 'Retry review', text: 'Check double writes', workRef: 'AUTH-42' });

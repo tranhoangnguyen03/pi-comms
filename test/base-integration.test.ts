@@ -180,6 +180,65 @@ test('native reviewer reports after clarification with structured evidence linke
   } finally { await reviewer.close(); await lead.close(); }
 });
 
+test('actual collapsed ask renderer names the original report target after a clarification', async () => {
+  const lead = await participant('report-render-lead'), reviewer = await participant('report-render-reviewer');
+  try {
+    lead.confirm(true);
+    const original = data(await lead.tool('comms_message', {
+      to: reviewer.id(), subject: 'Original review A', text: 'Review A',
+    })).data;
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('Original review A')));
+    const receivedA = data(await reviewer.tool('comms_inspect', { message: original.message.id })).data;
+
+    const clarification = data(await reviewer.tool('comms_message', {
+      respondTo: receivedA.returnHandle, text: 'Clarification for A',
+    })).data;
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('Clarification for A')));
+    const receivedQuestion = data(await lead.tool('comms_inspect', { message: clarification.message.id })).data;
+
+    // The current ask is B. Its reply reports on older original request A.
+    const waitingForB = lead.tool('comms_ask', {
+      requests: [{ respondTo: receivedQuestion.returnHandle, text: 'Follow-up B: only retry reads' }],
+      timeoutSeconds: 6,
+    });
+    const outgoingB = async () => {
+      const sent = data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items;
+      return sent.find((item: any) => item.message.text === 'Follow-up B: only retry reads');
+    };
+    await waitFor(async () => !!await outgoingB());
+    const bMessage = (await outgoingB())!.message;
+    await waitFor(async () => data(await reviewer.tool('comms_inspect', { message: bMessage.id })).ok);
+    const receivedB = data(await reviewer.tool('comms_inspect', { message: bMessage.id })).data;
+
+    const completed = data(await reviewer.tool('comms_message', {
+      respondTo: receivedB.returnHandle, text: 'Findings on original request A',
+      report: { request: original.message.id, state: 'complete' },
+    }));
+    assert.equal(completed.ok, true);
+    const result = await waitingForB;
+    assert.equal(data(result).data.items[0].outcome, 'replied');
+    assert.equal(data(result).data.items[0].response.message.report.request, original.message.id);
+    assert.notEqual(bMessage.id, original.message.id);
+
+    const renderer = lead.runtime.session.extensionRunner!.getToolDefinition('comms_ask')!.renderResult!;
+    const render = (details: unknown) => renderer({ content: result.content, details } as any,
+      { expanded: false } as any, { fg: (_: string, value: string) => value } as any).render(190).join('\n');
+
+    const collapsed = render(result.details);
+    assert.match(collapsed, /Follow-up B/);
+    assert.match(collapsed, /Peer reports complete/);
+    assert.ok(collapsed.includes(original.message.id), 'render must show report.request, not only the current ask');
+    assert.match(collapsed, /not this ask/);
+    assert.match(collapsed, /not requester acceptance/);
+
+    const unverified = structuredClone(result.details) as any;
+    unverified.data.items[0].response.reportLinkage = 'context-lost';
+    const warning = render(unverified);
+    assert.ok(warning.includes(original.message.id));
+    assert.match(warning, /Reported request unavailable: link unverified/);
+  } finally { await reviewer.close(); await lead.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];

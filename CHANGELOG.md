@@ -7,6 +7,7 @@
 - Preserve report links across clarification turns; `comms_inspect({requests:[...]})` exposes the latest attributed report separately from the first direct reply and never infers work acceptance.
 - Show reported states and structured evidence in incoming native messages, human cards, inspection and tool results. Expose original message IDs to recipients so reports can name the correct request.
 - Test schema conversions, attribution, mixed-version limits, privacy, error cases and packaged native communication. Reporting metadata requires both peers on 0.1.5 or later.
+- Keep the original report target and unverified-link warning in collapsed ask results; reject non-JSON nested structured data, including non-finite numbers, before transport can change values.
 
 ## [0.1.4] - 2026-11-01
 

@@ -38,7 +38,7 @@ comms_message({
 })
 ```
 
-The original request's **Message ID** appears in the incoming message. It is not the return handle. Keep `report.request` linked to that original message even after clarification rounds; `respondTo` may refer to a more recent message in the same exchange. Available states: `progress`, `needs-input`, `blocked`, `complete`. Choose the state that describes your actual work and provide evidence; never treat the state as verified task acceptance. Plain replies need no report or structured data. Reports require both peers running pi-comms 0.1.5 or later.
+The original request's **Message ID** appears in the incoming message. It is not the return handle. Keep `report.request` linked to that original message even after clarification rounds; `respondTo` may refer to a more recent message in the same exchange. A collapsed ask result shows which request a report targets and warns if its link is unverified. Nested `structured` values must be JSON-safe, including finite numbers; invalid values are rejected rather than silently changed. Available states: `progress`, `needs-input`, `blocked`, `complete`. Choose the state that describes your actual work and provide evidence; never treat the state as verified task acceptance. Plain replies need no report or structured data. Reports require both peers running pi-comms 0.1.5 or later.
 
 The requester can use `comms_inspect({requests:["<original outgoing message ID>"]})` to see the latest reported state even if it arrived through a later clarification. `comms_ask` still ends at the first linked reply, which may be a question.
 
