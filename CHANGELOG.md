@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6] - 2026-11-01
+
+- Add optional `waitFor:"reported-outcome"` to `comms_ask({requests:[...]})`. A peer's `complete`, `blocked` or `needs-input` report on the exact request ends that wait; ordinary replies also return promptly without implying completion.
+- Add `comms_ask({outcomes:[originalOutgoingRequestId,...]})` to wait for new reports on existing work after clarification, without re-sending the request. Waits stay tied to exact session and request identities.
+- Keep the default first-linked-reply ask unchanged. Progress-only reports do not end outcome waits. Human interruption, Pause, revocation, timeout and disconnection still end only the local wait; late messages remain available.
+- Preserve reported outcomes and first-reply semantics in plain and structured results, on-demand guidance and collapsed human cards, without adding tools, state stores or an acceptance workflow.
+- Verify requested-outcome and existing-request waiting through focused runtime tests and native Pi integration; include recovery and duplicate-wait checks.
+
 ## [0.1.5] - 2026-11-01
 
 - Allow optional `structured` JSON objects alongside readable messages and replies without a new tool or data store.

@@ -22,9 +22,11 @@ comms_message({to: "Reviewer", subject: "Security review", text: "Check retry sa
 comms_inspect({workRef: "AUTH-42"})
 comms_message({respondTo: "<real handle>", text: "Risk found; tests pass.", report: {request: "<original message ID>", state: "complete"}, structured: {tests_passing: true, files_changed: []}})
 comms_inspect({requests: ["<original message ID>"]})
+comms_ask({requests: [{to: "Reviewer", subject: "Risk review", text: "Report complete, blocked or needs-input on this original request."}], waitFor: "reported-outcome", timeoutSeconds: 60})
+comms_ask({outcomes: ["<original outgoing message ID>"], timeoutSeconds: 60})
 ```
 
-Send is asynchronous; ask waits for the first linked reply to each independent request. **A reply is not task completion.** Common outputs are plain text; scripts receive matching structured details. For example: a send reports acceptance without promising a reply. An ask reports `Reviewer — Reply received`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
+Send is asynchronous. By default, ask waits for the **first linked reply** to each independent request; explicit reported-outcome mode waits for the peer's actionable report instead. **Neither a reply nor a completion report is requester acceptance.** Common outputs are plain text; scripts receive matching structured details. For example: a send reports acceptance without promising a reply. An ask reports `Reviewer — Reply received`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
 
 **Do not send courtesy, formality, acknowledgement-only or closing messages. No “thanks”, “you’re welcome”, “understood”, or “standing by” messages. Send only requested information, necessary questions, corrections or material updates. Once the task is satisfied, stop messaging.** This is guidance, not filtering: substantive polite messages, corrections and late useful answers remain allowed.
 
@@ -48,6 +50,23 @@ Reports and structured data appear in ordinary human/model views and structured 
 
 New `report` and `structured` fields require **pi-comms 0.1.5 or later on both participating sessions**. Older peers may reject these messages; report an uncertain delivery rather than retrying blindly. Conversations and report links remain memory-only until a separate durability milestone.
 
+## Optional reported-outcome waiting (0.1.6+)
+
+For a new review that needs a work result, use `comms_ask({requests:[{to,subject,text}],waitFor:"reported-outcome",timeoutSeconds:60})`. Ask the colleague to report the *original request ID* with `report.state` as `complete`, `blocked` or `needs-input`. The wait ends on that report, returns its readable text, structured evidence, and peer attribution, **not** an accepted-work decision.
+
+A plain reply without a work report also returns promptly as **Reply received (no reported outcome)**. This is deliberate: a clarification must reach the lead instead of waiting behind the work-outcome condition. A `progress` report for the request does **not** finish the wait; progress may remain in ordinary incoming intake until the wait ends. Unverified report links and reports about other requests cannot settle a different request's outcome.
+
+When a colleague needs input, answer using the supplied `respondTo` handle. Then wait for further work **without sending it again**:
+
+```js
+comms_message({respondTo: "<actual clarification return handle>", text: "Only retry safe reads."})
+comms_ask({outcomes: ["<original outgoing request ID>"], timeoutSeconds: 60})
+```
+
+The `outcomes` form watches **already-sent outgoing request IDs** for new (or still-unadmitted) reports. It never sends a new request, grants contact approval or replays a previously presented report. Inspect current evidence first if the outcome may already have arrived. At most 30 independent requests can be watched together. An existing watch on the same request cannot be duplicated concurrently.
+
+Both forms use a local wait (default 60 seconds; 0.1–600 seconds). A new send's clock begins at transport acceptance; waiting on existing work begins immediately. Pause, revocation, disconnection, human interruption or timeout ends only the local wait. The peer's work may continue and late reports can still arrive. The original `comms_ask({requests:[...]})` behavior is unchanged when `waitFor` is omitted.
+
 ## Presence, message outcomes and recipes
 
 `comms_peers({})` distinguishes whether each colleague is **online/offline** from host-observed **working/idle/unknown** activity. It shows when the last activity report was observed. The broker timestamps only status-bearing reports; normal name updates do not refresh activity freshness. Working/idle reports normally refresh every 60 seconds and become stale after 180 seconds. A stale status is **unknown**, with the earlier report available as history, not current progress. Offline peers have unavailable activity. The legacy `lastActivity` field is a general broker-contact timestamp, not proof of agent work; use `activityObservedAt` for the last working/idle report. A working session may be busy on unrelated work; these observations do not establish progress or completion of your request.
@@ -62,7 +81,7 @@ For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. 
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.5.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.6.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -70,13 +89,13 @@ To try without modifying normal Pi settings, use an owned temporary agent direct
 ```sh
 mkdir -p /tmp/comms-try/package
 # Extract the reviewed tarball into /tmp/comms-try/package (npm tarballs contain package/).
-tar -xzf pi-comms-0.1.5.tgz -C /tmp/comms-try
+tar -xzf pi-comms-0.1.6.tgz -C /tmp/comms-try
 PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 ```
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.4`, which is published). The `0.1.5` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.5`, which is published). The `0.1.6` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 

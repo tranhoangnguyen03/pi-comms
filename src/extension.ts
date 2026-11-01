@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import { Runtime, type Entry } from './runtime.ts';
-import { Asks, type AskItem } from './ask.ts';
+import { Asks, type AskItem, type WaitFor } from './ask.ts';
 import { modelView } from './model-view.ts';
 import { peerActivity, requestOutcomeLabel, messageContextLines } from './communication-view.ts';
 import { Id, EnvelopeSchema, MessageInput, AskInput, PeersInput, InspectInput, Output, validate } from './schema.ts';
@@ -379,7 +379,8 @@ export default function comms(pi: ExtensionAPI) {
           response?: { message: { report?: { request: string; state: string } }; reportLinkage?: 'context-lost'; linkage?: 'context-lost' };
         }) => {
           const report = item.response?.message.report;
-          const outcome = `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}`;
+          const label = body.data.waitFor === 'reported-outcome' && item.outcome === 'replied' ? 'Reply received (no reported outcome)' : requestOutcomeLabel(item.outcome);
+          const outcome = `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${label}`;
           if (!report) return outcome;
           const differentRequest = report.request !== item.request ? ` (not this ask${item.request ? ` ${item.request}` : ''})` : '';
           const linkWarning = item.response?.reportLinkage ? ' · Reported request unavailable: link unverified' : '';
@@ -414,35 +415,56 @@ export default function comms(pi: ExtensionAPI) {
       if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
       return sent;
     }, true), renderResult });
-  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 existing peers: {requests:[{to,subject,text,workRef?,recipientLabel?},...],timeoutSeconds?}. Optional workRef groups each exchange; labels describe recipients, not authority. Returns the first linked reply (possibly clarification) or local ending, not work completion. Wait starts after acceptance; late replies remain possible. Never automatically resend.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Send and wait for 1–30 independent requests: {requests:[{to,subject,text},...],timeoutSeconds?,waitFor?}. Default waits for each first linked reply. waitFor:"reported-outcome" waits for peer-reported complete, blocked or needs-input; plain replies also surface promptly without claiming completion. Or {outcomes:[originalOutgoingRequestId,...],timeoutSeconds?} waits on existing work without resending. Progress alone does not end the wait. Interruption and timeout end only local waiting; late replies remain possible. No automatic retries.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
     execute: async (call, input, signal) => run(async () => {
       validate(AskInput, input);
       const current = runtime!, pending = asks!;
       const seconds = input.timeoutSeconds ?? 60;
-      const items: AskItem[] = input.requests.map(() => ({}));
-      pending.open(call, items);
+      const mode: WaitFor = input.outcomes || input.waitFor === 'reported-outcome' ? 'reported-outcome' : 'first-reply';
+      const items: AskItem[] = (input.requests ?? input.outcomes ?? []).map(() => ({}));
+      pending.open(call, items, mode);
       const stop = new AbortController(); askStops.set(call, stop);
       const abort = signal ? AbortSignal.any([signal, stop.signal, lifetime.signal]) : AbortSignal.any([stop.signal, lifetime.signal]);
       const interrupted = () => pending.end(pending.ended(call) ?? 'interrupted', call);
       abort.addEventListener('abort', interrupted, { once: true });
       if (abort.aborted) interrupted();
       try {
-        await Promise.all(input.requests.map(async (input, index) => {
-          const item = items[index];
-          try {
-            const resolved = await prepareSend(input, abort, item);
-            if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
-            if (current.paused) { item.outcome = 'paused'; return; }
-            let waiting: Promise<void> | undefined;
-            const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds); });
-            const dispatched = sending.then(sent => { pending.sent(sent.message.id, sent.state, sent.code); admitAsks(); });
-            if (waiting) { void dispatched.catch(() => pending.end('unknown', call)); await waiting; }
-            else await dispatched;
-          } catch (error) {
-            item.outcome = pending.ended(call) ?? 'not-sent';
-            item.code = error instanceof Error ? error.message : String(error);
-          }
-        }));
+        if (input.outcomes) {
+          await Promise.all(input.outcomes.map(async (requestId, index) => {
+            const item = items[index]; item.request = requestId;
+            try {
+              const entry = current.entry(requestId);
+              if (!entry || entry.message.from !== current.self) {
+                item.outcome = 'context-lost'; item.code = 'Outgoing request not available in this runtime.'; return;
+              }
+              item.peer = entry.message.to; item.subject = entry.message.subject; item.workRef = entry.message.workRef;
+              if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
+              if (current.paused) { item.outcome = 'paused'; return; }
+              if (!current.isApproved(entry.message.to)) { item.outcome = 'revoked'; return; }
+              await pending.watch(call, item, entry, seconds);
+            } catch (error) {
+              item.outcome = pending.ended(call) ?? 'unknown';
+              item.code = error instanceof Error ? error.message : String(error);
+            }
+          }));
+        } else {
+          await Promise.all(input.requests!.map(async (request, index) => {
+            const item = items[index];
+            try {
+              const resolved = await prepareSend(request, abort, item);
+              if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
+              if (current.paused) { item.outcome = 'paused'; return; }
+              let waiting: Promise<void> | undefined;
+              const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds, mode); });
+              const dispatched = sending.then(sent => { pending.sent(sent.message.id, sent.state, sent.code); admitAsks(); });
+              if (waiting) { void dispatched.catch(() => pending.end('unknown', call)); await waiting; }
+              else await dispatched;
+            } catch (error) {
+              item.outcome = pending.ended(call) ?? 'not-sent';
+              item.code = error instanceof Error ? error.message : String(error);
+            }
+          }));
+        }
         return pending.project(call, seconds);
       } finally { abort.removeEventListener('abort', interrupted); askStops.delete(call); }
     }), renderResult });

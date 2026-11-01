@@ -10,8 +10,9 @@ export function modelView(data: any, name: (id: string) => string): string {
   if (data.timeoutSeconds !== undefined) return data.items.map((item: any) => {
     const who = item.peer ? name(item.peer) : 'Request';
     const heading = `${who} — ${requestOutcomeLabel(item.outcome)} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''}`;
-    const timeout = item.outcome === 'timeout' ? `No reply from ${who} within ${data.timeoutSeconds} seconds. The wait ended; a late reply can still arrive.` : '';
-    return [heading, timeout || requestNextAction(item.outcome), item.code, item.request ? `Request: ${item.request}` : '', item.response ? message(item.response, false) : ''].filter(Boolean).join('\n');
+    const outcomeWait = data.waitFor === 'reported-outcome';
+    const timeout = item.outcome === 'timeout' ? `No ${outcomeWait ? 'reported outcome' : 'reply'} from ${who} within ${data.timeoutSeconds} seconds. The wait ended; a later reply can still arrive.` : '';
+    return [heading, outcomeWait && item.outcome === 'replied' ? 'Reply received without a reported outcome; inspect and respond if it needs input.' : '', timeout || requestNextAction(item.outcome), item.code, item.request ? `Request: ${item.request}` : '', item.response ? message(item.response, false) : ''].filter(Boolean).join('\n');
   }).join('\n\n');
   if (data.message) return message(data);
   if (data.responses) return `Responses\n${data.responses.map((row: any) => `${row.peer ? name(row.peer) : row.request} — ${requestOutcomeLabel(row.outcome)}${row.code ? ` · ${row.code}` : ''}\nRequest: ${row.request}${row.subject ? ` · ${row.subject}` : ''}${row.workRef ? ` · Work: ${row.workRef}` : ''}${row.replies?.length ? `\n${row.replies.map((entry: any) => message(entry)).join('\n\n')}` : ''}${row.latestReport ? `\nPeer reports ${row.latestReport.message.report.state} for this request (${row.reportCount} report${row.reportCount === 1 ? '' : 's'}; not requester acceptance)${row.replies?.some((entry: any) => entry.message.id === row.latestReport.message.id) ? '' : `\n${message(row.latestReport)}`}` : ''}`).join('\n\n')}`;

@@ -40,7 +40,25 @@ comms_message({
 
 The original request's **Message ID** appears in the incoming message. It is not the return handle. Keep `report.request` linked to that original message even after clarification rounds; `respondTo` may refer to a more recent message in the same exchange. A collapsed ask result shows which request a report targets and warns if its link is unverified. Nested `structured` values must be JSON-safe, including finite numbers; invalid values are rejected rather than silently changed. Available states: `progress`, `needs-input`, `blocked`, `complete`. Choose the state that describes your actual work and provide evidence; never treat the state as verified task acceptance. Plain replies need no report or structured data. Reports require both peers running pi-comms 0.1.5 or later.
 
-The requester can use `comms_inspect({requests:["<original outgoing message ID>"]})` to see the latest reported state even if it arrived through a later clarification. `comms_ask` still ends at the first linked reply, which may be a question.
+The requester can use `comms_inspect({requests:["<original outgoing message ID>"]})` to see the latest reported state even if it arrived through a later clarification. Ordinary `comms_ask` stops at the first linked reply; use the optional reported-outcome mode only when you need it.
+
+## Waiting for reported outcomes
+
+By default, `comms_ask({requests:[...]})` stops after the first linked reply, which could be a question. If the workflow needs the peer's reported work outcome, opt in:
+
+```js
+comms_ask({
+  requests: [{ to: "Reviewer", subject: "Retry review",
+    text: "Report complete, blocked or needs-input against my original request ID." }],
+  waitFor: "reported-outcome", timeoutSeconds: 60
+})
+```
+
+A report of `complete`, `blocked` or `needs-input` ends the local wait. A plain reply also returns promptly, marked as a reply **without a reported outcome**, so you can answer a clarification. Progress alone does not end the wait; the peer must issue a substantive, actionable report. The peer's report does not mean you accepted the work.
+
+After a `needs-input` reply, answer using its actual `respondTo` handle. To continue waiting on the *original* request without sending the assignment again, call `comms_ask({outcomes:["<original outgoing request ID>"],timeoutSeconds:60})`. This watches new or still-unadmitted reports; inspect any report that already reached your context before waiting. Never fabricate IDs or retry an uncertain send. Up to 30 independent requests can be awaited together.
+
+A local timeout, Stop, Pause, revoke or disconnect ends waiting, not the colleague's work. Late reports remain possible and will be admitted normally when eligible. No new permissions, task acceptance or persistent state are implied.
 
 ## Clarification and findings
 

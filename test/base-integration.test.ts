@@ -240,6 +240,65 @@ test('actual collapsed ask renderer names the original report target after a cla
   } finally { await reviewer.close(); await lead.close(); }
 });
 
+test('reported-outcome ask surfaces questions, then watches original request without resending', async () => {
+  const lead = await participant('outcome-lead'), reviewer = await participant('outcome-reviewer');
+  try {
+    lead.confirm(true);
+    const waiting = lead.tool('comms_ask', {
+      requests: [{ to: reviewer.id(), subject: 'Retry review', text: 'Check write safety. Report needs-input, blocked or complete with the original request ID.', workRef: 'AUTH-42' }],
+      waitFor: 'reported-outcome', timeoutSeconds: 4,
+    });
+    const original = async () => {
+      const outbox = data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items;
+      return outbox.find((item: any) => item.message.subject === 'Retry review');
+    };
+    await waitFor(async () => !!await original());
+    const request = (await original())!.message;
+    await waitFor(async () => data(await reviewer.tool('comms_inspect', { message: request.id })).ok);
+    const received = data(await reviewer.tool('comms_inspect', { message: request.id })).data;
+    const progress = data(await reviewer.tool('comms_message', {
+      respondTo: received.returnHandle, text: 'Checking cases',
+      report: { request: request.id, state: 'progress' },
+    }));
+    assert.equal(progress.ok, true);
+    let finished = false; void waiting.then(() => { finished = true; });
+    await new Promise(r => setTimeout(r, 40));
+    assert.equal(finished, false, 'progress alone must not finish a final-outcome wait');
+
+    const question = data(await reviewer.tool('comms_message', {
+      respondTo: received.returnHandle, text: 'Should writes be retried?',
+      report: { request: request.id, state: 'needs-input' },
+    }));
+    assert.equal(question.ok, true);
+    const first = data(await waiting).data;
+    assert.equal(first.waitFor, 'reported-outcome');
+    assert.equal(first.items[0].outcome, 'needs-input');
+    assert.equal(first.items[0].response.message.report.request, request.id);
+    const answer = data(await lead.tool('comms_message', {
+      respondTo: first.items[0].response.returnHandle, text: 'Only retry idempotent reads.',
+    }));
+    assert.equal(answer.ok, true);
+    await waitFor(async () => data(await reviewer.tool('comms_inspect', { message: answer.data.message.id })).ok);
+    const receivedAnswer = data(await reviewer.tool('comms_inspect', { message: answer.data.message.id })).data;
+    const before = data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items.length;
+
+    const resumed = lead.tool('comms_ask', { outcomes: [request.id], timeoutSeconds: 4 });
+    const complete = data(await reviewer.tool('comms_message', {
+      respondTo: receivedAnswer.returnHandle, text: 'Confirmed the unsafe retry.',
+      report: { request: request.id, state: 'complete' },
+      structured: { finding_count: 1 },
+    }));
+    assert.equal(complete.ok, true);
+    const final = data(await resumed).data;
+    assert.equal(final.waitFor, 'reported-outcome');
+    assert.equal(final.items[0].outcome, 'reported-complete');
+    assert.equal(final.items[0].request, request.id);
+    assert.equal(final.items[0].response.message.id, complete.data.message.id);
+    assert.equal(data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items.length, before,
+      'outcomes must not send new messages or duplicate work');
+  } finally { await reviewer.close(); await lead.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];
