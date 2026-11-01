@@ -11,7 +11,9 @@ export function modelView(data: any, name: (id: string) => string): string {
     const who = item.peer ? name(item.peer) : 'Request';
     const heading = `${who} — ${requestOutcomeLabel(item.outcome)} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''}`;
     const outcomeWait = data.waitFor === 'reported-outcome';
-    const timeout = item.outcome === 'timeout' ? `No ${outcomeWait ? 'reported outcome' : 'reply'} from ${who} within ${data.timeoutSeconds} seconds. The wait ended; a later reply can still arrive.` : '';
+    const timeout = item.outcome === 'timeout' ? outcomeWait
+      ? `No reported outcome from ${who} within ${data.timeoutSeconds} seconds. The wait ended; a later reply can still arrive.`
+      : `No reply from ${who} within ${data.timeoutSeconds} seconds. The wait ended; a late reply can still arrive.` : '';
     return [heading, outcomeWait && item.outcome === 'replied' ? 'Reply received without a reported outcome; inspect and respond if it needs input.' : '', timeout || requestNextAction(item.outcome), item.code, item.request ? `Request: ${item.request}` : '', item.response ? message(item.response, false) : ''].filter(Boolean).join('\n');
   }).join('\n\n');
   if (data.message) return message(data);
