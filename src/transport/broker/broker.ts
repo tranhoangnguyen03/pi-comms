@@ -561,7 +561,7 @@ class IntercomBroker {
           pid: session.pid,
           startedAt: session.startedAt,
           lastActivity: session.lastActivity,
-          ...(session.status !== undefined ? { status: session.status } : {}),
+          ...(session.status !== undefined ? { status: session.status, statusReportedAt: Date.now() } : {}),
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
           ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
@@ -1005,6 +1005,9 @@ class IntercomBroker {
               session.info.status = clientMessage.status;
               changed = true;
             }
+            // Only a status-bearing report refreshes this timestamp. Name-only updates
+            // and other broker traffic must not make old activity appear current.
+            session.info.statusReportedAt = Date.now();
           }
           if (clientMessage.model !== undefined) {
             if (typeof clientMessage.model !== "string") {

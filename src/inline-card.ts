@@ -1,3 +1,4 @@
+import { observationLabel } from './communication-view.ts';
 import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent';
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@earendil-works/pi-tui';
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
@@ -29,7 +30,7 @@ export class InlineCard implements Component {
       if (message.corrects) lines.push(frame('Correction to an earlier message'));
       for (const line of wrapTextWithAnsi(message.text, inner)) lines.push(frame(line));
       if (this.expansion.expanded) {
-        lines.push(frame(`Observed: ${message.fact}`));
+        lines.push(frame(`Observed: ${observationLabel({ facts: message.fact === 'unknown' ? [] : [{ kind: message.fact }], state: message.fact })}`));
         for (const line of wrapTextWithAnsi(`Message ${message.id} · exchange ${message.exchange} · ${message.at}${message.replyTo ? ` · response to ${message.replyTo}` : ''}${message.corrects ? ` · corrects ${message.corrects}` : ''}`, inner)) lines.push(frame(this.theme.fg('dim', line)));
       }
     }

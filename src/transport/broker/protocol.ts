@@ -206,6 +206,9 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
   if (value.status !== undefined && typeof value.status !== "string") {
     return false;
   }
+  if (value.statusReportedAt !== undefined && (!Number.isFinite(value.statusReportedAt) || typeof value.statusReportedAt !== "number" || value.statusReportedAt <= 0)) {
+    return false;
+  }
 
   if (value.peerUid !== undefined && typeof value.peerUid !== "number") {
     return false;

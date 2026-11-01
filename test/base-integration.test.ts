@@ -67,6 +67,33 @@ async function participant(label: string, interactive = true, extraTools: any[] 
     close: async () => { hold = false; releases.splice(0).forEach(r => r()); await runtime.session.abort(); await runtime.dispose(); },
   };
 }
+test('peer discovery reports live host activity separately from reachability', async () => {
+  const coordinator = await participant('presence-coordinator'), reviewer = await participant('presence-reviewer');
+  try {
+    const current = async () => (data(await coordinator.tool('comms_peers', {})).data.items as any[]).find(p => p.id === reviewer.id());
+    await waitFor(async () => (await current())?.activity === 'idle');
+    const initial = await current();
+    assert.equal(initial.presence, 'online'); assert.equal(initial.activityFreshness, 'recent');
+    assert.match(initial.activityObservedAt, /^\d{4}-\d{2}-\d{2}T/);
+
+    await new Promise(r => setTimeout(r, 15));
+    reviewer.runtime.session.setSessionName('Renamed reviewer');
+    await waitFor(async () => (await current())?.name === 'Renamed reviewer');
+    const renamed = await current();
+    assert.equal(renamed.activityObservedAt, initial.activityObservedAt, 'name-only presence must not refresh status timestamp');
+    assert.ok(renamed.lastActivity >= initial.lastActivity, 'generic broker contact can still update');
+
+    reviewer.hold(true);
+    const running = reviewer.runtime.session.prompt('Review the current work without changing any files.');
+    await waitFor(async () => (await current())?.activity === 'working');
+    assert.equal((await current()).presence, 'online', 'busy does not mean disconnected');
+
+    await waitFor(() => reviewer.observed.length > 0);
+    reviewer.release(); reviewer.hold(false); await running;
+    await waitFor(async () => (await current())?.activity === 'idle');
+  } finally { reviewer.release(); await reviewer.close(); await coordinator.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];
@@ -162,7 +189,7 @@ test('actual provider request contains registered tool properties without networ
     assert.match(roster.nextAction, /load pi-comms.*share the broker agent directory.*intercom-only/);
     await a.command('status'); assert.match(a.notifications.at(-1)!, /Broker:/);
     await a.runtime.session.prompt('synthetic schema capture');
-    assert.match(JSON.stringify(a.observed[0]), /Do not send courtesy, formality, acknowledgement-only or closing messages/);
+    assert.match(JSON.stringify(a.observed[0]), /Send only necessary requests, questions, findings, corrections or material updates/);
     let captured: any;
     const model = a.models.getModel('openai', 'gpt-5.4-mini')!;
     const response = await a.models.streamSimple(model, { messages: a.observed[0] } as any, {
@@ -766,7 +793,7 @@ test('native serialized host: one ask dispatches all reviewers, returns full rep
     const result = a.observed.at(-1)!.find((m: any) => m.role === 'toolResult' && m.toolName === 'comms_ask');
     const renderer = a.runtime.session.extensionRunner!.getToolDefinition('comms_ask')!.renderResult!;
     const rendered = renderer({ content: result.content, details: result.details } as any, { expanded: false } as any, { fg: (_: string, value: string) => value } as any);
-    assert.match(rendered.render(120).join('\n'), /replied/);
+    assert.match(rendered.render(120).join('\n'), /Reply received/);
     const response = data(await a.tool('comms_inspect', { message: outbox[0].responses[0] })).data;
     b.responses([fauxAssistantMessage('Useful follow-up received.')]);
     assert.equal(data(await a.tool('comms_message', { respondTo: response.returnHandle, text: 'Necessary correction, not courtesy.' })).ok, true);

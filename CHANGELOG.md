@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3] - 2026-11-01
+
+- Report observed working/idle activity and timestamp freshness in peer discovery, separately from connection state. Preserve unknown and offline activity instead of guessing.
+- Use a shared, plain-language status vocabulary for request results, message inspection and expanded human cards; surface useful recovery actions without changing delivery guarantees.
+- Ship an on-demand pi-comms skill for practical collaboration patterns; keep the existing four agent tools and send/ask behavior.
+- Add focused presence, projection and native lifecycle regression coverage.
+- Clarify that activity freshness comes from status-bearing broker reports, not unrelated presence updates; align user/tool guidance and test installed-package skill discovery.
+
 ## [0.1.2] - 2026-11-01
 
 - Remove duplicate error-code prefix in plain-text tool error results (`INVALID_INPUT: ...` instead of `INVALID_INPUT: INVALID_INPUT: ...`).

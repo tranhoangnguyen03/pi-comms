@@ -91,5 +91,5 @@ test('bounded ask schema, response selection and lean projections retain handles
   const progress: any = runtime.inspect({ requests: [first.message.id, followup.message.id] });
   assert.equal(progress.responses[0].outcome, 'reply-received'); assert.equal(progress.responses[1].outcome, 'no-reply-yet');
   assert.match(modelView(runtime.inspect({ message: first.message.id }), () => 'B'), new RegExp(`Responses: ${incoming.id}`));
-  const projected = modelView(progress, () => 'B'); assert.match(projected, /FULL PAYLOAD/); assert.match(projected, /respondTo/); assert.match(projected, /no reply yet/); assert.doesNotMatch(projected, /^\{/);
+  const projected = modelView(progress, () => 'B'); assert.match(projected, /FULL PAYLOAD/); assert.match(projected, /respondTo/); assert.match(projected, /No reply yet/); assert.doesNotMatch(projected, /^\{/);
 });

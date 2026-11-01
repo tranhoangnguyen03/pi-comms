@@ -1,6 +1,6 @@
 {
   "name": "pi-comms",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Tran Hoang Nguyen",
   "repository": {
     "type": "git",
@@ -23,10 +23,14 @@
   "pi": {
     "extensions": [
       "./dist/extension.js"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "files": [
     "dist",
+    "skills",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
