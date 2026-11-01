@@ -22,11 +22,9 @@ comms_message({to: "Reviewer", subject: "Security review", text: "Check retry sa
 comms_inspect({workRef: "AUTH-42"})
 comms_message({respondTo: "<real handle>", text: "Risk found; tests pass.", report: {request: "<original message ID>", state: "complete"}, structured: {tests_passing: true, files_changed: []}})
 comms_inspect({requests: ["<original message ID>"]})
-comms_ask({requests: [{to: "Reviewer", subject: "Risk review", text: "Report complete, blocked or needs-input on this original request."}], waitFor: "reported-outcome", timeoutSeconds: 60})
-comms_ask({outcomes: ["<original outgoing message ID>"], timeoutSeconds: 60})
 ```
 
-Send is asynchronous. By default, ask waits for the **first linked reply** to each independent request; explicit reported-outcome mode waits for the peer's actionable report instead. **Neither a reply nor a completion report is requester acceptance.** Common outputs are plain text; scripts receive matching structured details. For example: a send reports acceptance without promising a reply. An ask reports `Reviewer — Reply received`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
+Send is asynchronous; ask waits for the first linked reply to each independent request. **A reply is not task completion.** Common outputs are plain text; scripts receive matching structured details. For example: a send reports acceptance without promising a reply. An ask reports `Reviewer — Reply received`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
 
 **Do not send courtesy, formality, acknowledgement-only or closing messages. No “thanks”, “you’re welcome”, “understood”, or “standing by” messages. Send only requested information, necessary questions, corrections or material updates. Once the task is satisfied, stop messaging.** This is guidance, not filtering: substantive polite messages, corrections and late useful answers remain allowed.
 
@@ -46,26 +44,21 @@ A reply may also include `report: {request:"<original request message ID>",state
 
 The original request ID appears in the recipient's incoming message as **Message ID**. The `respondTo` return handle is a separate value. A report must refer to a request actually received from this colleague in the **same exchange**. After a clarification round, reply using the current handle but continue to reference the original request ID in `report.request`. The collapsed ask view names **the reported request**, distinguishes it from the current ask when different, and warns when the report link is unverified. `comms_inspect({requests:[...]})` exposes the latest verified report and how many reports the peer sent, separate from direct reply progress—even when the report replies to a later clarification. Unknown original request records are marked unverified rather than accepted as evidence.
 
-Reports and structured data appear in ordinary human/model views and structured tool output. Contact revocation still withholds message content from the agent. `comms_ask` continues to wait for the **first linked reply**; it does not wait for the final report. Choosing to wait for a reported outcome belongs to the later M2-C milestone.
+Reports and structured data remain available in human inspection and tool output. Contact revocation still withholds message content from the agent. `comms_ask` continues to wait for the **first linked reply**; it does not wait for the final report. Later peer reports follow the normal incoming path, with progress-only updates grouped rather than forcing extra model turns.
 
 New `report` and `structured` fields require **pi-comms 0.1.5 or later on both participating sessions**. Older peers may reject these messages; report an uncertain delivery rather than retrying blindly. Conversations and report links remain memory-only until a separate durability milestone.
 
-## Optional reported-outcome waiting (0.1.6+)
+## Automatic request-aware outcome delivery (0.1.6+)
 
-For a new review that needs a work result, use `comms_ask({requests:[{to,subject,text}],waitFor:"reported-outcome",timeoutSeconds:60})`. Ask the colleague to report the *original request ID* with `report.state` as `complete`, `blocked` or `needs-input`. The wait ends on that report, returns its readable text, structured evidence, and peer attribution, **not** an accepted-work decision.
+No new commands or waiting modes are required. Use `comms_message` to send work without waiting, or ordinary `comms_ask` when the **first reply** is needed. After that, the colleague can use the existing reply handle and optional `report` field to send questions, findings and outcomes. pi-comms delivers useful follow-ups through its **normal incoming-message path**, even when the original ask has finished or timed out.
 
-A plain reply without a work report also returns promptly as **Reply received (no reported outcome)**. This is deliberate: a clarification must reach the lead instead of waiting behind the work-outcome condition. A `progress` report for the request does **not** finish the wait; progress may remain in ordinary incoming intake until the wait ends. Unverified report links and reports about other requests cannot settle a different request's outcome.
+- A plain reply or `needs-input` report reaches the requester when reception is eligible. Answer a question with its actual `respondTo` handle.
+- A `blocked` or `complete` report is delivered with its text, evidence and exact original request ID. It is the colleague's claim, **not** the requester's approval.
+- A `progress`-only report remains in that session's existing communication records and `comms_inspect`, but does not create a separate model turn. Earlier progress is summarized when an actionable report is delivered. This applies to normal incoming traffic, **not** the first linked reply that an active `comms_ask` is already collecting.
+- If progress arrives **after** completion or blockage, it cannot replace the last actionable state or cause a late progress wake. `comms_inspect({requests:[...]})` shows `currentReport` for the current actionable peer claim, `latestReport` for the latest received report, and `laterProgressCount` when relevant. All original messages remain available via exact message and exchange inspection.
+- A later correction that reports `blocked` or `complete` still reaches the requester. The reported state follows receipt order; it is **not** a verified task lifecycle or an ordering guarantee for remote work.
 
-When a colleague needs input, answer using the supplied `respondTo` handle. Then wait for further work **without sending it again**:
-
-```js
-comms_message({respondTo: "<actual clarification return handle>", text: "Only retry safe reads."})
-comms_ask({outcomes: ["<original outgoing request ID>"], timeoutSeconds: 60})
-```
-
-The `outcomes` form watches **already-sent outgoing request IDs** for new (or still-unadmitted) reports. It never sends a new request, grants contact approval or replays a previously presented report. Inspect current evidence first if the outcome may already have arrived. At most 30 independent requests can be watched together. An existing watch on the same request cannot be duplicated concurrently.
-
-Both forms use a local wait (default 60 seconds; 0.1–600 seconds). A new send's clock begins at transport acceptance; waiting on existing work begins immediately. Pause, revocation, disconnection, human interruption or timeout ends only the local wait. The peer's work may continue and late reports can still arrive. The original `comms_ask({requests:[...]})` behavior is unchanged when `waitFor` is omitted.
+Normal contact approval, revocation, Pause, editor-draft priority, exact session identities and existing delivery uncertainty still govern the incoming messages. Progress-only records held during Pause or pending approval are not silently admitted. The runtime marks suppressed progress as **retained in inspection, not posted to Pi**; it does not claim that the model saw it.
 
 ## Presence, message outcomes and recipes
 

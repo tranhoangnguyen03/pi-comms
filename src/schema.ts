@@ -62,10 +62,8 @@ export const MessageInput = Type.Object({
 }, { additionalProperties: false });
 export type MessageInput = Static<typeof MessageInput>;
 export const AskInput = Type.Object({
-  requests: Type.Optional(Type.Array(MessageInput, { minItems: 1, maxItems: 30, description: 'New independent requests. Default: wait for each first linked reply. Set waitFor to reported-outcome to wait for a work report instead.' })),
-  outcomes: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 30, description: 'Already-sent outgoing request IDs to wait for new reported outcomes, without sending again. Use after answering a clarification.' })),
-  waitFor: Type.Optional(Type.Union([Type.Literal('first-reply'), Type.Literal('reported-outcome')], { description: 'For requests, first-reply is the default. Reported-outcome returns on complete, blocked, needs-input or an unclassified reply; progress alone keeps waiting. Outcomes always use reported-outcome.' })),
-  timeoutSeconds: Type.Optional(Type.Number({ minimum: 0.1, maximum: 600, description: 'Per-request local wait, default 60 seconds. New sends start after acceptance; existing outcome waits start immediately.' })),
+  requests: Type.Array(MessageInput, { minItems: 1, maxItems: 30, description: 'Independent requests dispatched before waiting. One question is a one-item array.' }),
+  timeoutSeconds: Type.Optional(Type.Number({ minimum: 0.1, maximum: 600, description: 'Per-request reply wait, default 60 seconds; starts after transport acceptance, excluding approval time.' })),
 }, { additionalProperties: false });
 export type AskInput = Static<typeof AskInput>;
 export const PeersInput = Type.Object({ view: Type.Optional(Type.Union([Type.Literal('known'), Type.Literal('all')], { description: 'Default all: approved online, other online, then known offline peers. Known filters to approved peers.' })), cursor: Type.Optional(Id) }, { additionalProperties: false });
@@ -103,13 +101,7 @@ export function validate(schema: TSchema, value: unknown) {
     if (input.respondTo && (input.workRef !== undefined || input.recipientLabel !== undefined)) throw new Error('INVALID_INPUT: replies inherit the work reference and cannot assign a recipient label. Use { respondTo, text } without workRef or recipientLabel. No message was sent.');
     if (input.report && !input.respondTo) throw new Error('INVALID_INPUT: a work report must reply to an existing request with { respondTo, text, report: { request, state } }. No message was sent.');
   }
-  if (schema === AskInput) {
-    const input = value as AskInput;
-    if (!!input.requests === !!input.outcomes) throw new Error('INVALID_INPUT: use requests to send and wait, or outcomes to wait on existing outgoing request IDs without sending. Supply exactly one.');
-    if (input.outcomes && input.waitFor === 'first-reply') throw new Error('INVALID_INPUT: outcomes only waits for reported outcomes; omit waitFor or set reported-outcome.');
-    if (input.outcomes && new Set(input.outcomes).size !== input.outcomes.length) throw new Error('INVALID_INPUT: each outcome request ID must be unique in one wait.');
-    for (const request of input.requests ?? []) validate(MessageInput, request);
-  }
+  if (schema === AskInput) for (const request of (value as AskInput).requests) validate(MessageInput, request);
   if (schema === InspectInput) {
     const input = value as InspectInput;
     const selectors = ['message', 'exchange', 'peer', 'workRef', 'queue', 'outbox', 'requests'].filter(key => key in input);

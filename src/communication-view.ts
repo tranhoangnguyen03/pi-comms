@@ -4,6 +4,7 @@ export const factLabels: Record<string, string> = {
   accepted: 'Accepted by transport',
   queued: 'Buffered in receiver memory',
   posted: 'Posted to Pi',
+  summarized: 'Retained in inspection; not posted to Pi',
   saved: 'Observed in native history',
   rejected: 'Rejected',
 };
@@ -53,9 +54,6 @@ export function messageContextLines(message: {
 export function requestOutcomeLabel(outcome?: string): string {
   switch (outcome) {
     case 'reply-received': case 'replied': return 'Reply received';
-    case 'reported-complete': return 'Peer reports complete';
-    case 'needs-input': return 'Peer needs input';
-    case 'blocked': return 'Peer reports blocked';
     case 'no-reply-yet': return 'No reply yet';
     case 'timeout': return 'No reply before wait ended';
     case 'interrupted': return 'Wait interrupted';
@@ -73,9 +71,6 @@ export function requestOutcomeLabel(outcome?: string): string {
 
 export function requestNextAction(outcome?: string): string | undefined {
   switch (outcome) {
-    case 'reported-complete': return 'Assess the peer’s report and evidence; requester acceptance is separate.';
-    case 'needs-input': return 'Answer the colleague using the reply handle; then wait on the original request without resending it.';
-    case 'blocked': return 'Inspect the blocker and decide how to proceed; this is the peer’s report.';
     case 'timeout': case 'no-reply-yet': return 'A later reply can still arrive; inspect this request when needed.';
     case 'interrupted': return 'The local wait ended; inspect any later reply before asking again.';
     case 'paused': return 'Resume reception when ready; held replies may then arrive.';

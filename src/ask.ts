@@ -1,24 +1,20 @@
 import type { Entry, Runtime } from './runtime.ts';
 
-export type WaitFor = 'first-reply' | 'reported-outcome';
-export type AskOutcome = 'replied' | 'reported-complete' | 'needs-input' | 'blocked' |
-  'timeout' | 'interrupted' | 'paused' | 'revoked' | 'disconnected' |
-  'context-lost' | 'not-sent' | 'rejected' | 'unknown';
+export type AskOutcome = 'replied' | 'timeout' | 'interrupted' | 'paused' | 'revoked' | 'disconnected' | 'context-lost' | 'not-sent' | 'rejected' | 'unknown';
 export type AskItem = { request?: string; peer?: string; subject?: string; workRef?: string; outcome?: AskOutcome; code?: string; reply?: string };
-type Wait = { item: AskItem; mode: WaitFor; finish: (outcome: AskOutcome, reply?: string) => void; start: () => void; suspend: () => void };
+type Wait = { item: AskItem; finish: (outcome: AskOutcome, reply?: string) => void; start: () => void; suspend: () => void };
 
-// Only wait/claim state lives here. Payloads, reports, links and evidence stay in Runtime.
+// Only wait/claim state lives here. Payloads, links and evidence stay in Runtime.
 export class Asks {
   private waits = new Map<string, Wait>();
-  private calls = new Map<string, { items: AskItem[]; mode: WaitFor; ended?: AskOutcome; presented: boolean }>();
+  private calls = new Map<string, { items: AskItem[]; ended?: AskOutcome; presented: boolean }>();
   private claims = new Map<string, string>();
   private dialog = false;
   constructor(private runtime: Runtime) {}
-  open(call: string, items: AskItem[], mode: WaitFor = 'first-reply') { this.calls.set(call, { items, mode, presented: false }); }
+  open(call: string, items: AskItem[]) { this.calls.set(call, { items, presented: false }); }
   ended(call: string) { return this.calls.get(call)?.ended; }
-  register(call: string, item: AskItem, entry: Entry, seconds: number, mode: WaitFor = 'first-reply') {
-    if (this.waits.has(entry.message.id)) throw new Error('INVALID_INPUT: this request already has an active wait.');
-    item.request = entry.message.id; item.peer = entry.message.to; item.subject = entry.message.subject; item.workRef = entry.message.workRef;
+  register(call: string, item: AskItem, entry: Entry, seconds: number) {
+    item.request = entry.message.id; item.peer = entry.message.to; item.subject = entry.message.subject;
     let timer: NodeJS.Timeout | undefined;
     let remaining = seconds * 1000, startedAt = 0;
     let resolve!: () => void;
@@ -29,7 +25,7 @@ export class Asks {
       if (reply) this.claims.set(reply, call);
       resolve();
     };
-    this.waits.set(entry.message.id, { item, mode, finish, start: () => {
+    this.waits.set(entry.message.id, { item, finish, start: () => {
       if (this.waits.has(entry.message.id) && !timer && !this.dialog) {
         startedAt = performance.now(); timer = setTimeout(() => finish('timeout'), remaining);
       }
@@ -40,19 +36,11 @@ export class Asks {
     if (ended) finish(ended);
     return promise;
   }
-  // Observe an already-sent request. This performs no send, replay or new approval.
-  watch(call: string, item: AskItem, entry: Entry, seconds: number) {
-    const waiting = this.register(call, item, entry, seconds, 'reported-outcome');
-    this.waits.get(entry.message.id)?.start();
-    // The host owns message admission. Callers run their usual human-priority
-    // checks before admitting a previously buffered report.
-    return waiting;
-  }
   approvalDialog(open: boolean) {
     this.dialog = open;
     for (const wait of this.waits.values()) {
       if (open) wait.suspend();
-      else if (wait.mode === 'reported-outcome' || this.runtime.entry(wait.item.request!)?.state === 'accepted') wait.start();
+      else if (this.runtime.entry(wait.item.request!)?.state === 'accepted') wait.start();
     }
   }
   sent(id: string, state: Entry['state'], code?: string) {
@@ -61,61 +49,15 @@ export class Asks {
     if (state === 'accepted') wait.start();
     else { wait.item.code = code; wait.finish(state); }
   }
-  // A plain reply anywhere down the original reply chain must be surfaced to the
-  // caller. Without a report it cannot be treated as completion or held forever.
-  private nearestWaitForPlainReply(entry: Entry) {
-    const seen = new Set<string>();
-    let parent = entry.message.replyTo;
-    while (parent && !seen.has(parent)) {
-      seen.add(parent);
-      const prior = this.runtime.entry(parent)?.message;
-      if (!prior || prior.exchange !== entry.message.exchange) return undefined;
-      // When both original and follow-up requests are watched, use the
-      // closest ancestor that was actually addressed to this replying peer.
-      const wait = this.waits.get(parent);
-      if (wait?.mode === 'reported-outcome' && wait.item.peer === entry.message.from) return wait;
-      parent = prior.replyTo;
-    }
-    return undefined;
-  }
   admit() {
     for (const id of this.runtime.eligible()) {
       if (this.claims.has(id)) continue;
       const entry = this.runtime.entry(id)!;
-      const direct = entry.message.replyTo && this.waits.get(entry.message.replyTo);
-      if (direct?.mode === 'first-reply' && direct.item.peer === entry.message.from) {
-        direct.finish('replied', id); continue;
-      }
-      const report = entry.message.report;
-      if (report) {
-        const wait = this.waits.get(report.request);
-        const original = this.runtime.entry(report.request)?.message;
-        if (wait?.mode === 'reported-outcome' && wait.item.peer === entry.message.from &&
-            !entry.reportLinkage && original?.exchange === entry.message.exchange) {
-          const outcome = report.state === 'complete' ? 'reported-complete' :
-            report.state === 'needs-input' ? 'needs-input' :
-            report.state === 'blocked' ? 'blocked' : undefined;
-          if (outcome) wait.finish(outcome, id);
-        }
-        // Progress updates and reports on other requests remain normal intake;
-        // neither can silently settle a different wait.
-        continue;
-      }
-      const wait = this.nearestWaitForPlainReply(entry);
-      if (wait) wait.finish('replied', id); // Unclassified reply, not completion.
+      const wait = entry.message.replyTo && this.waits.get(entry.message.replyTo);
+      if (wait && wait.item.peer === entry.message.from) wait.finish('replied', id);
     }
   }
-  claimed(id: string) {
-    if (this.claims.has(id)) return true;
-    const entry = this.runtime.entry(id);
-    const report = entry?.message.report;
-    // Keep nonterminal progress in the existing intake queue while an outcome
-    // wait runs, rather than waking the model midway through that tool call.
-    // Once the wait ends the message becomes eligible for normal admission.
-    if (report?.state !== 'progress' || entry?.reportLinkage) return false;
-    const waiting = this.waits.get(report.request);
-    return waiting?.mode === 'reported-outcome' && waiting.item.peer === entry.message.from;
-  }
+  claimed(id: string) { return this.claims.has(id); }
   end(reason: AskOutcome, call?: string, peer?: string) {
     for (const [id, operation] of this.calls) {
       if (call && id !== call || operation.presented) continue;
@@ -131,11 +73,10 @@ export class Asks {
   }
   project(call: string, seconds: number) {
     const operation = this.calls.get(call)!;
-    return { timeoutSeconds: seconds, ...(operation.mode === 'reported-outcome' ? { waitFor: 'reported-outcome' as const } : {}),
-      items: operation.items.map(item => ({ ...item,
-        outcome: item.outcome ?? operation.ended ?? 'not-sent',
-        ...(item.reply ? { response: this.runtime.inspect({ message: item.reply }) } : {}),
-      })) };
+    return { timeoutSeconds: seconds, items: operation.items.map(item => ({ ...item,
+      outcome: item.outcome ?? operation.ended ?? 'not-sent',
+      ...(item.reply ? { response: this.runtime.inspect({ message: item.reply }) } : {}),
+    })) };
   }
   present(call: string, source = 'native ask result context admission') {
     const operation = this.calls.get(call);

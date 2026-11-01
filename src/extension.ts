@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import { Runtime, type Entry } from './runtime.ts';
-import { Asks, type AskItem, type WaitFor } from './ask.ts';
+import { Asks, type AskItem } from './ask.ts';
 import { modelView } from './model-view.ts';
 import { peerActivity, requestOutcomeLabel, messageContextLines } from './communication-view.ts';
 import { Id, EnvelopeSchema, MessageInput, AskInput, PeersInput, InspectInput, Output, validate } from './schema.ts';
@@ -151,11 +151,11 @@ export default function comms(pi: ExtensionAPI) {
     if (line !== lastStatus) { ctx.ui.setStatus('comms', line); lastStatus = line; }
   }
   function name(id: string) { return id === runtime?.self ? ctx?.sessionManager.getSessionName() ?? 'You' : peerNames.get(id) ?? runtime?.known().find(p => p.id === id)?.name ?? id; }
-  function card(entry: Entry): CardMessage {
+  function card(entry: Entry, reportNote = ''): CardMessage {
     const m = entry.message;
     const kinds = entry.facts.map(f => f.kind);
     const fact = kinds.includes('saved') ? 'saved' : kinds.includes('posted') ? 'posted' : kinds.includes('queued') ? 'queued' : 'unknown';
-    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, workRef: m.workRef, recipientLabel: m.recipientLabel, report: m.report, structured: m.structured, reportLinkage: entry.reportLinkage, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
+    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, workRef: m.workRef, recipientLabel: m.recipientLabel, report: m.report, structured: m.structured, reportLinkage: entry.reportLinkage, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + reportNote + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
   }
   function pump(busyBoundary = false) {
     if (!ctx || !runtime || runtime.paused || approvalDialog || ctx.hasPendingMessages() || (ctx.hasUI && ctx.ui.getEditorText().length)) return;
@@ -169,12 +169,24 @@ export default function comms(pi: ExtensionAPI) {
       ids.push(id); bytes += size;
     }
     if (!ids.length) return;
-    const entries = ids.map(id => runtime!.entry(id)!);
-    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${messageContextLines(e.message).map(line => `${line}\n`).join('')}${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.reportLinkage ? 'Reported request is unavailable; work report link unverified.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nMessage ID: ${e.message.id} (use as report.request when reporting on this request)\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
+    const plan = runtime.planIntake(ids);
+    // Progress-only traffic is retained in inspection without starting a turn.
+    // All questions, final outcomes and corrections still use the normal Pi path.
+    if (!plan.deliver.length) {
+      runtime.summarized(plan.summarized);
+      status();
+      return;
+    }
+    const entries = plan.deliver;
+    const deliveredIds = entries.map(entry => entry.message.id);
+    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${messageContextLines(e.message).map(line => `${line}\n`).join('')}${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.reportLinkage ? 'Reported request is unavailable; work report link unverified.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${runtime!.reportNote(e)}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nMessage ID: ${e.message.id} (use as report.request when reporting on this request)\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
     if (!busyBoundary) wakeReserved = true;
     try {
-      pi.sendMessage({ customType: 'comms_batch', display: true, content, details: { messages: entries.map(e => ({ ...card(e), fact: 'posted' })), ids } }, busyBoundary ? { deliverAs: 'steer' } : { triggerTurn: true });
-      runtime.posted(ids);
+      pi.sendMessage({ customType: 'comms_batch', display: true, content,
+        details: { messages: entries.map(e => ({ ...card(e, runtime!.reportNote(e)), fact: 'posted' })), ids: deliveredIds } },
+        busyBoundary ? { deliverAs: 'steer' } : { triggerTurn: true });
+      runtime.posted(deliveredIds);
+      runtime.summarized(plan.summarized);
     } catch (error) { wakeReserved = false; ctx.ui.notify(`pi-comms could not post batch: ${String(error)}`, 'error'); }
     status();
   }
@@ -379,8 +391,7 @@ export default function comms(pi: ExtensionAPI) {
           response?: { message: { report?: { request: string; state: string } }; reportLinkage?: 'context-lost'; linkage?: 'context-lost' };
         }) => {
           const report = item.response?.message.report;
-          const label = body.data.waitFor === 'reported-outcome' && item.outcome === 'replied' ? 'Reply received (no reported outcome)' : requestOutcomeLabel(item.outcome);
-          const outcome = `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${label}`;
+          const outcome = `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}`;
           if (!report) return outcome;
           const differentRequest = report.request !== item.request ? ` (not this ask${item.request ? ` ${item.request}` : ''})` : '';
           const linkWarning = item.response?.reportLinkage ? ' · Reported request unavailable: link unverified' : '';
@@ -415,56 +426,35 @@ export default function comms(pi: ExtensionAPI) {
       if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
       return sent;
     }, true), renderResult });
-  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 peers: {requests:[...]} sends new requests and defaults to first-reply waiting. Set waitFor:"reported-outcome" for complete/blocked/needs-input reports; progress alone does not end waiting, plain clarifications still return. {outcomes:[originalRequestId,...]} waits on existing requests without resending. Timeout or interruption ends only local waiting; never automatically retry.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 existing peers: {requests:[{to,subject,text,workRef?,recipientLabel?},...],timeoutSeconds?}. Optional workRef groups each exchange; labels describe recipients, not authority. Returns the first linked reply (possibly clarification) or local ending, not work completion. Wait starts after acceptance; late replies remain possible. Never automatically resend.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
     execute: async (call, input, signal) => run(async () => {
       validate(AskInput, input);
       const current = runtime!, pending = asks!;
       const seconds = input.timeoutSeconds ?? 60;
-      const mode: WaitFor = input.outcomes || input.waitFor === 'reported-outcome' ? 'reported-outcome' : 'first-reply';
-      const items: AskItem[] = (input.requests ?? input.outcomes ?? []).map(() => ({}));
-      pending.open(call, items, mode);
+      const items: AskItem[] = input.requests.map(() => ({}));
+      pending.open(call, items);
       const stop = new AbortController(); askStops.set(call, stop);
       const abort = signal ? AbortSignal.any([signal, stop.signal, lifetime.signal]) : AbortSignal.any([stop.signal, lifetime.signal]);
       const interrupted = () => pending.end(pending.ended(call) ?? 'interrupted', call);
       abort.addEventListener('abort', interrupted, { once: true });
       if (abort.aborted) interrupted();
       try {
-        if (input.outcomes) {
-          await Promise.all(input.outcomes.map(async (requestId, index) => {
-            const item = items[index]; item.request = requestId;
-            try {
-              const entry = current.entry(requestId);
-              if (!entry || entry.message.from !== current.self) {
-                item.outcome = 'context-lost'; item.code = 'Outgoing request not available in this runtime.'; return;
-              }
-              item.peer = entry.message.to; item.subject = entry.message.subject; item.workRef = entry.message.workRef;
-              if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
-              if (current.paused) { item.outcome = 'paused'; return; }
-              if (!current.isApproved(entry.message.to)) { item.outcome = 'revoked'; return; }
-              await pending.watch(call, item, entry, seconds);
-            } catch (error) {
-              item.outcome = pending.ended(call) ?? 'unknown';
-              item.code = error instanceof Error ? error.message : String(error);
-            }
-          }));
-        } else {
-          await Promise.all(input.requests!.map(async (request, index) => {
-            const item = items[index];
-            try {
-              const resolved = await prepareSend(request, abort, item);
-              if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
-              if (current.paused) { item.outcome = 'paused'; return; }
-              let waiting: Promise<void> | undefined;
-              const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds, mode); });
-              const dispatched = sending.then(sent => { pending.sent(sent.message.id, sent.state, sent.code); admitAsks(); });
-              if (waiting) { void dispatched.catch(() => pending.end('unknown', call)); await waiting; }
-              else await dispatched;
-            } catch (error) {
-              item.outcome = pending.ended(call) ?? 'not-sent';
-              item.code = error instanceof Error ? error.message : String(error);
-            }
-          }));
-        }
+        await Promise.all(input.requests.map(async (input, index) => {
+          const item = items[index];
+          try {
+            const resolved = await prepareSend(input, abort, item);
+            if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
+            if (current.paused) { item.outcome = 'paused'; return; }
+            let waiting: Promise<void> | undefined;
+            const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds); });
+            const dispatched = sending.then(sent => { pending.sent(sent.message.id, sent.state, sent.code); admitAsks(); });
+            if (waiting) { void dispatched.catch(() => pending.end('unknown', call)); await waiting; }
+            else await dispatched;
+          } catch (error) {
+            item.outcome = pending.ended(call) ?? 'not-sent';
+            item.code = error instanceof Error ? error.message : String(error);
+          }
+        }));
         return pending.project(call, seconds);
       } finally { abort.removeEventListener('abort', interrupted); askStops.delete(call); }
     }), renderResult });

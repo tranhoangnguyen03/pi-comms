@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, InspectInput } from './schema.ts';
 import type { Attempt } from './session-send.ts';
 
-export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'saved' | 'rejected'; at: string; source: string; evidenceRef?: string };
+export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
 export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost' };
 export type Approval = { id: string; name: string; context: string };
@@ -125,6 +125,56 @@ export class Runtime {
     this.waiting = this.waiting.filter(id => !posted.has(id));
     ids.forEach(id => this.fact(id, 'posted', source));
   }
+  // An incoming progress report remains in the authoritative record and
+  // inspection, but need not create a separate model turn. This is not "posted".
+  summarized(ids: string[]) {
+    const done = new Set(ids);
+    this.waiting = this.waiting.filter(id => !done.has(id));
+    ids.forEach(id => this.fact(id, 'summarized', 'request-aware intake'));
+  }
+  private reportsFor(requestId: string, audience: 'agent' | 'human' = 'agent') {
+    const request = this.records.get(requestId)?.message;
+    if (!request || request.from !== this.self) return [];
+    return [...this.records.values()].filter(entry => entry.message.report?.request === requestId &&
+      entry.message.from === request.to && entry.message.exchange === request.exchange &&
+      !entry.reportLinkage && this.visible(entry, audience));
+  }
+  // Project from existing records, never a second work-status store. An
+  // actionable report remains current even if a late progress update arrives.
+  reportState(requestId: string, audience: 'agent' | 'human' = 'agent') {
+    const reports = this.reportsFor(requestId, audience);
+    const lastActionable = [...reports].reverse().find(e => e.message.report?.state !== 'progress');
+    const current = lastActionable ?? reports.at(-1);
+    const laterProgressCount = lastActionable
+      ? reports.slice(reports.indexOf(lastActionable) + 1).filter(e => e.message.report?.state === 'progress').length : 0;
+    return { reports, current, laterProgressCount };
+  }
+  reportNote(entry: Entry) {
+    const report = entry.message.report;
+    if (!report || entry.reportLinkage) return '';
+    const { reports, current } = this.reportState(report.request);
+    const earlier = reports.slice(0, reports.findIndex(e => e.message.id === entry.message.id));
+    const progress = earlier.filter(e => e.message.report?.state === 'progress').length;
+    const previousActions = earlier.filter(e => e.message.report?.state !== 'progress');
+    const parts = [];
+    if (progress) parts.push(`${progress} earlier progress report(s) retained in inspection`);
+    if (previousActions.length) parts.push(`earlier peer state: ${previousActions.at(-1)!.message.report!.state}`);
+    if (current && current.message.id !== entry.message.id) parts.push(`a later actionable state (${current.message.report!.state}) is on record`);
+    return parts.length ? `Report history for request ${report.request}: ${parts.join('; ')}.\n` : '';
+  }
+  // One intake route: deliver all useful messages and every actionable peer
+  // report. Fold only progress reports into inspection so an old progress update
+  // cannot wake the lead after a later completion or correction.
+  planIntake(ids: string[]) {
+    const deliver: Entry[] = [], summarized: string[] = [];
+    for (const id of ids) {
+      const entry = this.records.get(id);
+      if (!entry || !this.waiting.includes(id) || !this.isApproved(entry.message.from)) continue;
+      if (entry.message.report?.state === 'progress' && !entry.reportLinkage) summarized.push(id);
+      else deliver.push(entry);
+    }
+    return { deliver, summarized };
+  }
   private visible(entry: Entry, audience: 'agent' | 'human') { return audience === 'human' || entry.message.from === this.self || this.isApproved(entry.message.from); }
   private project(entry: Entry, audience: 'agent' | 'human') {
     if (!this.visible(entry, audience)) {
@@ -163,19 +213,23 @@ export class Runtime {
       const replies = records.filter(entry => entry.message.replyTo === id && entry.message.from === request.message.to);
       // The final report may reply to a later clarification in the same exchange.
       // Its explicit original-request link is separate from direct replyTo tracking.
-      const reports = records.filter(entry => entry.message.report?.request === id &&
-        entry.message.from === request.message.to && entry.message.exchange === request.message.exchange &&
-        !entry.reportLinkage && this.visible(entry, audience));
+      const { reports, current, laterProgressCount } = this.reportState(id, audience);
       return { request: id, peer: request.message.to, subject: request.message.subject, workRef: request.message.workRef ?? null, state: request.state,
         code: request.code, outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
         responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)),
-        reportCount: reports.length, ...(reports.length ? { latestReport: this.project(reports.at(-1)!, audience) } : {}) };
+        reportCount: reports.length, ...(reports.length ? { latestReport: this.project(reports.at(-1)!, audience) } : {}),
+        ...(current ? { currentReport: this.project(current, audience) } : {}),
+        ...(laterProgressCount ? { laterProgressCount } : {}) };
     }) };
     if (input.peer || input.workRef || !input.exchange && !input.queue && !input.outbox) {
       const latest = new Map<string, Entry>();
       for (const entry of records) {
         if (input.peer && entry.message.from !== input.peer && entry.message.to !== input.peer) continue;
         if (input.workRef && (entry.message.workRef !== input.workRef || !this.visible(entry, audience))) continue;
+        // A late progress report does not replace a more useful final/corrective
+        // report as the exchange preview. Its full record stays inspectable.
+        if (entry.message.report?.state === 'progress' && this.reportState(entry.message.report.request, audience)
+          .current?.message.report?.state !== 'progress') continue;
         latest.delete(entry.message.exchange); latest.set(entry.message.exchange, entry);
       }
       const exchanges = [...latest.values()].reverse().map(entry => {

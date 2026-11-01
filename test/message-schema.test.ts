@@ -13,10 +13,6 @@ function checkSchemas(schemas: any[]) {
   const [message, ask] = schemas;
   assert.deepEqual(message.required, ['text']);
   assert.deepEqual(ask.properties.requests.items.required, ['text']);
-  assert.ok(ask.properties.outcomes, 'provider schema exposes watch-only outcome IDs');
-  assert.ok(ask.properties.waitFor, 'provider schema exposes optional reported-outcome mode');
-  assert.ok(Check(ask, { outcomes: ['12345678-1234-1234-1234-123456789abc'] }));
-  assert.ok(Check(ask, { requests: [send], waitFor: 'reported-outcome' }));
   for (const input of [send, reply, { ...send, workRef: 'AUTH-42', recipientLabel: 'Security reviewer' },
     { ...send, structured: { effort: 3, tests: [true, false] } },
     { ...reply, report: { request: reply.respondTo, state: 'complete' }, structured: { tests_passing: true, finding_count: 2 } },

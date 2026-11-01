@@ -240,99 +240,85 @@ test('actual collapsed ask renderer names the original report target after a cla
   } finally { await reviewer.close(); await lead.close(); }
 });
 
-test('reported-outcome ask surfaces questions, then watches original request without resending', async () => {
-  const lead = await participant('outcome-lead'), reviewer = await participant('outcome-reviewer');
+test('native Pi delivers actionable request reports while grouping progress without extra wakes', async () => {
+  const lead = await participant('report-delivery-lead'), reviewer = await participant('report-delivery-reviewer');
   try {
     lead.confirm(true);
-    const waiting = lead.tool('comms_ask', {
-      requests: [{ to: reviewer.id(), subject: 'Retry review', text: 'Check write safety. Report needs-input, blocked or complete with the original request ID.', workRef: 'AUTH-42' }],
-      waitFor: 'reported-outcome', timeoutSeconds: 4,
-    });
-    const original = async () => {
-      const outbox = data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items;
-      return outbox.find((item: any) => item.message.subject === 'Retry review');
-    };
-    await waitFor(async () => !!await original());
-    const request = (await original())!.message;
-    await waitFor(async () => data(await reviewer.tool('comms_inspect', { message: request.id })).ok);
-    const received = data(await reviewer.tool('comms_inspect', { message: request.id })).data;
+    const first = data(await lead.tool('comms_message', {
+      to: reviewer.id(), subject: 'Report intake review', text: 'Review retry behavior and report findings.',
+      workRef: 'AUTH-42', recipientLabel: 'Security reviewer',
+    }));
+    assert.equal(first.ok, true);
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('Report intake review')));
+    const initial = data(await reviewer.tool('comms_inspect', { message: first.data.message.id })).data;
+
     const progress = data(await reviewer.tool('comms_message', {
-      respondTo: received.returnHandle, text: 'Checking cases',
-      report: { request: request.id, state: 'progress' },
+      respondTo: initial.returnHandle, text: 'M2C_PROGRESS_ONLY',
+      report: { request: first.data.message.id, state: 'progress' },
     }));
     assert.equal(progress.ok, true);
-    let finished = false; void waiting.then(() => { finished = true; });
-    await new Promise(r => setTimeout(r, 40));
-    assert.equal(finished, false, 'progress alone must not finish a final-outcome wait');
-
-    const question = data(await reviewer.tool('comms_message', {
-      respondTo: received.returnHandle, text: 'Should writes be retried?',
-      report: { request: request.id, state: 'needs-input' },
-    }));
-    assert.equal(question.ok, true);
-    const first = data(await waiting).data;
-    assert.equal(first.waitFor, 'reported-outcome');
-    assert.equal(first.items[0].outcome, 'needs-input');
-    assert.equal(first.items[0].response.message.report.request, request.id);
-    const answer = data(await lead.tool('comms_message', {
-      respondTo: first.items[0].response.returnHandle, text: 'Only retry idempotent reads.',
-    }));
-    assert.equal(answer.ok, true);
-    await waitFor(async () => data(await reviewer.tool('comms_inspect', { message: answer.data.message.id })).ok);
-    const receivedAnswer = data(await reviewer.tool('comms_inspect', { message: answer.data.message.id })).data;
-    const before = data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items.length;
-
-    const resumed = lead.tool('comms_ask', { outcomes: [request.id], timeoutSeconds: 4 });
-    const complete = data(await reviewer.tool('comms_message', {
-      respondTo: receivedAnswer.returnHandle, text: 'Confirmed the unsafe retry.',
-      report: { request: request.id, state: 'complete' },
-      structured: { finding_count: 1 },
-    }));
-    assert.equal(complete.ok, true);
-    const final = data(await resumed).data;
-    assert.equal(final.waitFor, 'reported-outcome');
-    assert.equal(final.items[0].outcome, 'reported-complete');
-    assert.equal(final.items[0].request, request.id);
-    assert.equal(final.items[0].response.message.id, complete.data.message.id);
-    assert.equal(data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items.length, before,
-      'outcomes must not send new messages or duplicate work');
-  } finally { await reviewer.close(); await lead.close(); }
-});
-
-test('resumed outcome wait keeps pending human editor input ahead of a buffered peer report', async () => {
-  const lead = await participant('wait-priority-lead'), reviewer = await participant('wait-priority-reviewer');
-  try {
-    lead.confirm(true);
-    const sent = data(await lead.tool('comms_message', {
-      to: reviewer.id(), subject: 'Human-priority review', text: 'Report your result.'
-    })).data;
-    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('Human-priority review')));
-    const initial = data(await reviewer.tool('comms_inspect', { message: sent.message.id })).data;
-
-    lead.draft('My human instruction is not yet submitted');
-    const report = data(await reviewer.tool('comms_message', {
-      respondTo: initial.returnHandle, text: 'Reviewed the request',
-      report: { request: sent.message.id, state: 'complete' },
-    })).data;
+    await waitFor(async () => data(await lead.tool('comms_inspect', { message: progress.data.message.id })).ok);
     await waitFor(async () => {
-      const items = data(await lead.tool('comms_inspect', { queue: 'self' })).data.items;
-      return items.some((entry: any) => entry.message.id === report.message.id);
+      const snapshot = data(await lead.tool('comms_inspect', { message: progress.data.message.id })).data;
+      return snapshot.facts?.some((fact: any) => fact.kind === 'summarized');
     });
-    const before = data(await lead.tool('comms_inspect', { queue: 'self' })).data.items;
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_PROGRESS_ONLY')), false,
+      'progress-only messages must not wake the model');
     assert.equal(lead.runtime.session.sessionManager.getEntries().some((entry: any) =>
       entry.type === 'custom_message' && entry.customType === 'comms_batch' &&
-      entry.details?.ids?.includes(report.message.id)), false, 'human draft prevents model admission');
-    assert.ok(before.some((entry: any) => entry.message.id === report.message.id),
-      'human draft keeps the message in the receiver queue');
+      entry.details?.ids?.includes(progress.data.message.id)), false,
+    'progress was not falsely posted to Pi');
 
-    const wait = data(await lead.tool('comms_ask', {
-      outcomes: [sent.message.id], timeoutSeconds: .2,
-    })).data;
-    assert.equal(wait.items[0].outcome, 'interrupted', 'human draft takes priority over a resumed outcome wait');
-    assert.equal(wait.items[0].reply, undefined);
-    const after = data(await lead.tool('comms_inspect', { queue: 'self' })).data.items;
-    assert.ok(after.some((entry: any) => entry.message.id === report.message.id),
-      'interrupted outcome wait must not consume the held report');
+    const completed = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_FINAL_FINDING',
+      report: { request: first.data.message.id, state: 'complete' },
+      structured: { finding_count: 1 },
+    }));
+    assert.equal(completed.ok, true);
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('M2C_FINAL_FINDING')));
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_PROGRESS_ONLY')), false,
+      'a final report summarizes progress without replaying stale progress content');
+
+    const batches = lead.runtime.session.sessionManager.getEntries().filter((entry: any) =>
+      entry.type === 'custom_message' && entry.customType === 'comms_batch') as any[];
+    const shown = batches.find((entry: any) => entry.details?.ids?.includes(completed.data.message.id));
+    assert.ok(shown);
+    assert.match(shown.content, /1 earlier progress report/);
+    assert.equal(shown.details.messages[0].report.state, 'complete');
+    assert.match(shown.details.messages[0].text, /1 earlier progress report/);
+
+    const late = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_LATE_PROGRESS',
+      report: { request: first.data.message.id, state: 'progress' },
+    }));
+    assert.equal(late.ok, true);
+    await waitFor(async () => {
+      const snapshot = data(await lead.tool('comms_inspect', { message: late.data.message.id })).data;
+      return snapshot?.facts?.some((fact: any) => fact.kind === 'summarized');
+    });
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_LATE_PROGRESS')), false);
+
+    const afterLate = data(await lead.tool('comms_inspect', { requests: [first.data.message.id] })).data.responses[0];
+    assert.equal(afterLate.latestReport.message.id, late.data.message.id);
+    assert.equal(afterLate.currentReport.message.id, completed.data.message.id);
+    assert.equal(afterLate.laterProgressCount, 1);
+
+    lead.draft('The user is writing something; peer reports must wait.');
+    const correction = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_CORRECTION_BLOCKED',
+      report: { request: first.data.message.id, state: 'blocked' },
+    }));
+    assert.equal(correction.ok, true);
+    await waitFor(async () => data(await lead.tool('comms_inspect', { queue: 'self' })).data.items.some(
+      (entry: any) => entry.message.id === correction.data.message.id));
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_CORRECTION_BLOCKED')), false,
+      'draft text takes priority over peer correction');
+    lead.draft('');
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('M2C_CORRECTION_BLOCKED')));
+    const final = data(await lead.tool('comms_inspect', { requests: [first.data.message.id] })).data.responses[0];
+    assert.equal(final.currentReport.message.report.state, 'blocked');
+    assert.equal(final.currentReport.message.id, correction.data.message.id);
+    assert.equal(final.reportCount, 4);
   } finally { lead.draft(''); await reviewer.close(); await lead.close(); }
 });
 

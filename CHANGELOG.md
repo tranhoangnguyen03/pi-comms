@@ -1,13 +1,12 @@
 # Changelog
 
-## [0.1.6] - 2026-11-01
+## [0.1.6] - 2026-11-02
 
-- Add optional `waitFor:"reported-outcome"` to `comms_ask({requests:[...]})`. A peer's `complete`, `blocked` or `needs-input` report on the exact request ends that wait; ordinary replies also return promptly without implying completion.
-- Add `comms_ask({outcomes:[originalOutgoingRequestId,...]})` to wait for new reports on existing work after clarification, without re-sending the request. Waits stay tied to exact session and request identities.
-- Keep the default first-linked-reply ask unchanged. Progress-only reports do not end outcome waits. Human interruption, Pause, revocation, timeout and disconnection still end only the local wait; late messages remain available.
-- Preserve reported outcomes and first-reply semantics in plain and structured results, on-demand guidance and collapsed human cards, without adding tools, state stores or an acceptance workflow.
-- Verify requested-outcome and existing-request waiting through focused runtime tests and native Pi integration; include recovery and duplicate-wait checks.
-- Keep outcome-watch admission behind existing human-priority checks, and route unclassified replies to the closest matching active request in a clarification chain. Trim the ask tool guidance while keeping long recipes on demand.
+- Deliver request-linked questions, blocked reports, completion reports and later corrections automatically through the existing human-first incoming-message path. No new ask mode or follow-up waiting call.
+- Keep progress-only reports in the existing communication record and inspection without waking the model. Group the progress history with the next actionable report; retain exact original messages and source evidence.
+- Preserve the last actionable peer-reported state when later progress arrives. Expose both the latest received report and current reported state in request inspection, noting any later progress. A later blocked or complete report updates that state; no peer claim becomes requester acceptance.
+- Keep `comms_ask`'s existing first-linked-reply behavior and all four agent tools unchanged. Preserve approval, Pause, human-input priority and exact request/peer linkage.
+- Verify automatic delivery and no-progress wake, late progress after completion, corrections, held/unapproved intake, native cards and installed Pi behavior.
 
 ## [0.1.5] - 2026-11-01
 
