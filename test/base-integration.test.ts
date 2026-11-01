@@ -189,7 +189,7 @@ test('actual provider request contains registered tool properties without networ
     assert.match(roster.nextAction, /load pi-comms.*share the broker agent directory.*intercom-only/);
     await a.command('status'); assert.match(a.notifications.at(-1)!, /Broker:/);
     await a.runtime.session.prompt('synthetic schema capture');
-    assert.match(JSON.stringify(a.observed[0]), /Do not send courtesy, formality, acknowledgement-only or closing messages/);
+    assert.match(JSON.stringify(a.observed[0]), /Send only necessary requests, questions, findings, corrections or material updates/);
     let captured: any;
     const model = a.models.getModel('openai', 'gpt-5.4-mini')!;
     const response = await a.models.streamSimple(model, { messages: a.observed[0] } as any, {
