@@ -93,6 +93,7 @@ test('progress is not final; blocked and timeout are distinct from requester acc
     text: 'Review is halfway', report: { request: sent.message.id, state: 'progress' } });
   lead.receive(b, fromB[0]); asks.admit();
   assert.equal(item.outcome, undefined, 'progress alone does not finish an outcome wait');
+  assert.equal(asks.claimed(fromB[0].id), true, 'progress cannot wake the model while the selected outcome wait runs');
   await reviewer.send({ respondTo: reviewer.entry(sent.message.id)!.returnHandle!,
     text: 'Tests unavailable', report: { request: sent.message.id, state: 'blocked' } });
   lead.receive(b, fromB[1]); asks.admit(); await pending;
@@ -100,6 +101,7 @@ test('progress is not final; blocked and timeout are distinct from requester acc
   assert.equal(item.reply, fromB[1].id);
   assert.equal(lead.waiting.includes(fromB[0].id), true, 'progress stays available for ordinary intake');
   asks.present('progress');
+  assert.equal(asks.claimed(fromB[0].id), false, 'progress returns to normal intake after the wait');
   const later: AskItem = {}; asks.open('timeout', [later], 'reported-outcome');
   const wait = asks.watch('timeout', later, lead.entry(sent.message.id)!, .05);
   await wait;

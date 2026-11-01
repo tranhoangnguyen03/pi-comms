@@ -108,7 +108,17 @@ export class Asks {
       }
     }
   }
-  claimed(id: string) { return this.claims.has(id); }
+  claimed(id: string) {
+    if (this.claims.has(id)) return true;
+    const entry = this.runtime.entry(id);
+    const report = entry?.message.report;
+    // Keep nonterminal progress in the existing intake queue while an outcome
+    // wait runs, rather than waking the model midway through that tool call.
+    // Once the wait ends the message becomes eligible for normal admission.
+    if (report?.state !== 'progress' || entry?.reportLinkage) return false;
+    const waiting = this.waits.get(report.request);
+    return waiting?.mode === 'reported-outcome' && waiting.item.peer === entry.message.from;
+  }
   end(reason: AskOutcome, call?: string, peer?: string) {
     for (const [id, operation] of this.calls) {
       if (call && id !== call || operation.presented) continue;
