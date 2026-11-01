@@ -4,11 +4,15 @@ import { Check } from 'typebox/value';
 export const Id = Type.String({ pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' });
 const Text = Type.String({ minLength: 1, pattern: '\\S' });
 const Ref = Type.Object({ uri: Text, label: Text }, { additionalProperties: false });
+export const WorkRef = Type.String({ minLength: 1, maxLength: 120, pattern: '\\S' });
+const RecipientLabel = Type.String({ minLength: 1, maxLength: 120, pattern: '\\S' });
 export const MessageInput = Type.Object({
   to: Type.Optional(Type.String({ ...Text, description: 'Native session ID or current exact unique name. Use only for a new exchange.' })),
   subject: Type.Optional(Type.String({ ...Text, description: 'Subject required with to; omit for a reply.' })),
   respondTo: Type.Optional(Type.String({ ...Id, description: 'Reusable return handle from an incoming message. Omit to and subject. Lost on runtime reset.' })),
   text: Type.String({ ...Text, description: 'Full message payload.' }),
+  workRef: Type.Optional(Type.String({ ...WorkRef, description: 'Optional ticket/work reference for a new exchange; replies inherit it. No access control.' })),
+  recipientLabel: Type.Optional(Type.String({ ...RecipientLabel, description: 'Optional role/expertise label for the exact recipient in this exchange. New requests only; sender-supplied context, not authority.' })),
   refs: Type.Optional(Type.Array(Ref, { description: 'Work-product pointers, not uploads.' })),
   corrects: Type.Optional(Type.String({ ...Id, description: 'Your earlier message ID to this same peer, when correcting it.' })),
 }, { additionalProperties: false });
@@ -24,6 +28,7 @@ export const InspectInput = Type.Object({
   message: Type.Optional(Type.String({ ...Id, description: 'Inspect one message and its evidence.' })),
   exchange: Type.Optional(Type.String({ ...Id, description: 'Inspect messages in one exchange.' })),
   peer: Type.Optional(Type.String({ ...Text, description: 'Native ID or current exact unique name; list this peer’s exchanges.' })),
+  workRef: Type.Optional(Type.String({ ...WorkRef, description: 'List exchanges for this exact work reference available to this session; not a shared transcript.' })),
   queue: Type.Optional(Type.Literal('self', { description: 'Inspect waiting intake without consuming it.' })),
   outbox: Type.Optional(Type.Literal('self', { description: 'Inspect outgoing operations and observed facts.' })),
   cursor: Type.Optional(Type.String({ ...Id, description: 'Continuation from exchange, peer, queue or outbox inspection.' })),
@@ -31,6 +36,7 @@ export const InspectInput = Type.Object({
 export type InspectInput = Static<typeof InspectInput>;
 export const EnvelopeSchema = Type.Object({
   id: Id, exchange: Id, subject: Text, text: Text, refs: Type.Array(Ref),
+  workRef: Type.Optional(WorkRef), recipientLabel: Type.Optional(RecipientLabel),
   replyTo: Type.Union([Id, Type.Null()]), corrects: Type.Union([Id, Type.Null()]),
   createdAt: Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}T' }),
 }, { additionalProperties: false });
@@ -42,11 +48,12 @@ export function validate(schema: TSchema, value: unknown) {
     const input = value as MessageInput;
     if (input.respondTo && (input.to !== undefined || input.subject !== undefined)) throw new Error('INVALID_INPUT: reply routing was combined with new-message routing. For a new message use { to, subject, text }; omit respondTo. For a reply use { respondTo, text } with a real incoming return handle; omit to and subject. refs and corrects are optional; use corrects only for a real earlier message ID. No message was sent for this input.');
     if (!input.respondTo && (!input.to || !input.subject)) throw new Error('INVALID_INPUT: new-message routing requires to and subject. Retry with { to, subject, text }, or reply with { respondTo, text }. refs and corrects are optional; never fabricate IDs. No message was sent for this input.');
+    if (input.respondTo && (input.workRef !== undefined || input.recipientLabel !== undefined)) throw new Error('INVALID_INPUT: replies inherit the work reference and cannot assign a recipient label. Use { respondTo, text } without workRef or recipientLabel. No message was sent.');
   }
   if (schema === AskInput) for (const request of (value as AskInput).requests) validate(MessageInput, request);
   if (schema === InspectInput) {
     const input = value as InspectInput;
-    const selectors = ['message', 'exchange', 'peer', 'queue', 'outbox', 'requests'].filter(key => key in input);
+    const selectors = ['message', 'exchange', 'peer', 'workRef', 'queue', 'outbox', 'requests'].filter(key => key in input);
     if (selectors.length > 1 || (input.cursor && (!selectors.length || input.message || input.requests))) throw new Error('INVALID_INPUT: use one selector; cursor requires a paged view');
   }
 }

@@ -14,6 +14,17 @@ Use this skill for multi-step collaboration, not every message. pi-comms connect
 - **Ask several colleagues:** Put independent requests in the same `requests` array. Each starts independently. An unavailable contact does not cancel another item. The default wait ends after 60 seconds per accepted request; a late reply can still arrive.
 - **Continue a conversation:** A received message gives a reusable return handle. Use `comms_message({respondTo:"<actual return handle>", text:"..."})`, omitting `to` and `subject`. Never invent handles.
 
+## Related work and contextual labels
+
+For requests about the same ticket or investigation, add a short work reference. To describe a recipient's role **for that specific exchange**, add a sender-supplied recipient label:
+
+```js
+comms_message({to:"Reviewer", subject:"Retry review", text:"Check duplicate writes.", workRef:"AUTH-42", recipientLabel:"Security reviewer"})
+comms_inspect({workRef:"AUTH-42"})
+```
+
+The label never grants authority, creates a team or changes native tool permissions. `comms_peers` can show labels you supplied for earlier accepted requests. Replies using `respondTo` inherit the work reference automatically; **do not** repeat `workRef` or `recipientLabel` on replies. Work-reference inspection shows only exchanges available and approved in your session, not other agents' private conversations. Use matching 0.1.4+ peers for metadata-bearing sends; uncertain delivery is not proof of a failed send.
+
 ## Clarification and findings
 
 If a colleague asks a question, reply using the handle on its message. The colleague may later send the final findings on the same exchange. Link any correction to your own earlier message only when you have its real ID. The work owner judges completion; a transport receipt or first reply does not prove it.

@@ -18,11 +18,21 @@ comms_ask({requests: [
   {to: "Reviewer C", subject: "Risk review", text: "Check recovery."}
 ], timeoutSeconds: 60})
 comms_inspect({requests: ["<outgoing message ID>", "<outgoing message ID>"]})
+comms_message({to: "Reviewer", subject: "Security review", text: "Check retry safety.", workRef: "AUTH-42", recipientLabel: "Security reviewer"})
+comms_inspect({workRef: "AUTH-42"})
 ```
 
 Send is asynchronous; ask waits for the first linked reply to each independent request. **A reply is not task completion.** Common outputs are plain text; scripts receive matching structured details. For example: a send reports acceptance without promising a reply. An ask reports `Reviewer — Reply received`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
 
 **Do not send courtesy, formality, acknowledgement-only or closing messages. No “thanks”, “you’re welcome”, “understood”, or “standing by” messages. Send only requested information, necessary questions, corrections or material updates. Once the task is satisfied, stop messaging.** This is guidance, not filtering: substantive polite messages, corrections and late useful answers remain allowed.
+
+## Work references and contextual labels
+
+New messages and `comms_ask` requests can include optional `workRef` (such as `"AUTH-42"`) and `recipientLabel` (such as `"Security reviewer"`). The reference groups this exchange with related work. The label describes the **exact recipient for this exchange** as supplied by the sending session. It is neither a global profile nor permission to direct the recipient. Agents may pass labels supplied by their user; organizing packages can use the same fields without managing roles inside pi-comms.
+
+Replies use only `{respondTo,text}` (plus existing optional refs/corrections): the runtime **inherits the exchange's work reference**, and the sender's recipient label stays attached to the original request. `comms_peers` lists recent sender-supplied labels with their exchange and optional work reference; labels may differ between collaborations. `comms_inspect({workRef:"AUTH-42"})` lists exchanges under that exact reference **only from this session's available and approved communication**; use `comms_inspect({exchange:"<actual UUID>"})` to read that exchange. Unapproved contents and references remain unavailable to the agent.
+
+Both `workRef` and `recipientLabel` are optional. Ordinary unscoped messages keep their existing wire format. To use the new metadata with another session, both participants need pi-comms **0.1.4 or later**; older receivers do not understand the added fields and may reject the message. The sender must treat uncertain outcomes as uncertain and never blindly resend. Work references do not persist across runtime resets, confer access, infer task completion or combine transcripts across participants.
 
 ## Presence, message outcomes and recipes
 
@@ -38,7 +48,7 @@ For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. 
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.3.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.4.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -46,13 +56,13 @@ To try without modifying normal Pi settings, use an owned temporary agent direct
 ```sh
 mkdir -p /tmp/comms-try/package
 # Extract the reviewed tarball into /tmp/comms-try/package (npm tarballs contain package/).
-tar -xzf pi-comms-0.1.3.tgz -C /tmp/comms-try
+tar -xzf pi-comms-0.1.4.tgz -C /tmp/comms-try
 PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 ```
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.2` while that version is published). The `0.1.3` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.3`, which is published). The `0.1.4` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 

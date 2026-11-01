@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4] - 2026-11-01
+
+- Add optional `workRef` to new messages and independent asks. Linked replies inherit it, and `comms_inspect({workRef})` groups exchanges visible to the inspecting participant.
+- Add optional `recipientLabel` on new requests to describe a colleague's role in that exchange, not their global identity or authority. Discovery shows requester-supplied labels with their exchange/work context.
+- Show work references and attributed labels in native incoming messages, human cards, tool outputs and inspection; preserve existing unscoped messages and the four-tool API.
+- Validate scope immutability through reply rounds, exact recipient identity, selector privacy and backwards-compatible unscoped wire payloads. Metadata-bearing messages require participating sessions running 0.1.4 or later; mixed-version delivery may be uncertain.
+
 ## [0.1.3] - 2026-11-01
 
 - Report observed working/idle activity and timestamp freshness in peer discovery, separately from connection state. Preserve unknown and offline activity instead of guessing.
