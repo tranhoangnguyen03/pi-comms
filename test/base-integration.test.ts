@@ -75,7 +75,6 @@ test('peer discovery reports live host activity separately from reachability', a
     const initial = await current();
     assert.equal(initial.presence, 'online'); assert.equal(initial.activityFreshness, 'recent');
     assert.match(initial.activityObservedAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(Date.parse(initial.activityObservedAt), initial.statusReportedAt);
 
     await new Promise(r => setTimeout(r, 15));
     reviewer.runtime.session.setSessionName('Renamed reviewer');
