@@ -74,7 +74,7 @@ test('peer discovery reports live host activity separately from reachability', a
     await waitFor(async () => (await current())?.activity === 'idle');
     const initial = await current();
     assert.equal(initial.presence, 'online'); assert.equal(initial.activityFreshness, 'recent');
-    assert.match(initial.activityObservedAt, /^\\d{4}-\\d{2}-\\d{2}T/);
+    assert.match(initial.activityObservedAt, /^\d{4}-\d{2}-\d{2}T/);
 
     reviewer.hold(true);
     const running = reviewer.runtime.session.prompt('Review the current work without changing any files.');
