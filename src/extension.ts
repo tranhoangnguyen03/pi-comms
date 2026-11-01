@@ -381,7 +381,7 @@ export default function comms(pi: ExtensionAPI) {
           const report = item.response?.message.report;
           const outcome = `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}`;
           if (!report) return outcome;
-          const differentRequest = report.request !== item.request ? ' (not this ask)' : '';
+          const differentRequest = report.request !== item.request ? ` (not this ask${item.request ? ` ${item.request}` : ''})` : '';
           const linkWarning = item.response?.reportLinkage ? ' · Reported request unavailable: link unverified' : '';
           const replyWarning = item.response?.linkage ? ' · Reply link unavailable' : '';
           return `${outcome} · Peer reports ${report.state} on request ${report.request}${differentRequest} (not requester acceptance)${linkWarning}${replyWarning}`;

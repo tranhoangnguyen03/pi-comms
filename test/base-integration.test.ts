@@ -225,10 +225,11 @@ test('actual collapsed ask renderer names the original report target after a cla
       { expanded: false } as any, { fg: (_: string, value: string) => value } as any).render(190).join('\n');
 
     const collapsed = render(result.details);
-    assert.match(collapsed, /Follow-up B/);
+    assert.match(collapsed, /Original review A/);
     assert.match(collapsed, /Peer reports complete/);
     assert.ok(collapsed.includes(original.message.id), 'render must show report.request, not only the current ask');
     assert.match(collapsed, /not this ask/);
+    assert.ok(collapsed.includes(bMessage.id), 'the compact view should identify both requests');
     assert.match(collapsed, /not requester acceptance/);
 
     const unverified = structuredClone(result.details) as any;
