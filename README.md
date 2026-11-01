@@ -44,9 +44,21 @@ A reply may also include `report: {request:"<original request message ID>",state
 
 The original request ID appears in the recipient's incoming message as **Message ID**. The `respondTo` return handle is a separate value. A report must refer to a request actually received from this colleague in the **same exchange**. After a clarification round, reply using the current handle but continue to reference the original request ID in `report.request`. The collapsed ask view names **the reported request**, distinguishes it from the current ask when different, and warns when the report link is unverified. `comms_inspect({requests:[...]})` exposes the latest verified report and how many reports the peer sent, separate from direct reply progress—even when the report replies to a later clarification. Unknown original request records are marked unverified rather than accepted as evidence.
 
-Reports and structured data appear in ordinary human/model views and structured tool output. Contact revocation still withholds message content from the agent. `comms_ask` continues to wait for the **first linked reply**; it does not wait for the final report. Choosing to wait for a reported outcome belongs to the later M2-C milestone.
+Reports and structured data remain available in human inspection and tool output. Contact revocation still withholds message content from the agent. `comms_ask` continues to wait for the **first linked reply**; it does not wait for the final report. Later peer reports follow the normal incoming path, with progress-only updates grouped rather than forcing extra model turns.
 
 New `report` and `structured` fields require **pi-comms 0.1.5 or later on both participating sessions**. Older peers may reject these messages; report an uncertain delivery rather than retrying blindly. Conversations and report links remain memory-only until a separate durability milestone.
+
+## Automatic request-aware outcome delivery (0.1.6+)
+
+No new commands or waiting modes are required. Use `comms_message` to send work without waiting, or ordinary `comms_ask` when the **first reply** is needed. After that, the colleague can use the existing reply handle and optional `report` field to send questions, findings and outcomes. pi-comms delivers useful follow-ups through its **normal incoming-message path**, even when the original ask has finished or timed out.
+
+- A plain reply or `needs-input` report reaches the requester when reception is eligible. Answer a question with its actual `respondTo` handle.
+- A `blocked` or `complete` report is delivered with its text, evidence and exact original request ID. It is the colleague's claim, **not** the requester's approval.
+- A `progress`-only report remains in that session's existing communication records and `comms_inspect`, but does not create a separate model turn. Earlier progress is summarized when an actionable report is delivered. This applies to normal incoming traffic, **not** the first linked reply that an active `comms_ask` is already collecting.
+- If progress arrives **after** completion or blockage, it cannot replace the last actionable state or cause a late progress wake. `comms_inspect({requests:[...]})` shows `currentReport` for the current actionable peer claim, `latestReport` for the latest received report, and `laterProgressCount` when relevant. All original messages remain available via exact message and exchange inspection.
+- A later correction that reports `blocked` or `complete` still reaches the requester. The reported state follows receipt order; it is **not** a verified task lifecycle or an ordering guarantee for remote work.
+
+Normal contact approval, revocation, Pause, editor-draft priority, exact session identities and existing delivery uncertainty still govern the incoming messages. Progress-only records held during Pause or pending approval are not silently admitted. The runtime marks suppressed progress as **retained in inspection, not posted to Pi**; it does not claim that the model saw it.
 
 ## Presence, message outcomes and recipes
 
@@ -62,7 +74,7 @@ For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. 
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.5.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.6.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -70,13 +82,13 @@ To try without modifying normal Pi settings, use an owned temporary agent direct
 ```sh
 mkdir -p /tmp/comms-try/package
 # Extract the reviewed tarball into /tmp/comms-try/package (npm tarballs contain package/).
-tar -xzf pi-comms-0.1.5.tgz -C /tmp/comms-try
+tar -xzf pi-comms-0.1.6.tgz -C /tmp/comms-try
 PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 ```
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.4`, which is published). The `0.1.5` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.5`, which is published). The `0.1.6` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 

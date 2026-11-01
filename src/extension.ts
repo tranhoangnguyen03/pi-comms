@@ -151,11 +151,11 @@ export default function comms(pi: ExtensionAPI) {
     if (line !== lastStatus) { ctx.ui.setStatus('comms', line); lastStatus = line; }
   }
   function name(id: string) { return id === runtime?.self ? ctx?.sessionManager.getSessionName() ?? 'You' : peerNames.get(id) ?? runtime?.known().find(p => p.id === id)?.name ?? id; }
-  function card(entry: Entry): CardMessage {
+  function card(entry: Entry, reportNote = ''): CardMessage {
     const m = entry.message;
     const kinds = entry.facts.map(f => f.kind);
     const fact = kinds.includes('saved') ? 'saved' : kinds.includes('posted') ? 'posted' : kinds.includes('queued') ? 'queued' : 'unknown';
-    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, workRef: m.workRef, recipientLabel: m.recipientLabel, report: m.report, structured: m.structured, reportLinkage: entry.reportLinkage, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
+    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, workRef: m.workRef, recipientLabel: m.recipientLabel, report: m.report, structured: m.structured, reportLinkage: entry.reportLinkage, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + reportNote + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
   }
   function pump(busyBoundary = false) {
     if (!ctx || !runtime || runtime.paused || approvalDialog || ctx.hasPendingMessages() || (ctx.hasUI && ctx.ui.getEditorText().length)) return;
@@ -169,12 +169,24 @@ export default function comms(pi: ExtensionAPI) {
       ids.push(id); bytes += size;
     }
     if (!ids.length) return;
-    const entries = ids.map(id => runtime!.entry(id)!);
-    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${messageContextLines(e.message).map(line => `${line}\n`).join('')}${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.reportLinkage ? 'Reported request is unavailable; work report link unverified.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nMessage ID: ${e.message.id} (use as report.request when reporting on this request)\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
+    const plan = runtime.planIntake(ids);
+    // Progress-only traffic is retained in inspection without starting a turn.
+    // All questions, final outcomes and corrections still use the normal Pi path.
+    if (!plan.deliver.length) {
+      runtime.summarized(plan.summarized);
+      status();
+      return;
+    }
+    const entries = plan.deliver;
+    const deliveredIds = entries.map(entry => entry.message.id);
+    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${messageContextLines(e.message).map(line => `${line}\n`).join('')}${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.reportLinkage ? 'Reported request is unavailable; work report link unverified.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${runtime!.reportNote(e)}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nMessage ID: ${e.message.id} (use as report.request when reporting on this request)\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
     if (!busyBoundary) wakeReserved = true;
     try {
-      pi.sendMessage({ customType: 'comms_batch', display: true, content, details: { messages: entries.map(e => ({ ...card(e), fact: 'posted' })), ids } }, busyBoundary ? { deliverAs: 'steer' } : { triggerTurn: true });
-      runtime.posted(ids);
+      pi.sendMessage({ customType: 'comms_batch', display: true, content,
+        details: { messages: entries.map(e => ({ ...card(e, runtime!.reportNote(e)), fact: 'posted' })), ids: deliveredIds } },
+        busyBoundary ? { deliverAs: 'steer' } : { triggerTurn: true });
+      runtime.posted(deliveredIds);
+      runtime.summarized(plan.summarized);
     } catch (error) { wakeReserved = false; ctx.ui.notify(`pi-comms could not post batch: ${String(error)}`, 'error'); }
     status();
   }

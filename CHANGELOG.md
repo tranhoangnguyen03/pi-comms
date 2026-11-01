@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6] - 2026-11-02
+
+- Deliver request-linked questions, blocked reports, completion reports and later corrections automatically through the existing human-first incoming-message path. No new ask mode or follow-up waiting call.
+- Keep progress-only reports in the existing communication record and inspection without waking the model. Group the progress history with the next actionable report; retain exact original messages and source evidence.
+- Preserve the last actionable peer-reported state when later progress arrives. Expose both the latest received report and current reported state in request inspection, noting any later progress. A later blocked or complete report updates that state; no peer claim becomes requester acceptance.
+- Keep `comms_ask`'s existing first-linked-reply behavior and all four agent tools unchanged. Preserve approval, Pause, human-input priority and exact request/peer linkage.
+- Verify automatic delivery and no-progress wake, late progress after completion, corrections, held/unapproved intake, native cards and installed Pi behavior.
+
 ## [0.1.5] - 2026-11-01
 
 - Allow optional `structured` JSON objects alongside readable messages and replies without a new tool or data store.

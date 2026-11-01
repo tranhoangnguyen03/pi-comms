@@ -240,6 +240,88 @@ test('actual collapsed ask renderer names the original report target after a cla
   } finally { await reviewer.close(); await lead.close(); }
 });
 
+test('native Pi delivers actionable request reports while grouping progress without extra wakes', async () => {
+  const lead = await participant('report-delivery-lead'), reviewer = await participant('report-delivery-reviewer');
+  try {
+    lead.confirm(true);
+    const first = data(await lead.tool('comms_message', {
+      to: reviewer.id(), subject: 'Report intake review', text: 'Review retry behavior and report findings.',
+      workRef: 'AUTH-42', recipientLabel: 'Security reviewer',
+    }));
+    assert.equal(first.ok, true);
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('Report intake review')));
+    const initial = data(await reviewer.tool('comms_inspect', { message: first.data.message.id })).data;
+
+    const progress = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_PROGRESS_ONLY',
+      report: { request: first.data.message.id, state: 'progress' },
+    }));
+    assert.equal(progress.ok, true);
+    await waitFor(async () => data(await lead.tool('comms_inspect', { message: progress.data.message.id })).ok);
+    await waitFor(async () => {
+      const snapshot = data(await lead.tool('comms_inspect', { message: progress.data.message.id })).data;
+      return snapshot.facts?.some((fact: any) => fact.kind === 'summarized');
+    });
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_PROGRESS_ONLY')), false,
+      'progress-only messages must not wake the model');
+    assert.equal(lead.runtime.session.sessionManager.getEntries().some((entry: any) =>
+      entry.type === 'custom_message' && entry.customType === 'comms_batch' &&
+      entry.details?.ids?.includes(progress.data.message.id)), false,
+    'progress was not falsely posted to Pi');
+
+    const completed = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_FINAL_FINDING',
+      report: { request: first.data.message.id, state: 'complete' },
+      structured: { finding_count: 1 },
+    }));
+    assert.equal(completed.ok, true);
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('M2C_FINAL_FINDING')));
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_PROGRESS_ONLY')), false,
+      'a final report summarizes progress without replaying stale progress content');
+
+    const batches = lead.runtime.session.sessionManager.getEntries().filter((entry: any) =>
+      entry.type === 'custom_message' && entry.customType === 'comms_batch') as any[];
+    const shown = batches.find((entry: any) => entry.details?.ids?.includes(completed.data.message.id));
+    assert.ok(shown);
+    assert.match(shown.content, /1 earlier progress report/);
+    assert.equal(shown.details.messages[0].report.state, 'complete');
+    assert.match(shown.details.messages[0].text, /1 earlier progress report/);
+
+    const late = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_LATE_PROGRESS',
+      report: { request: first.data.message.id, state: 'progress' },
+    }));
+    assert.equal(late.ok, true);
+    await waitFor(async () => {
+      const snapshot = data(await lead.tool('comms_inspect', { message: late.data.message.id })).data;
+      return snapshot?.facts?.some((fact: any) => fact.kind === 'summarized');
+    });
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_LATE_PROGRESS')), false);
+
+    const afterLate = data(await lead.tool('comms_inspect', { requests: [first.data.message.id] })).data.responses[0];
+    assert.equal(afterLate.latestReport.message.id, late.data.message.id);
+    assert.equal(afterLate.currentReport.message.id, completed.data.message.id);
+    assert.equal(afterLate.laterProgressCount, 1);
+
+    lead.draft('The user is writing something; peer reports must wait.');
+    const correction = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_CORRECTION_BLOCKED',
+      report: { request: first.data.message.id, state: 'blocked' },
+    }));
+    assert.equal(correction.ok, true);
+    await waitFor(async () => data(await lead.tool('comms_inspect', { queue: 'self' })).data.items.some(
+      (entry: any) => entry.message.id === correction.data.message.id));
+    assert.equal(lead.observed.some(messages => text(messages).includes('M2C_CORRECTION_BLOCKED')), false,
+      'draft text takes priority over peer correction');
+    lead.draft('');
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('M2C_CORRECTION_BLOCKED')));
+    const final = data(await lead.tool('comms_inspect', { requests: [first.data.message.id] })).data.responses[0];
+    assert.equal(final.currentReport.message.report.state, 'blocked');
+    assert.equal(final.currentReport.message.id, correction.data.message.id);
+    assert.equal(final.reportCount, 4);
+  } finally { lead.draft(''); await reviewer.close(); await lead.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];
