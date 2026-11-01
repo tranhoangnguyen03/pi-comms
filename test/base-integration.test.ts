@@ -418,10 +418,12 @@ test('installed Base model tools: private inspection boundary and discover → s
       context => {
         const failed = b!.events.find(e => e.type === 'tool_execution_end' && e.toolName === 'comms_message' && e.isError);
         assert.ok(failed, 'runtime mutual exclusion rejects invalid reply before sending');
-        assert.match(text([failed.result]), /INVALID_INPUT/);
+        assert.match(text([failed.result]), /^INVALID_INPUT: reply routing was combined/);
+        assert.doesNotMatch(text([failed.result]), /INVALID_INPUT: INVALID_INPUT:/);
         assert.match(text(context.messages), /For a new message use \{ to, subject, text \}; omit respondTo/);
         assert.match(text(context.messages), /For a reply use \{ respondTo, text \} with a real incoming return handle; omit to and subject/);
         assert.match(text(context.messages), /No message was sent for this input/);
+        assert.match(text(context.messages), /stop retrying and report the provider schema issue/);
         const renderer = b!.runtime.session.extensionRunner!.getToolDefinition('comms_message')!.renderResult!;
         const rendered = renderer(failed.result, { expanded: false, isPartial: false }, { fg: (_key: string, value: string) => value } as any, {} as any).render(100).join('\n');
         assert.match(rendered, /INVALID_INPUT/); assert.match(rendered, /subject/);

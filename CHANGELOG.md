@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.2] - 2026-11-01
+
+- Remove duplicate error-code prefix in plain-text tool error results (`INVALID_INPUT: ...` instead of `INVALID_INPUT: INVALID_INPUT: ...`).
+- Instruct models to stop retrying in a loop and report the provider schema issue when a tool interface forces optional fields to be populated.
+- Document and test `compat.supportsStrictMode: true` for custom `openai-completions` gateways that require explicit `"strict": false`.
+
 ## [0.1.1] - 2026-10-30
 
 - Clarify routing validation errors with explicit new-message and reply forms, without inferring intent from conflicting fields or encouraging fabricated IDs.

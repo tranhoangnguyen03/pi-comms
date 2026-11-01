@@ -31,23 +31,26 @@ test('serialized and provider-facing schemas preserve minimal sends and replies'
 
 test('OpenAI completions outbound payload preserves optional fields without network access', async () => {
   const { stream } = await import('../node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js');
-  let captured = false;
-  const result = await stream({
-    id: 'schema-fixture', name: 'Schema fixture', api: 'openai-completions', provider: '9-router',
-    baseUrl: 'http://127.0.0.1:1/v1', reasoning: false, input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 100,
-  }, { messages: [{ role: 'system', content: 'Schema test', toolsAdded: tools, timestamp: 0 }, { role: 'user', content: 'Test', timestamp: 0 }] }, {
-    apiKey: 'non-secret-test-key',
-    onPayload(payload: any) {
-      checkSchemas(payload.tools.map((t: any) => t.function.parameters));
-      assert.ok(payload.tools.every((t: any) => t.function.strict !== true));
-      captured = true;
-      throw new Error('SCHEMA_CAPTURE_COMPLETE');
-    },
-    fetch: async () => { throw new Error('NETWORK_MUST_NOT_BE_USED'); },
-  }).result();
-  assert.ok(captured, result.errorMessage);
-  assert.match(result.errorMessage!, /SCHEMA_CAPTURE_COMPLETE/);
+  for (const supportsStrictMode of [undefined, true]) {
+    let captured = false;
+    const result = await stream({
+      id: 'schema-fixture', name: 'Schema fixture', api: 'openai-completions', provider: '9-router',
+      baseUrl: 'http://127.0.0.1:1/v1', reasoning: false, input: ['text'],
+      ...(supportsStrictMode ? { compat: { supportsStrictMode } } : {}),
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32000, maxTokens: 100,
+    }, { messages: [{ role: 'system', content: 'Schema test', toolsAdded: tools, timestamp: 0 }, { role: 'user', content: 'Test', timestamp: 0 }] }, {
+      apiKey: 'non-secret-test-key',
+      onPayload(payload: any) {
+        checkSchemas(payload.tools.map((t: any) => t.function.parameters));
+        assert.ok(payload.tools.every((t: any) => t.function.strict === (supportsStrictMode ? false : undefined)));
+        captured = true;
+        throw new Error('SCHEMA_CAPTURE_COMPLETE');
+      },
+      fetch: async () => { throw new Error('NETWORK_MUST_NOT_BE_USED'); },
+    }).result();
+    assert.ok(captured, result.errorMessage);
+    assert.match(result.errorMessage!, /SCHEMA_CAPTURE_COMPLETE/);
+  }
 });
 
 test('routing failures provide minimal recovery and optional correction IDs stay optional', () => {
