@@ -90,7 +90,7 @@ export const Output = Type.Object({ ok: Type.Boolean(), data: Type.Optional(Type
 export function validate(schema: TSchema, value: unknown) {
   if (!Check<TSchema, unknown>(schema, value)) throw new Error('INVALID_INPUT');
   if ((schema === MessageInput || schema === EnvelopeSchema) &&
-      (value as { structured?: unknown }).structured !== undefined &&
+      Object.prototype.hasOwnProperty.call(value, 'structured') &&
       !isJsonValue((value as { structured: unknown }).structured)) {
     throw new Error('INVALID_INPUT: structured must contain only JSON values with finite numbers. No message was sent.');
   }

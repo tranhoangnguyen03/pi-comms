@@ -56,6 +56,10 @@ test('rejects non-JSON nested structured values before sending or recording mess
       /INVALID_INPUT: structured must contain only JSON values with finite numbers/,
     );
   }
+  await assert.rejects(
+    runtime.send({ to: b, subject: 'Payload fidelity', text: 'Check explicit missing value', structured: undefined } as any),
+    /INVALID_INPUT: structured must contain only JSON values with finite numbers/,
+  );
   assert.equal(transports, 0, 'validation must reject before invoking transport');
   assert.deepEqual(runtime.inspect({ outbox: 'self' }).items, [], 'invalid data must not create outbox records');
 
