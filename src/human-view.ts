@@ -1,10 +1,10 @@
+import { observationLabel } from './communication-view.ts';
 import type { ExtensionContext, KeybindingsManager, Theme } from '@earendil-works/pi-coding-agent';
 import { matchesKey, ScrollView, Text, truncateToWidth, type Component, type TuiMouseEvent } from '@earendil-works/pi-tui';
 import type { Runtime } from './runtime.ts';
 
 type Inspection = ReturnType<Runtime['inspect']>;
 type Labels = { self: string; name: (id: string) => string; approved: (id: string) => boolean };
-const facts = { accepted: 'Accepted by transport', queued: 'Buffered in receiver memory', posted: 'Posted to Pi', saved: 'Observed in native history', rejected: 'Rejected' };
 
 export function approvalPrompt(id: string, colleague: string, work: string, text: string, direction: 'send' | 'receive') {
   const preview = text.replace(/\s+/g, ' ');
@@ -22,7 +22,7 @@ export function inspectionText(data: Inspection, labels: Labels, technical = fal
     if (!('facts' in entry)) return [...lines, 'Content withheld: contact approval required.'].join('\n');
     const m = entry.message;
     lines.push(`Subject: ${m.subject}`, `Contact: ${labels.approved(m.from === labels.self ? m.to : m.from) ? 'approved' : 'not approved'}`,
-      `Latest observation: ${entry.facts.length ? facts[entry.facts.at(-1)!.kind] : 'Outcome unknown — check evidence before resending.'}`,
+      `Latest observation: ${observationLabel(entry)}`,
       `${entry.responses.length} linked response(s) — not proof of completed work.`);
     if (m.replyTo) lines.push('Reply to an earlier message.');
     if (m.corrects) lines.push('Correction to an earlier message.');

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2] - 2026-11-01
+
+- Report observed working/idle activity and timestamp freshness in peer discovery, separately from connection state. Preserve unknown and offline activity instead of guessing.
+- Use a shared, plain-language status vocabulary for request results, message inspection and expanded human cards; surface useful recovery actions without changing delivery guarantees.
+- Ship an on-demand pi-comms skill for practical collaboration patterns; keep the existing four agent tools and send/ask behavior.
+- Add focused presence, projection and native lifecycle regression coverage.
+
 ## [0.1.1] - 2026-10-30
 
 - Clarify routing validation errors with explicit new-message and reply forms, without inferring intent from conflicting fields or encouraging fabricated IDs.

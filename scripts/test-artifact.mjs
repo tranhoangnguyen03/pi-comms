@@ -11,6 +11,7 @@ try {
   assert.ok(pack.files.some(f => f.path === 'dist/extension.js'));
   assert.ok(pack.files.some(f => f.path === 'dist/transport/broker/broker.js'));
   assert.ok(pack.files.some(f => f.path === 'THIRD-PARTY-NOTICES.md'));
+  assert.ok(pack.files.some(f => f.path === 'skills/pi-comms/SKILL.md'), 'on-demand collaboration skill must be included');
   assert.ok(!pack.files.some(f => /^(prototype|test|src|\.scratch|node_modules)\//.test(f.path)));
   const prefix = join(root, 'install'); mkdirSync(prefix);
   writeFileSync(join(prefix, 'package.json'), '{"private":true,"type":"module"}');
@@ -18,7 +19,7 @@ try {
   const installed = join(prefix, 'node_modules/pi-comms');
   const manifest = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8'));
   const sourceManifest = JSON.parse(readFileSync('package.json', 'utf8'));
-  assert.equal(manifest.version, sourceManifest.version); assert.deepEqual(manifest.pi.extensions, ['./dist/extension.js']);
+  assert.equal(manifest.version, sourceManifest.version); assert.deepEqual(manifest.pi.extensions, ['./dist/extension.js']); assert.deepEqual(manifest.pi.skills, ['./skills']);
   assert.equal(manifest.dependencies, undefined, 'no runtime dependencies bundled; host supplies Pi/typebox/TUI');
   // Load through the real Pi resource loader, which supplies host module mappings.
   const sdk = pathToFileURL(resolve('node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href;

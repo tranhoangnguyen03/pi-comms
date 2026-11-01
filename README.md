@@ -24,13 +24,21 @@ Send is asynchronous; ask waits for the first linked reply to each independent r
 
 **Do not send courtesy, formality, acknowledgement-only or closing messages. No “thanks”, “you’re welcome”, “understood”, or “standing by” messages. Send only requested information, necessary questions, corrections or material updates. Once the task is satisfied, stop messaging.** This is guidance, not filtering: substantive polite messages, corrections and late useful answers remain allowed.
 
+## Presence, message outcomes and recipes
+
+`comms_peers({})` distinguishes whether each colleague is **online/offline** from host-observed **working/idle/unknown** activity. It shows when the last activity report was observed. Active peers refresh their report periodically; a report that has become stale is shown as **unknown** with its last reported value, not as current progress. Offline peers have unavailable activity. A working session may be busy on unrelated work; these observations do not establish progress or completion of your request.
+
+Tool results, message inspection and expanded cards use consistent labels for transport acceptance, receiver buffering, posting to Pi, observed saving, responses and uncertain outcomes. Sending still proves only transport acceptance. `comms_ask` still returns each request's first linked reply or local ending, not task completion. An interrupted or timed-out wait does not cancel remote work; do not resend when delivery is uncertain.
+
+For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. It covers choosing `comms_message` versus `comms_ask`, multi-round clarification, late replies, Pausing reception, and drafting a deliberate handover to a different existing session. Loading the skill is optional; the four agent tools work without it.
+
 ## Build and try in isolation
 
 ```sh
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.0.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.2.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -38,13 +46,13 @@ To try without modifying normal Pi settings, use an owned temporary agent direct
 ```sh
 mkdir -p /tmp/comms-try/package
 # Extract the reviewed tarball into /tmp/comms-try/package (npm tarballs contain package/).
-tar -xzf pi-comms-0.1.0.tgz -C /tmp/comms-try
+tar -xzf pi-comms-0.1.2.tgz -C /tmp/comms-try
 PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 ```
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, pin a published version: `pi install npm:pi-comms@0.1.0`. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, pin a published version: `pi install npm:pi-comms@0.1.2`. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 

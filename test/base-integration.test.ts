@@ -67,6 +67,26 @@ async function participant(label: string, interactive = true, extraTools: any[] 
     close: async () => { hold = false; releases.splice(0).forEach(r => r()); await runtime.session.abort(); await runtime.dispose(); },
   };
 }
+test('peer discovery reports live host activity separately from reachability', async () => {
+  const coordinator = await participant('presence-coordinator'), reviewer = await participant('presence-reviewer');
+  try {
+    const current = async () => (data(await coordinator.tool('comms_peers', {})).data.items as any[]).find(p => p.id === reviewer.id());
+    await waitFor(async () => (await current())?.activity === 'idle');
+    const initial = await current();
+    assert.equal(initial.presence, 'online'); assert.equal(initial.activityFreshness, 'recent');
+    assert.match(initial.activityObservedAt, /^\\d{4}-\\d{2}-\\d{2}T/);
+
+    reviewer.hold(true);
+    const running = reviewer.runtime.session.prompt('Review the current work without changing any files.');
+    await waitFor(async () => (await current())?.activity === 'working');
+    assert.equal((await current()).presence, 'online', 'busy does not mean disconnected');
+
+    await waitFor(() => reviewer.observed.length > 0);
+    reviewer.release(); reviewer.hold(false); await running;
+    await waitFor(async () => (await current())?.activity === 'idle');
+  } finally { reviewer.release(); await reviewer.close(); await coordinator.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];

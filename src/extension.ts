@@ -3,6 +3,7 @@ import { Text } from '@earendil-works/pi-tui';
 import { Runtime, type Entry } from './runtime.ts';
 import { Asks, type AskItem } from './ask.ts';
 import { modelView } from './model-view.ts';
+import { peerActivity, requestOutcomeLabel } from './communication-view.ts';
 import { Id, EnvelopeSchema, MessageInput, AskInput, PeersInput, InspectInput, Output, validate } from './schema.ts';
 import { sendExactSession } from './transport/send.ts';
 import { connect } from './transport/start.ts';
@@ -50,6 +51,7 @@ export default function comms(pi: ExtensionAPI) {
   const lifetime = new AbortController();
   let lastWidget: string | undefined | null = null;
   let lastStatus: string | undefined;
+  let lastPresenceSentAt = 0;
   registerInlineCards(pi);
   // A new human instruction can reconsider contact; automatic model/peer continuations cannot.
   pi.on('input', event => { if (event.source !== 'extension') { declined.clear(); endAsks('interrupted'); } });
@@ -133,6 +135,13 @@ export default function comms(pi: ExtensionAPI) {
     if (ctx && !ctx.isIdle()) return 'busy';
     return null;
   }
+  function publishActivity(force = false) {
+    if (!client?.isConnected()) return;
+    const now = Date.now();
+    if (!force && now - lastPresenceSentAt < 60_000) return;
+    client.updatePresence({ status: active ? 'working' : 'idle' });
+    lastPresenceSentAt = now;
+  }
   function status() {
     if (!ctx || !runtime) return;
     const unapproved = runtime.waiting.filter(id => !runtime!.isApproved(runtime!.entry(id)!.message.from)).length;
@@ -198,7 +207,7 @@ export default function comms(pi: ExtensionAPI) {
       try {
         await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, candidate, new URL('./transport/broker/broker.js', import.meta.url));
         if (runtime !== current || stopped) { await candidate.disconnect(); return; }
-        client = candidate; candidate.updatePresence({ name: context.sessionManager.getSessionName() ?? current.self });
+        client = candidate; candidate.updatePresence({ name: context.sessionManager.getSessionName() ?? current.self, status: active ? 'working' : 'idle' }); lastPresenceSentAt = Date.now();
         connectionError = undefined; reconnectDelay = 1000; status();
       } catch (error) {
         await candidate.disconnect();
@@ -223,13 +232,13 @@ export default function comms(pi: ExtensionAPI) {
     if (stopped || ctx !== context) return;
     timer = setInterval(() => {
       if (!client?.isConnected() && !connecting && Date.now() >= nextReconnect) void ensureConnection().catch(() => undefined);
-      offerIncoming(); admitAsks(); pump(); status();
+      publishActivity(); offerIncoming(); admitAsks(); pump(); status();
     }, 150); timer.unref();
     status();
   });
   pi.on('session_info_changed', event => { if (runtime) client?.updatePresence({ name: event.name ?? runtime.self }); });
-  pi.on('agent_start', () => { active = true; wakeReserved = false; });
-  pi.on('agent_end', () => { active = false; endAsks('interrupted'); });
+  pi.on('agent_start', () => { active = true; wakeReserved = false; publishActivity(true); });
+  pi.on('agent_end', () => { active = false; publishActivity(true); endAsks('interrupted'); });
   pi.on('agent_settled', () => { wakeReserved = false; });
   pi.on('turn_end', event => { if (event.message.role === 'assistant' && event.message.stopReason !== 'aborted' && event.message.stopReason !== 'error') pump(true); });
   function observeSaved() {
@@ -250,7 +259,7 @@ export default function comms(pi: ExtensionAPI) {
   pi.on('session_shutdown', async () => {
     stopped = true; endAsks('context-lost'); lifetime.abort(); if (timer) clearInterval(timer); timer = undefined;
     const old = client; client = undefined; runtime = undefined; ctx = undefined;
-    active = false; wakeReserved = false;
+    active = false; wakeReserved = false; lastPresenceSentAt = 0;
     await old?.disconnect();
   });
   async function resolvePeer(target: string) {
@@ -270,7 +279,7 @@ export default function comms(pi: ExtensionAPI) {
     const all = [...new Set([...known.map(p => p.id), ...(view === 'all' ? live.map(p => p.id) : [])])];
     const ranked = all.map(id => {
       const approval = known.find(p => p.id === id); const session = live.find(p => p.id === id);
-      return { id, name: session?.name ?? peerNames.get(id) ?? approval?.name ?? id, approved: !!approval, context: approval?.context ?? null, presence: session ? 'online' : 'offline', reason: approval ? 'user-approved colleague for this work' : 'approval required', cwd: session?.cwd, lastActivity: session?.lastActivity };
+      return { id, name: session?.name ?? peerNames.get(id) ?? approval?.name ?? id, approved: !!approval, context: approval?.context ?? null, presence: session ? 'online' : 'offline', ...peerActivity(session), reason: approval ? 'user-approved colleague for this work' : 'approval required', cwd: session?.cwd, lastActivity: session?.lastActivity };
     });
     ranked.sort((a, b) => (a.presence === 'offline' ? 2 : a.approved ? 0 : 1) - (b.presence === 'offline' ? 2 : b.approved ? 0 : 1));
     const start = cursor ? ranked.findIndex(p => p.id === cursor) + 1 : 0;
@@ -355,7 +364,7 @@ export default function comms(pi: ExtensionAPI) {
       const data = await work(); const output = result(data);
       if (compact) {
         const sent = data as ReturnType<Runtime['view']>;
-        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}. Replies arrive automatically.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
+        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}. Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
       }
       return output;
     }
@@ -366,11 +375,11 @@ export default function comms(pi: ExtensionAPI) {
     // Native validation/permission errors happen before execute and have no pi-comms details.
     if (typeof body?.ok !== 'boolean') return new Text(value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n') || 'No textual communication result available.', 0, 0);
     const summary = body.data?.timeoutSeconds !== undefined
-      ? body.data.items.map((item: AskItem) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''} · ${item.outcome}`).join('\n')
+      ? body.data.items.map((item: AskItem) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''} · ${requestOutcomeLabel(item.outcome)}`).join('\n')
       : value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n').split('\n').slice(0, 3).join('\n');
     return new Text(body?.ok ? `${summary}${(_options as { expanded?: boolean }).expanded ? `\n${JSON.stringify(body.data, null, 2)}` : '\nCtrl+O expands evidence'}` : theme.fg('error', body?.error ? `${body.error.message}\n${body.error.nextAction}` : 'Communication failed'), 0, 0);
   };
-  pi.registerTool({ name: 'comms_peers', label: 'Communication colleagues', description: 'Discover colleagues in one call: approved online peers, other online peers marked approval-required, then known offline peers. Discovery never sends or grants permission.', parameters: PeersInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_peers', label: 'Communication colleagues', description: 'Discover exact colleagues: approved online, other online (approval required), then known offline. Reachability and observed working/idle activity are separate, timestamped facts; stale activity is unknown. Discovery never contacts anyone.', parameters: PeersInput, outputSchema: Output,
     execute: async (_id, input) => run(() => { validate(PeersInput, input); return peers(input.view, input.cursor); }), renderResult });
   async function prepareSend(input: MessageInput, signal?: AbortSignal, item?: AskItem) {
     const current = runtime!;
