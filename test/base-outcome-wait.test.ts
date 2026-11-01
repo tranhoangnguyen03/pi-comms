@@ -182,6 +182,9 @@ test('plain clarification goes to the nearest watched request in the same exchan
     respondTo: reviewer.entry(original.message.id)!.returnHandle!, text: 'Need details for A',
   });
   lead.receive(b, fromB[0]);
+  // The lead already read this clarification before authoring the follow-up.
+  // It must not still appear as a new unadmitted reply when waits begin.
+  lead.posted([question.message.id], 'earlier clarification presented to lead');
   const followup = await lead.send({
     respondTo: lead.entry(question.message.id)!.returnHandle!, text: 'Follow-up B: more details',
   });
