@@ -20,17 +20,17 @@ comms_ask({requests: [
 comms_inspect({requests: ["<outgoing message ID>", "<outgoing message ID>"]})
 ```
 
-Send is asynchronous; ask waits for the first linked reply to each independent request. **A reply is not task completion.** Common outputs are plain text; scripts receive matching structured details. For example: `Sent to Reviewer · Risk review. Replies arrive automatically.` Ask returns `Reviewer replied · Risk review`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
+Send is asynchronous; ask waits for the first linked reply to each independent request. **A reply is not task completion.** Common outputs are plain text; scripts receive matching structured details. For example: a send reports acceptance without promising a reply. An ask reports `Reviewer — Reply received`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
 
 **Do not send courtesy, formality, acknowledgement-only or closing messages. No “thanks”, “you’re welcome”, “understood”, or “standing by” messages. Send only requested information, necessary questions, corrections or material updates. Once the task is satisfied, stop messaging.** This is guidance, not filtering: substantive polite messages, corrections and late useful answers remain allowed.
 
 ## Presence, message outcomes and recipes
 
-`comms_peers({})` distinguishes whether each colleague is **online/offline** from host-observed **working/idle/unknown** activity. It shows when the last activity report was observed. Active peers refresh their report periodically; a report that has become stale is shown as **unknown** with its last reported value, not as current progress. Offline peers have unavailable activity. A working session may be busy on unrelated work; these observations do not establish progress or completion of your request.
+`comms_peers({})` distinguishes whether each colleague is **online/offline** from host-observed **working/idle/unknown** activity. It shows when the last activity report was observed. The broker timestamps only status-bearing reports; normal name updates do not refresh activity freshness. Working/idle reports normally refresh every 60 seconds and become stale after 180 seconds. A stale status is **unknown**, with the earlier report available as history, not current progress. Offline peers have unavailable activity. The legacy `lastActivity` field is a general broker-contact timestamp, not proof of agent work; use `activityObservedAt` for the last working/idle report. A working session may be busy on unrelated work; these observations do not establish progress or completion of your request.
 
 Tool results, message inspection and expanded cards use consistent labels for transport acceptance, receiver buffering, posting to Pi, observed saving, responses and uncertain outcomes. Sending still proves only transport acceptance. `comms_ask` still returns each request's first linked reply or local ending, not task completion. An interrupted or timed-out wait does not cancel remote work; do not resend when delivery is uncertain.
 
-For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. It covers choosing `comms_message` versus `comms_ask`, multi-round clarification, late replies, Pausing reception, and drafting a deliberate handover to a different existing session. Loading the skill is optional; the four agent tools work without it.
+For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. It covers choosing `comms_message` versus `comms_ask`, multi-round clarification, late replies, Pausing reception, and drafting a deliberate handover to a different existing session. Pi advertises the skill's name and purpose when it discovers the package; the full instructions load only on demand. Loading the skill is optional; the four agent tools work without it.
 
 ## Build and try in isolation
 
@@ -52,7 +52,7 @@ PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, pin a published version: `pi install npm:pi-comms@0.1.2`. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.1` while that version is published). The `0.1.2` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 

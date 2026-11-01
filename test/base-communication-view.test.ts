@@ -5,17 +5,19 @@ import { modelView } from '../src/model-view.ts';
 
 test('peer activity separates live, stale, absent and unsupported observations', () => {
   const now = Date.UTC(2026, 10, 1, 12);
-  const current = peerActivity({ status: 'working', lastActivity: now - 1_000 }, now);
+  const current = peerActivity({ status: 'working', statusReportedAt: now - 1_000 }, now);
   assert.equal(current.activity, 'working');
   assert.equal(current.activityFreshness, 'recent');
   assert.match(current.activityObservedAt!, /^2026-11-01T/);
   assert.match(peerSummary({ presence: 'online', ...current }), /working/);
-  const stale = peerActivity({ status: 'idle', lastActivity: now - ACTIVITY_STALE_MS - 1 }, now);
+  const stale = peerActivity({ status: 'idle', statusReportedAt: now - ACTIVITY_STALE_MS - 1 }, now);
   assert.equal(stale.activity, 'unknown');
   assert.equal(stale.activityFreshness, 'stale');
   assert.equal(stale.lastReportedActivity, 'idle');
   assert.match(peerSummary({ presence: 'online', ...stale }), /stale/);
-  assert.equal(peerActivity({ status: 'planning', lastActivity: now }, now).activityFreshness, 'unknown');
+  assert.equal(peerActivity({ status: 'planning', statusReportedAt: now }, now).activityFreshness, 'unknown');
+  assert.equal(peerActivity({ status: 'idle', lastActivity: now } as any, now).activityFreshness, 'unknown', 'unrelated broker activity is not status evidence');
+  assert.equal(peerActivity({ status: 'idle', statusReportedAt: now + 60_000 }, now).activityFreshness, 'unknown');
   assert.equal(peerActivity(undefined, now).activityFreshness, 'unavailable');
   assert.match(peerSummary({ presence: 'offline', ...current }), /unavailable/);
 });
@@ -34,7 +36,7 @@ test('one observed-fact vocabulary and outcome guidance keep claims distinct', (
 
 test('agent projections make peer freshness and request outcomes useful without inferring completion', () => {
   const now = Date.UTC(2026, 10, 1, 12);
-  const activity = peerActivity({ status: 'idle', lastActivity: now }, now);
+  const activity = peerActivity({ status: 'idle', statusReportedAt: now }, now);
   const roster = modelView({ items: [{ id: 'peer-id', name: 'Reviewer', presence: 'online', approved: true, ...activity }] }, () => 'Reviewer');
   assert.match(roster, /Reviewer.*online.*idle/);
   assert.match(roster, /observed 2026-11-01/);

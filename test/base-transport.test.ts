@@ -14,6 +14,14 @@ const connect = (id: string, registration: any, client: InstanceType<typeof Inte
 const { sendExactSession } = await import('../src/transport/send.ts');
 const reg = (name: string) => ({ name, cwd: root, model: 'fixture', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
 
+test('broker status report timestamp is optional for legacy peers but validated when present', async () => {
+  const { isSessionInfo } = await import('../src/transport/broker/protocol.ts');
+  const oldPeer = { ...reg('legacy'), id: randomUUID(), status: 'working' };
+  assert.equal(isSessionInfo(oldPeer), true);
+  assert.equal(isSessionInfo({ ...oldPeer, statusReportedAt: Date.now() }), true);
+  assert.equal(isSessionInfo({ ...oldPeer, statusReportedAt: 'recent' }), false);
+});
+
 test('production exact-send refreshes stale same-ID once on real wire; approval and unknown-outcome checks remain controlling', async () => {
   const sender = new IntercomClient(), old = new IntercomClient(), replacement = new IntercomClient(), similar = new IntercomClient();
   const target = randomUUID();

@@ -45,6 +45,8 @@ export interface SessionInfo {
   startedAt: number;
   lastActivity: number;
   status?: string;
+  /** Broker receipt time (milliseconds) for the last status-bearing presence report; independent of lastActivity. */
+  statusReportedAt?: number;
   peerUid?: number;
   trustedLocal?: boolean;
   /** Live context-window usage, pushed via presence from the source session's
@@ -142,7 +144,7 @@ export interface ExtensionCapability {
   ownerEligible: boolean;
 }
 
-export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "peerUid" | "trustedLocal" | "herdrLocation"> & {
+export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "statusReportedAt" | "peerUid" | "trustedLocal" | "herdrLocation"> & {
   extensions?: ExtensionCapability[];
   /** Broker-only join hint; never returned in the public roster. */
   herdrSessionPath?: string;

@@ -24,10 +24,31 @@ try {
   // Load through the real Pi resource loader, which supplies host module mappings.
   const sdk = pathToFileURL(resolve('node_modules/@earendil-works/pi-coding-agent/dist/index.js')).href;
   const probe = `import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { DefaultResourceLoader } from ${JSON.stringify(sdk)};
 const loader = new DefaultResourceLoader({ cwd: ${JSON.stringify(prefix)}, agentDir: ${JSON.stringify(join(root, 'agent'))}, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, additionalExtensionPaths: [${JSON.stringify(join(installed, 'dist/extension.js'))}] });
 await loader.reload();
-const result = loader.getExtensions(); assert.deepEqual(result.errors, []); assert.equal(result.extensions.length, 1); console.log('Installed artifact loaded by Pi 1.4.0');`;
+const result = loader.getExtensions(); assert.deepEqual(result.errors, []); assert.equal(result.extensions.length, 1); console.log('Installed artifact loaded by Pi 1.4.0');
+
+// Load the *package root*, not only the compiled extension. The package manifest
+// must advertise its skill to Pi's normal resource loader.
+const packageLoader = new DefaultResourceLoader({
+  cwd: ${JSON.stringify(prefix)},
+  agentDir: ${JSON.stringify(join(root, 'agent'))},
+  noExtensions: true, noSkills: false, noPromptTemplates: true, noThemes: true,
+  noContextFiles: true, additionalExtensionPaths: [${JSON.stringify(installed)}],
+});
+await packageLoader.reload();
+const packageResult = packageLoader.getExtensions();
+assert.deepEqual(packageResult.errors, []);
+assert.equal(packageResult.extensions.length, 1, 'package root must expose the extension');
+const discovered = packageLoader.getSkills();
+assert.deepEqual(discovered.diagnostics.filter(d => d.type === 'error'), [], 'skill discovery must have no errors');
+const matches = discovered.skills.filter(s => s.name === 'pi-comms');
+assert.equal(matches.length, 1, 'installed package must advertise exactly one pi-comms skill');
+assert.ok(matches[0].filePath.startsWith(${JSON.stringify(installed)}), 'skill must load from installed artifact');
+assert.match(readFileSync(matches[0].filePath, 'utf8'), /# Communicate with Pi colleagues/);
+console.log('Installed package advertises pi-comms skill through Pi resource loader');`;
   const file = join(root, 'probe.mjs'); writeFileSync(file, probe);
   execFileSync(process.execPath, [file], { env: { ...process.env, PI_CODING_AGENT_DIR: join(root, 'agent') }, stdio: 'inherit' });
   execFileSync(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=1', 'test/base-integration.test.ts', 'test/base-shutdown.test.ts'], { env: { ...process.env, PI_COMMS_TEST_EXTENSION: join(installed, 'dist/extension.js') }, stdio: 'inherit' });

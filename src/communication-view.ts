@@ -16,13 +16,14 @@ export function observationLabel(entry: { facts?: readonly { kind: string }[]; s
 }
 
 // Activity is a host observation, never an assessment of a colleague's task progress.
-// Active sessions refresh status every minute; age out after three minutes without an update.
+// Status reports refresh roughly every minute; treat observations older than three minutes as stale.
+// Do not use lastActivity: the broker updates it for unrelated presence traffic.
 export const ACTIVITY_STALE_MS = 180_000;
-export function peerActivity(session?: { status?: string; lastActivity?: number }, now = Date.now()) {
+export function peerActivity(session?: { status?: string; statusReportedAt?: number }, now = Date.now()) {
   if (!session) return { activity: 'unknown', activityFreshness: 'unavailable', activityObservedAt: null, lastReportedActivity: null };
   const reported = session.status === 'working' || session.status === 'idle' ? session.status : null;
-  const at = session.lastActivity;
-  if (!reported || !Number.isFinite(at) || (at ?? 0) <= 0) {
+  const at = session.statusReportedAt;
+  if (!reported || !Number.isFinite(at) || (at ?? 0) <= 0 || at! > now) {
     return { activity: 'unknown', activityFreshness: 'unknown', activityObservedAt: null, lastReportedActivity: null };
   }
   const time = new Date(at!).toISOString();

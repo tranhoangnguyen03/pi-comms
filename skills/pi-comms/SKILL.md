@@ -1,11 +1,11 @@
 ---
 name: pi-comms
-description: Practical recipes for communicating with existing Pi colleagues: send, ask, clarification, late replies, handover and recovery.
+description: Use when coordinating existing Pi sessions, choosing send vs ask, requesting parallel reviews, handling clarifications, late replies or a handover. Short communication recipes.
 ---
 
 # Communicate with Pi colleagues
 
-pi-comms connects **existing** sessions. Find peers with `comms_peers`, send requests with `comms_message`, wait for a first reply with `comms_ask`, and inspect available evidence with `comms_inspect`. The owner approves a new contact at first send; repeat approvals are not normally needed while that runtime remains loaded.
+Use this skill for multi-step collaboration, not every message. pi-comms connects **existing** sessions. Find peers with `comms_peers`, send requests with `comms_message`, wait for a first reply with `comms_ask`, and inspect available evidence with `comms_inspect`. The owner approves a new contact at first send; repeat approvals are not normally needed while that runtime remains loaded.
 
 ## Choose the least disruptive call
 

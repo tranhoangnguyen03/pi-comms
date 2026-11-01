@@ -6,6 +6,7 @@
 - Use a shared, plain-language status vocabulary for request results, message inspection and expanded human cards; surface useful recovery actions without changing delivery guarantees.
 - Ship an on-demand pi-comms skill for practical collaboration patterns; keep the existing four agent tools and send/ask behavior.
 - Add focused presence, projection and native lifecycle regression coverage.
+- Clarify that activity freshness comes from status-bearing broker reports, not unrelated presence updates; align user/tool guidance and test installed-package skill discovery.
 
 ## [0.1.1] - 2026-10-30
 
