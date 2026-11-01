@@ -155,7 +155,7 @@ export default function comms(pi: ExtensionAPI) {
     const m = entry.message;
     const kinds = entry.facts.map(f => f.kind);
     const fact = kinds.includes('saved') ? 'saved' : kinds.includes('posted') ? 'posted' : kinds.includes('queued') ? 'queued' : 'unknown';
-    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, workRef: m.workRef, recipientLabel: m.recipientLabel, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
+    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, workRef: m.workRef, recipientLabel: m.recipientLabel, report: m.report, structured: m.structured, reportLinkage: entry.reportLinkage, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
   }
   function pump(busyBoundary = false) {
     if (!ctx || !runtime || runtime.paused || approvalDialog || ctx.hasPendingMessages() || (ctx.hasUI && ctx.ui.getEditorText().length)) return;
@@ -170,7 +170,7 @@ export default function comms(pi: ExtensionAPI) {
     }
     if (!ids.length) return;
     const entries = ids.map(id => runtime!.entry(id)!);
-    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${messageContextLines(e.message).map(line => `${line}\n`).join('')}${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
+    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${messageContextLines(e.message).map(line => `${line}\n`).join('')}${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.reportLinkage ? 'Reported request is unavailable; work report link unverified.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nMessage ID: ${e.message.id} (use as report.request when reporting on this request)\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
     if (!busyBoundary) wakeReserved = true;
     try {
       pi.sendMessage({ customType: 'comms_batch', display: true, content, details: { messages: entries.map(e => ({ ...card(e), fact: 'posted' })), ids } }, busyBoundary ? { deliverAs: 'steer' } : { triggerTurn: true });
@@ -364,7 +364,7 @@ export default function comms(pi: ExtensionAPI) {
       const data = await work(); const output = result(data);
       if (compact) {
         const sent = data as ReturnType<Runtime['view']>;
-        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
+        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''}${sent.message.report ? ` Peer reports ${sent.message.report.state} on request ${sent.message.report.request} (not acceptance).` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
       }
       return output;
     }
@@ -375,7 +375,7 @@ export default function comms(pi: ExtensionAPI) {
     // Native validation/permission errors happen before execute and have no pi-comms details.
     if (typeof body?.ok !== 'boolean') return new Text(value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n') || 'No textual communication result available.', 0, 0);
     const summary = body.data?.timeoutSeconds !== undefined
-      ? body.data.items.map((item: AskItem) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}`).join('\n')
+      ? body.data.items.map((item: AskItem) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}${item.response?.message.report ? ` · Peer reports ${item.response.message.report.state}` : ''}`).join('\n')
       : value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n').split('\n').slice(0, 3).join('\n');
     return new Text(body?.ok ? `${summary}${(_options as { expanded?: boolean }).expanded ? `\n${JSON.stringify(body.data, null, 2)}` : '\nCtrl+O expands evidence'}` : theme.fg('error', body?.error ? `${body.error.message}\n${body.error.nextAction}` : 'Communication failed'), 0, 0);
   };
@@ -397,7 +397,7 @@ export default function comms(pi: ExtensionAPI) {
     return resolved;
   }
   const guidance = 'Send only necessary requests, questions, findings, corrections or material updates. Skip acknowledgement-only exchanges; stop when the request is satisfied.';
-  pi.registerTool({ name: 'comms_message', label: 'Peer message', description: 'Send: {to,subject,text,workRef?,recipientLabel?}; workRef groups this exchange and recipientLabel describes its recipient (not authority). Reply: {respondTo,text}; workRef inherits, omit to/subject/metadata. First contact asks owner. Exact identities stay pinned. Accepted is not completion; inspect unknown sends before retrying.', promptGuidelines: [guidance], parameters: MessageInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_message', label: 'Peer message', description: 'Send {to,subject,text,workRef?,recipientLabel?,structured?}. Reply {respondTo,text,structured?,report?}; report:{request:originalMessageId,state:progress|needs-input|blocked|complete} is a peer claim, not work acceptance. Reply inherits workRef; omit to/subject/workRef/recipientLabel. Exact identity and owner approval still apply. Unknown send: inspect before retry.', promptGuidelines: [guidance], parameters: MessageInput, outputSchema: Output,
     execute: async (_id, input, signal) => run(async () => {
       const current = runtime!;
       const sent = await current.send(await prepareSend(input, signal));
@@ -458,6 +458,6 @@ export default function comms(pi: ExtensionAPI) {
       return { ...message, content: output.content, details: output.structuredContent };
     }) };
   });
-  pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {workRef:"TICKET"} available related exchanges; {requests:[messageId,...]} response progress; {peer}, {exchange}, {message}, {queue:"self"} or {outbox:"self"} evidence. One selector. Work references do not expose other peers’ private messages. Unapproved content stays hidden; replies are not work completion.', parameters: InspectInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {requests:[messageId,...]} direct reply progress and latest peer-reported state linked to each request, including after clarification; {workRef:"TICKET"}, {peer}, {exchange}, {message}, {queue:"self"}, {outbox:"self"} evidence. One selector. Unapproved content stays hidden. Peer reports are claims, not acceptance.', parameters: InspectInput, outputSchema: Output,
     execute: async (_id, input) => run(async () => { validate(InspectInput, input); const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input; observeSaved(); return { ...runtime!.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } }; }), renderResult });
 }

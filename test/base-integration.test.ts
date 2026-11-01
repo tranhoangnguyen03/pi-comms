@@ -129,6 +129,57 @@ test('native first-contact metadata groups an exchange and keeps labels descript
   } finally { await reviewer.close(); await lead.close(); }
 });
 
+test('native reviewer reports after clarification with structured evidence linked to the original request', async () => {
+  const lead = await participant('report-lead'), reviewer = await participant('report-reviewer');
+  try {
+    lead.confirm(true);
+    const first = data(await lead.tool('comms_message', {
+      to: reviewer.id(), subject: 'Retry review', text: 'M2B_INITIAL: examine duplicate writes.',
+      workRef: 'AUTH-42', recipientLabel: 'Security reviewer',
+    }));
+    assert.equal(first.ok, true);
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('M2B_INITIAL')));
+    assert.ok(reviewer.observed.some(messages => text(messages).includes(first.data.message.id)),
+      'initial native batch must expose the exact message ID needed for a work report');
+    const initial = data(await reviewer.tool('comms_inspect', { message: first.data.message.id })).data;
+
+    const question = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2B_QUESTION: can writes be retried?',
+      report: { request: first.data.message.id, state: 'needs-input' },
+    }));
+    assert.equal(question.ok, true);
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('M2B_QUESTION')));
+    const clarification = data(await lead.tool('comms_inspect', { message: question.data.message.id })).data;
+    const answer = data(await lead.tool('comms_message', {
+      respondTo: clarification.returnHandle, text: 'M2B_ANSWER: retry only safe reads.',
+    }));
+    assert.equal(answer.ok, true);
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('M2B_ANSWER')));
+    const seenAnswer = data(await reviewer.tool('comms_inspect', { message: answer.data.message.id })).data;
+
+    const final = data(await reviewer.tool('comms_message', {
+      respondTo: seenAnswer.returnHandle,
+      text: 'M2B_FINAL: an unsafe write retry was found.',
+      report: { request: first.data.message.id, state: 'complete' },
+      structured: { tests_passing: true, files_changed: [], finding_count: 1 },
+      refs: [{ label: 'Finding', uri: 'file:///review.md' }],
+    }));
+    assert.equal(final.ok, true);
+    assert.equal(final.data.message.report.state, 'complete');
+    assert.equal(final.data.message.workRef, 'AUTH-42');
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('M2B_FINAL')));
+
+    const row = data(await lead.tool('comms_inspect', { requests: [first.data.message.id] })).data.responses[0];
+    assert.equal(row.outcome, 'reply-received', 'first reply remains the clarification');
+    assert.equal(row.responseCount, 1);
+    assert.equal(row.reportCount, 2);
+    assert.equal(row.latestReport.message.id, final.data.message.id);
+    assert.equal(row.latestReport.message.report.request, first.data.message.id);
+    assert.deepEqual(row.latestReport.message.structured, { tests_passing: true, files_changed: [], finding_count: 1 });
+    assert.equal(row.latestReport.message.refs[0].uri, 'file:///review.md');
+  } finally { await reviewer.close(); await lead.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];

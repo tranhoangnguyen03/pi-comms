@@ -25,6 +25,23 @@ comms_inspect({workRef:"AUTH-42"})
 
 The label never grants authority, creates a team or changes native tool permissions. `comms_peers` can show labels you supplied for earlier accepted requests. Replies using `respondTo` inherit the work reference automatically; **do not** repeat `workRef` or `recipientLabel` on replies. Work-reference inspection shows only exchanges available and approved in your session, not other agents' private conversations. Use matching 0.1.4+ peers for metadata-bearing sends; uncertain delivery is not proof of a failed send.
 
+## Structured findings and work reports
+
+Keep a clear readable text answer. Add an optional `structured` JSON object for machine-readable details. When you need to report your work state, send a **reply** with `report`; this is your report, not the requester's acceptance:
+
+```js
+comms_message({
+  respondTo: "<actual return handle>",
+  text: "Found one unsafe retry. Tests pass.",
+  report: { request: "<original received message ID>", state: "complete" },
+  structured: { finding_count: 1, tests_passing: true, files_changed: [] }
+})
+```
+
+The original request's **Message ID** appears in the incoming message. It is not the return handle. Keep `report.request` linked to that original message even after clarification rounds; `respondTo` may refer to a more recent message in the same exchange. Available states: `progress`, `needs-input`, `blocked`, `complete`. Choose the state that describes your actual work and provide evidence; never treat the state as verified task acceptance. Plain replies need no report or structured data. Reports require both peers running pi-comms 0.1.5 or later.
+
+The requester can use `comms_inspect({requests:["<original outgoing message ID>"]})` to see the latest reported state even if it arrived through a later clarification. `comms_ask` still ends at the first linked reply, which may be a question.
+
 ## Clarification and findings
 
 If a colleague asks a question, reply using the handle on its message. The colleague may later send the final findings on the same exchange. Link any correction to your own earlier message only when you have its real ID. The work owner judges completion; a transport receipt or first reply does not prove it.

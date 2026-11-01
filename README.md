@@ -20,6 +20,8 @@ comms_ask({requests: [
 comms_inspect({requests: ["<outgoing message ID>", "<outgoing message ID>"]})
 comms_message({to: "Reviewer", subject: "Security review", text: "Check retry safety.", workRef: "AUTH-42", recipientLabel: "Security reviewer"})
 comms_inspect({workRef: "AUTH-42"})
+comms_message({respondTo: "<real handle>", text: "Risk found; tests pass.", report: {request: "<original message ID>", state: "complete"}, structured: {tests_passing: true, files_changed: []}})
+comms_inspect({requests: ["<original message ID>"]})
 ```
 
 Send is asynchronous; ask waits for the first linked reply to each independent request. **A reply is not task completion.** Common outputs are plain text; scripts receive matching structured details. For example: a send reports acceptance without promising a reply. An ask reports `Reviewer — Reply received`, the full answer and a reusable return handle. Timeout says the wait ended and a late reply can still arrive. Sent means transport accepted, not read or completed.
@@ -33,6 +35,18 @@ New messages and `comms_ask` requests can include optional `workRef` (such as `"
 Replies use only `{respondTo,text}` (plus existing optional refs/corrections): the runtime **inherits the exchange's work reference**, and the sender's recipient label stays attached to the original request. `comms_peers` lists recent sender-supplied labels with their exchange and optional work reference; labels may differ between collaborations. `comms_inspect({workRef:"AUTH-42"})` lists exchanges under that exact reference **only from this session's available and approved communication**; use `comms_inspect({exchange:"<actual UUID>"})` to read that exchange. Unapproved contents and references remain unavailable to the agent.
 
 Both `workRef` and `recipientLabel` are optional. Ordinary unscoped messages keep their existing wire format. To use the new metadata with another session, both participants need pi-comms **0.1.4 or later**; older receivers do not understand the added fields and may reject the message. The sender must treat uncertain outcomes as uncertain and never blindly resend. Work references do not persist across runtime resets, confer access, infer task completion or combine transcripts across participants.
+
+## Structured replies and colleague-reported work (0.1.5+)
+
+Use **plain text** for the result; add `structured` as an optional JSON object when a caller needs fields such as `tests_passing`, `files_changed` or counts. pi-comms transports the object without interpreting the claims or requiring a domain schema. The existing message-size bound applies to the combined payload.
+
+A reply may also include `report: {request:"<original request message ID>",state:"complete"}`. The report is **the colleague's statement**, not transport evidence or the requester's acceptance. State can be `progress`, `needs-input` (a question or decision is required), `blocked` or `complete`. Reports are optional; an ordinary reply remains valid and does not require a status.
+
+The original request ID appears in the recipient's incoming message as **Message ID**. The `respondTo` return handle is a separate value. A report must refer to a request actually received from this colleague in the **same exchange**. After a clarification round, reply using the current handle but continue to reference the original request ID in `report.request`. `comms_inspect({requests:[...]})` exposes the latest verified report and how many reports the peer sent, separate from direct reply progress—even when the report replies to a later clarification. Unknown original request records are marked unverified rather than accepted as evidence.
+
+Reports and structured data appear in ordinary human/model views and structured tool output. Contact revocation still withholds message content from the agent. `comms_ask` continues to wait for the **first linked reply**; it does not wait for the final report. Choosing to wait for a reported outcome belongs to the later M2-C milestone.
+
+New `report` and `structured` fields require **pi-comms 0.1.5 or later on both participating sessions**. Older peers may reject these messages; report an uncertain delivery rather than retrying blindly. Conversations and report links remain memory-only until a separate durability milestone.
 
 ## Presence, message outcomes and recipes
 
@@ -48,7 +62,7 @@ For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. 
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.4.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.5.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -56,13 +70,13 @@ To try without modifying normal Pi settings, use an owned temporary agent direct
 ```sh
 mkdir -p /tmp/comms-try/package
 # Extract the reviewed tarball into /tmp/comms-try/package (npm tarballs contain package/).
-tar -xzf pi-comms-0.1.4.tgz -C /tmp/comms-try
+tar -xzf pi-comms-0.1.5.tgz -C /tmp/comms-try
 PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 ```
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.3`, which is published). The `0.1.4` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.4`, which is published). The `0.1.5` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 

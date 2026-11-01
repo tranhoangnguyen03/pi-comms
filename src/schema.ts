@@ -6,6 +6,16 @@ const Text = Type.String({ minLength: 1, pattern: '\\S' });
 const Ref = Type.Object({ uri: Text, label: Text }, { additionalProperties: false });
 export const WorkRef = Type.String({ minLength: 1, maxLength: 120, pattern: '\\S' });
 const RecipientLabel = Type.String({ minLength: 1, maxLength: 120, pattern: '\\S' });
+// Optional data alongside the readable message. The sender chooses the field names;
+// pi-comms preserves the object and does not interpret domain-specific claims.
+const Structured = Type.Object({}, { additionalProperties: true, description: 'Optional JSON object of machine-readable details, not transport proof.' });
+const Report = Type.Object({
+  request: Type.String({ ...Id, description: 'Exact original request message ID this colleague is reporting on.' }),
+  state: Type.Union([
+    Type.Literal('progress'), Type.Literal('needs-input'),
+    Type.Literal('blocked'), Type.Literal('complete'),
+  ], { description: 'Colleague-reported work state; not work acceptance or runtime evidence.' }),
+}, { additionalProperties: false, description: 'Optional work report tied to an existing request in this exchange.' });
 export const MessageInput = Type.Object({
   to: Type.Optional(Type.String({ ...Text, description: 'Native session ID or current exact unique name. Use only for a new exchange.' })),
   subject: Type.Optional(Type.String({ ...Text, description: 'Subject required with to; omit for a reply.' })),
@@ -13,6 +23,8 @@ export const MessageInput = Type.Object({
   text: Type.String({ ...Text, description: 'Full message payload.' }),
   workRef: Type.Optional(Type.String({ ...WorkRef, description: 'Optional ticket/work reference for a new exchange; replies inherit it. No access control.' })),
   recipientLabel: Type.Optional(Type.String({ ...RecipientLabel, description: 'Optional role/expertise label for the exact recipient in this exchange. New requests only; sender-supplied context, not authority.' })),
+  structured: Type.Optional(Structured),
+  report: Type.Optional(Report),
   refs: Type.Optional(Type.Array(Ref, { description: 'Work-product pointers, not uploads.' })),
   corrects: Type.Optional(Type.String({ ...Id, description: 'Your earlier message ID to this same peer, when correcting it.' })),
 }, { additionalProperties: false });
@@ -37,6 +49,7 @@ export type InspectInput = Static<typeof InspectInput>;
 export const EnvelopeSchema = Type.Object({
   id: Id, exchange: Id, subject: Text, text: Text, refs: Type.Array(Ref),
   workRef: Type.Optional(WorkRef), recipientLabel: Type.Optional(RecipientLabel),
+  structured: Type.Optional(Structured), report: Type.Optional(Report),
   replyTo: Type.Union([Id, Type.Null()]), corrects: Type.Union([Id, Type.Null()]),
   createdAt: Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}T' }),
 }, { additionalProperties: false });
@@ -49,6 +62,7 @@ export function validate(schema: TSchema, value: unknown) {
     if (input.respondTo && (input.to !== undefined || input.subject !== undefined)) throw new Error('INVALID_INPUT: reply routing was combined with new-message routing. For a new message use { to, subject, text }; omit respondTo. For a reply use { respondTo, text } with a real incoming return handle; omit to and subject. refs and corrects are optional; use corrects only for a real earlier message ID. No message was sent for this input.');
     if (!input.respondTo && (!input.to || !input.subject)) throw new Error('INVALID_INPUT: new-message routing requires to and subject. Retry with { to, subject, text }, or reply with { respondTo, text }. refs and corrects are optional; never fabricate IDs. No message was sent for this input.');
     if (input.respondTo && (input.workRef !== undefined || input.recipientLabel !== undefined)) throw new Error('INVALID_INPUT: replies inherit the work reference and cannot assign a recipient label. Use { respondTo, text } without workRef or recipientLabel. No message was sent.');
+    if (input.report && !input.respondTo) throw new Error('INVALID_INPUT: a work report must reply to an existing request with { respondTo, text, report: { request, state } }. No message was sent.');
   }
   if (schema === AskInput) for (const request of (value as AskInput).requests) validate(MessageInput, request);
   if (schema === InspectInput) {
