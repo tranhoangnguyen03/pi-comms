@@ -415,7 +415,7 @@ export default function comms(pi: ExtensionAPI) {
       if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
       return sent;
     }, true), renderResult });
-  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Send and wait for 1–30 independent requests: {requests:[{to,subject,text},...],timeoutSeconds?,waitFor?}. Default waits for each first linked reply. waitFor:"reported-outcome" waits for peer-reported complete, blocked or needs-input; plain replies also surface promptly without claiming completion. Or {outcomes:[originalOutgoingRequestId,...],timeoutSeconds?} waits on existing work without resending. Progress alone does not end the wait. Interruption and timeout end only local waiting; late replies remain possible. No automatic retries.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 peers: {requests:[...]} sends new requests and defaults to first-reply waiting. Set waitFor:"reported-outcome" for complete/blocked/needs-input reports; progress alone does not end waiting, plain clarifications still return. {outcomes:[originalRequestId,...]} waits on existing requests without resending. Timeout or interruption ends only local waiting; never automatically retry.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
     execute: async (call, input, signal) => run(async () => {
       validate(AskInput, input);
       const current = runtime!, pending = asks!;

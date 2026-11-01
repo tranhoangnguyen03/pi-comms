@@ -44,7 +44,8 @@ export class Asks {
   watch(call: string, item: AskItem, entry: Entry, seconds: number) {
     const waiting = this.register(call, item, entry, seconds, 'reported-outcome');
     this.waits.get(entry.message.id)?.start();
-    this.admit(); // A previously arrived but still unadmitted report may already be waiting.
+    // The host owns message admission. Callers run their usual human-priority
+    // checks before admitting a previously buffered report.
     return waiting;
   }
   approvalDialog(open: boolean) {
@@ -62,19 +63,20 @@ export class Asks {
   }
   // A plain reply anywhere down the original reply chain must be surfaced to the
   // caller. Without a report it cannot be treated as completion or held forever.
-  private belongsTo(request: string, entry: Entry) {
-    const original = this.runtime.entry(request)?.message;
-    if (!original || original.exchange !== entry.message.exchange) return false;
+  private nearestWaitForPlainReply(entry: Entry) {
     const seen = new Set<string>();
     let parent = entry.message.replyTo;
     while (parent && !seen.has(parent)) {
-      if (parent === request) return true;
       seen.add(parent);
       const prior = this.runtime.entry(parent)?.message;
-      if (!prior || prior.exchange !== original.exchange) return false;
+      if (!prior || prior.exchange !== entry.message.exchange) return undefined;
+      // When both original and follow-up requests are watched, use the
+      // closest ancestor that was actually addressed to this replying peer.
+      const wait = this.waits.get(parent);
+      if (wait?.mode === 'reported-outcome' && wait.item.peer === entry.message.from) return wait;
       parent = prior.replyTo;
     }
-    return false;
+    return undefined;
   }
   admit() {
     for (const id of this.runtime.eligible()) {
@@ -99,13 +101,8 @@ export class Asks {
         // neither can silently settle a different wait.
         continue;
       }
-      for (const [request, wait] of this.waits) {
-        if (wait.mode === 'reported-outcome' && wait.item.peer === entry.message.from &&
-            this.belongsTo(request, entry)) {
-          wait.finish('replied', id); // Explicitly unclassified reply; not work completion.
-          break;
-        }
-      }
+      const wait = this.nearestWaitForPlainReply(entry);
+      if (wait) wait.finish('replied', id); // Unclassified reply, not completion.
     }
   }
   claimed(id: string) {

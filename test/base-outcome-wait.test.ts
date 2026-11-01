@@ -149,3 +149,64 @@ test('cannot start two simultaneous watches on one request', async () => {
   assert.throws(() => asks.watch('two', second, lead.entry(sent.message.id)!, .5), /active wait/);
   asks.end('interrupted', 'one'); await waiting; asks.present('one');
 });
+
+
+test('watch registration does not bypass the host admission gate for buffered messages', async () => {
+  const { lead, reviewer, fromA, fromB } = pair(), asks = new Asks(lead);
+  const original = await lead.send({ to: b, subject: 'A', text: 'Review A' });
+  reviewer.receive(a, fromA[0]);
+  await reviewer.send({
+    respondTo: reviewer.entry(original.message.id)!.returnHandle!,
+    text: 'Reported completion', report: { request: original.message.id, state: 'complete' },
+  });
+  lead.receive(b, fromB[0]);
+
+  const item: AskItem = {};
+  asks.open('gate', [item], 'reported-outcome');
+  const pending = asks.watch('gate', item, lead.entry(original.message.id)!, .25);
+  assert.equal(item.outcome, undefined, 'watch cannot consume a buffered message before the host admits it');
+  assert.equal(asks.claimed(fromB[0].id), false);
+  assert.equal(lead.waiting.includes(fromB[0].id), true);
+
+  asks.admit(); await pending;
+  assert.equal(item.outcome, 'reported-complete');
+  asks.present('gate');
+  assert.deepEqual(lead.waiting, []);
+});
+
+test('plain clarification goes to the nearest watched request in the same exchange', async () => {
+  const { lead, reviewer, fromA, fromB } = pair(), asks = new Asks(lead);
+  const original = await lead.send({ to: b, subject: 'Review A', text: 'Review the design' });
+  reviewer.receive(a, fromA[0]);
+  const question = await reviewer.send({
+    respondTo: reviewer.entry(original.message.id)!.returnHandle!, text: 'Need details for A',
+  });
+  lead.receive(b, fromB[0]);
+  const followup = await lead.send({
+    respondTo: lead.entry(question.message.id)!.returnHandle!, text: 'Follow-up B: more details',
+  });
+  reviewer.receive(a, fromA[1]);
+
+  const first: AskItem = {}, second: AskItem = {};
+  asks.open('shared', [first, second], 'reported-outcome');
+  const pA = asks.watch('shared', first, lead.entry(original.message.id)!, .35);
+  const pB = asks.watch('shared', second, lead.entry(followup.message.id)!, .35);
+
+  const plain = await reviewer.send({
+    respondTo: reviewer.entry(followup.message.id)!.returnHandle!, text: 'Answer to B only',
+  });
+  lead.receive(b, fromB[1]);
+  asks.admit(); await pB;
+  assert.equal(second.outcome, 'replied', 'B receives the plain reply addressed to B');
+  assert.equal(second.reply, plain.message.id);
+  assert.equal(first.outcome, undefined, 'A is still waiting for its own report');
+
+  const final = await reviewer.send({
+    respondTo: reviewer.entry(original.message.id)!.returnHandle!,
+    text: 'Review A finished', report: { request: original.message.id, state: 'complete' },
+  });
+  lead.receive(b, fromB[2]); asks.admit(); await pA;
+  assert.equal(first.outcome, 'reported-complete');
+  assert.equal(first.reply, final.message.id);
+  asks.present('shared');
+});

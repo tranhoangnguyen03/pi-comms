@@ -299,6 +299,43 @@ test('reported-outcome ask surfaces questions, then watches original request wit
   } finally { await reviewer.close(); await lead.close(); }
 });
 
+test('resumed outcome wait keeps pending human editor input ahead of a buffered peer report', async () => {
+  const lead = await participant('wait-priority-lead'), reviewer = await participant('wait-priority-reviewer');
+  try {
+    lead.confirm(true);
+    const sent = data(await lead.tool('comms_message', {
+      to: reviewer.id(), subject: 'Human-priority review', text: 'Report your result.'
+    })).data;
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('Human-priority review')));
+    const initial = data(await reviewer.tool('comms_inspect', { message: sent.message.id })).data;
+
+    lead.draft('My human instruction is not yet submitted');
+    const report = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'Reviewed the request',
+      report: { request: sent.message.id, state: 'complete' },
+    })).data;
+    await waitFor(async () => {
+      const items = data(await lead.tool('comms_inspect', { queue: 'self' })).data.items;
+      return items.some((entry: any) => entry.message.id === report.message.id);
+    });
+    const before = data(await lead.tool('comms_inspect', { queue: 'self' })).data.items;
+    assert.equal(lead.runtime.session.sessionManager.getEntries().some((entry: any) =>
+      entry.type === 'custom_message' && entry.customType === 'comms_batch' &&
+      entry.details?.ids?.includes(report.message.id)), false, 'human draft prevents model admission');
+    assert.ok(before.some((entry: any) => entry.message.id === report.message.id),
+      'human draft keeps the message in the receiver queue');
+
+    const wait = data(await lead.tool('comms_ask', {
+      outcomes: [sent.message.id], timeoutSeconds: .2,
+    })).data;
+    assert.equal(wait.items[0].outcome, 'interrupted', 'human draft takes priority over a resumed outcome wait');
+    assert.equal(wait.items[0].reply, undefined);
+    const after = data(await lead.tool('comms_inspect', { queue: 'self' })).data.items;
+    assert.ok(after.some((entry: any) => entry.message.id === report.message.id),
+      'interrupted outcome wait must not consume the held report');
+  } finally { lead.draft(''); await reviewer.close(); await lead.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];

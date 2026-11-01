@@ -7,6 +7,7 @@
 - Keep the default first-linked-reply ask unchanged. Progress-only reports do not end outcome waits. Human interruption, Pause, revocation, timeout and disconnection still end only the local wait; late messages remain available.
 - Preserve reported outcomes and first-reply semantics in plain and structured results, on-demand guidance and collapsed human cards, without adding tools, state stores or an acceptance workflow.
 - Verify requested-outcome and existing-request waiting through focused runtime tests and native Pi integration; include recovery and duplicate-wait checks.
+- Keep outcome-watch admission behind existing human-priority checks, and route unclassified replies to the closest matching active request in a clarification chain. Trim the ask tool guidance while keeping long recipes on demand.
 
 ## [0.1.5] - 2026-11-01
 
