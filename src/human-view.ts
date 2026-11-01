@@ -1,4 +1,4 @@
-import { observationLabel } from './communication-view.ts';
+import { observationLabel, messageContextLines } from './communication-view.ts';
 import type { ExtensionContext, KeybindingsManager, Theme } from '@earendil-works/pi-coding-agent';
 import { matchesKey, ScrollView, Text, truncateToWidth, type Component, type TuiMouseEvent } from '@earendil-works/pi-tui';
 import type { Runtime } from './runtime.ts';
@@ -24,6 +24,7 @@ export function inspectionText(data: Inspection, labels: Labels, technical = fal
     lines.push(`Subject: ${m.subject}`, `Contact: ${labels.approved(m.from === labels.self ? m.to : m.from) ? 'approved' : 'not approved'}`,
       `Latest observation: ${observationLabel(entry)}`,
       `${entry.responses.length} linked response(s) — not proof of completed work.`);
+    lines.push(...messageContextLines(m));
     if (m.replyTo) lines.push('Reply to an earlier message.');
     if (m.corrects) lines.push('Correction to an earlier message.');
     if (entry.linkage) lines.push('Context lost: the referenced request is unavailable.');

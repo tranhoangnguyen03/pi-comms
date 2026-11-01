@@ -38,6 +38,13 @@ export function peerSummary(row: { presence: string; activity?: string; activity
   return 'online · activity unknown';
 }
 
+export function messageContextLines(message: { workRef?: string; recipientLabel?: string }): string[] {
+  return [
+    ...(message.workRef ? [`Work: ${message.workRef}`] : []),
+    ...(message.recipientLabel ? [`Recipient label (sender-supplied, not authority): ${message.recipientLabel}`] : []),
+  ];
+}
+
 export function requestOutcomeLabel(outcome?: string): string {
   switch (outcome) {
     case 'reply-received': case 'replied': return 'Reply received';

@@ -23,6 +23,16 @@ export class Runtime {
   approval(id: string) { const peer = this.approvals.get(id); return peer ? { ...peer } : undefined; }
   isApproved = (id: string) => this.approvals.has(id);
   known() { return [...this.approvals.values()].map(p => ({ ...p })); }
+  // Only describe labels this session supplied for exact recipients of accepted requests.
+  // A label belongs to an exchange, not the recipient's global identity or permissions.
+  peerLabels(id: string) {
+    return [...this.records.values()].reverse()
+      .filter(entry => entry.message.from === this.self && entry.message.to === id &&
+        entry.message.recipientLabel !== undefined && entry.state === 'accepted')
+      .slice(0, 8)
+      .map(entry => ({ exchange: entry.message.exchange, workRef: entry.message.workRef ?? null,
+        label: entry.message.recipientLabel!, source: 'sender-supplied' as const }));
+  }
   entry(id: string) { return this.records.get(id); }
   fact(id: string, kind: Fact['kind'], source: string, evidenceRef?: string) {
     const entry = this.records.get(id);
@@ -42,7 +52,16 @@ export class Runtime {
   async send(input: MessageInput, registered?: (entry: Entry) => void) {
     const { to, source } = this.contactFor(input);
     if (!this.isApproved(to)) throw new Error('CONTACT_NOT_APPROVED');
-    const envelope: Envelope = { id: randomUUID(), exchange: source?.exchange ?? randomUUID(), subject: source?.subject ?? ('subject' in input ? input.subject : ''), text: input.text, refs: input.refs ?? [], replyTo: source?.id ?? null, corrects: input.corrects ?? null, createdAt: new Date().toISOString() };
+    const workRef = source?.workRef ?? input.workRef;
+    const envelope: Envelope = {
+      id: randomUUID(), exchange: source?.exchange ?? randomUUID(),
+      subject: source?.subject ?? ('subject' in input ? input.subject : ''),
+      text: input.text, refs: input.refs ?? [],
+      ...(workRef ? { workRef } : {}),
+      ...(!source && input.recipientLabel ? { recipientLabel: input.recipientLabel } : {}),
+      replyTo: source?.id ?? null, corrects: input.corrects ?? null,
+      createdAt: new Date().toISOString(),
+    };
     checkSize(envelope, this.approval(to)?.context);
     const entry: Entry = { message: { ...envelope, from: this.self, to }, facts: [], state: 'unknown' };
     this.records.set(envelope.id, entry);
@@ -63,9 +82,13 @@ export class Runtime {
     }
     let contextLost = false;
     if (envelope.replyTo) {
+      if (envelope.recipientLabel !== undefined) throw new Error('INVALID_INPUT: recipient label belongs to the new exchange, not a reply');
       const source = this.records.get(envelope.replyTo)?.message;
       if (!source) contextLost = true;
-      else if (source.from !== this.self || source.to !== from || source.exchange !== envelope.exchange) throw new Error('INVALID_INPUT: invalid reply linkage');
+      else {
+        if (source.from !== this.self || source.to !== from || source.exchange !== envelope.exchange) throw new Error('INVALID_INPUT: invalid reply linkage');
+        if (source.workRef !== envelope.workRef) throw new Error('INVALID_INPUT: reply must preserve the exchange work reference');
+      }
     }
     if (envelope.corrects) {
       const source = this.records.get(envelope.corrects)?.message;
@@ -121,24 +144,30 @@ export class Runtime {
       const request = this.records.get(id);
       if (!request || request.message.from !== this.self) return { request: id, outcome: 'context-lost' };
       const replies = records.filter(entry => entry.message.replyTo === id && entry.message.from === request.message.to);
-      return { request: id, peer: request.message.to, subject: request.message.subject, state: request.state,
+      return { request: id, peer: request.message.to, subject: request.message.subject, workRef: request.message.workRef ?? null, state: request.state,
         code: request.code, outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
         responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)) };
     }) };
-    if (input.peer || !input.exchange && !input.queue && !input.outbox) {
+    if (input.peer || input.workRef || !input.exchange && !input.queue && !input.outbox) {
       const latest = new Map<string, Entry>();
       for (const entry of records) {
-        if (!input.peer || entry.message.from === input.peer || entry.message.to === input.peer) {
-          latest.delete(entry.message.exchange); latest.set(entry.message.exchange, entry);
-        }
+        if (input.peer && entry.message.from !== input.peer && entry.message.to !== input.peer) continue;
+        if (input.workRef && (entry.message.workRef !== input.workRef || !this.visible(entry, audience))) continue;
+        latest.delete(entry.message.exchange); latest.set(entry.message.exchange, entry);
       }
       const exchanges = [...latest.values()].reverse().map(entry => {
         const visible = this.visible(entry, audience);
+        const labeled = visible ? records.find(record => record.message.exchange === entry.message.exchange &&
+          record.message.recipientLabel !== undefined && this.visible(record, audience))?.message : undefined;
         return { exchange: entry.message.exchange, peer: entry.message.from === this.self ? entry.message.to : entry.message.from,
-          ...(visible ? { subject: entry.message.subject, preview: entry.message.text.slice(0, 240), at: entry.message.createdAt } : { code: 'CONTACT_NOT_APPROVED' }),
+          ...(visible ? {
+            subject: entry.message.subject, preview: entry.message.text.slice(0, 240), at: entry.message.createdAt,
+            ...(entry.message.workRef ? { workRef: entry.message.workRef } : {}),
+            ...(labeled ? { recipientLabel: labeled.recipientLabel, labeledSession: labeled.to, labelSource: 'sender-supplied' } : {}),
+          } : { code: 'CONTACT_NOT_APPROVED' }),
           state: entry.state, latestMessage: entry.message.id };
       });
-      if (input.peer) {
+      if (input.peer || input.workRef) {
         const start = input.cursor ? exchanges.findIndex(e => e.exchange === input.cursor) + 1 : 0;
         if (input.cursor && !start) throw new Error('CONTEXT_LOST');
         const items = exchanges.slice(start, start + 30);

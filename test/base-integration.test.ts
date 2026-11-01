@@ -94,6 +94,41 @@ test('peer discovery reports live host activity separately from reachability', a
   } finally { reviewer.release(); await reviewer.close(); await coordinator.close(); }
 });
 
+test('native first-contact metadata groups an exchange and keeps labels descriptive', async () => {
+  const lead = await participant('work-lead'), reviewer = await participant('work-reviewer');
+  try {
+    lead.confirm(true);
+    const sent = data(await lead.tool('comms_message', {
+      to: reviewer.id(), subject: 'Security review', text: 'Review safely and report findings.',
+      workRef: 'AUTH-42', recipientLabel: 'Security reviewer',
+    }));
+    assert.equal(sent.ok, true);
+    assert.equal(sent.data.message.workRef, 'AUTH-42');
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('Security reviewer')));
+    assert.match(text(reviewer.observed.at(-1)!), /Recipient label \(sender-supplied, not authority\)/);
+    const peers = data(await lead.tool('comms_peers', {})).data.items;
+    const reviewerPeer = peers.find((p: any) => p.id === reviewer.id());
+    assert.equal(reviewerPeer.peerLabels[0].label, 'Security reviewer');
+    assert.equal(reviewerPeer.peerLabels[0].workRef, 'AUTH-42');
+    assert.equal(reviewerPeer.peerLabels[0].source, 'sender-supplied');
+
+    const onReviewer = data(await reviewer.tool('comms_inspect', { workRef: 'AUTH-42' })).data.items;
+    assert.equal(onReviewer.length, 1);
+    const seen = data(await reviewer.tool('comms_inspect', { message: sent.data.message.id })).data;
+    const replied = data(await reviewer.tool('comms_message', {
+      respondTo: seen.returnHandle, text: 'The retry could duplicate a write.',
+    }));
+    assert.equal(replied.ok, true);
+    assert.equal(replied.data.message.workRef, 'AUTH-42');
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('duplicate a write')));
+    const onLead = data(await lead.tool('comms_inspect', { workRef: 'AUTH-42' })).data.items;
+    assert.equal(onLead.length, 1);
+    assert.equal(onLead[0].recipientLabel, 'Security reviewer');
+    assert.equal(onLead[0].labelSource, 'sender-supplied');
+    assert.equal(data(await lead.tool('comms_inspect', { workRef: 'OTHER-42' })).data.items.length, 0);
+  } finally { await reviewer.close(); await lead.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];

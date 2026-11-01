@@ -13,7 +13,7 @@ function checkSchemas(schemas: any[]) {
   const [message, ask] = schemas;
   assert.deepEqual(message.required, ['text']);
   assert.deepEqual(ask.properties.requests.items.required, ['text']);
-  for (const input of [send, reply]) {
+  for (const input of [send, reply, { ...send, workRef: 'AUTH-42', recipientLabel: 'Security reviewer' }]) {
     assert.ok(Check(message, input));
     assert.ok(Check(ask, { requests: [input] }));
   }

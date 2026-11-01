@@ -1,9 +1,9 @@
-import { observationLabel } from './communication-view.ts';
+import { observationLabel, messageContextLines } from './communication-view.ts';
 import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent';
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@earendil-works/pi-tui';
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 
-export type CardMessage = { id: string; from: string; to: string; subject: string; text: string; exchange: string; replyTo?: string | null; corrects?: string | null; at: string; fact: 'queued' | 'posted' | 'saved' | 'unknown' };
+export type CardMessage = { id: string; from: string; to: string; subject: string; text: string; workRef?: string; recipientLabel?: string; exchange: string; replyTo?: string | null; corrects?: string | null; at: string; fact: 'queued' | 'posted' | 'saved' | 'unknown' };
 
 // Adapted from intercom's MIT InlineMessageComponent; notice in THIRD-PARTY-NOTICES.md.
 export class InlineCard implements Component {
@@ -26,6 +26,7 @@ export class InlineCard implements Component {
     const lines = [this.theme.fg('muted', `╭${'─'.repeat(inner)}╮`), frame(this.theme.fg('toolTitle', headline))];
     for (const message of this.messages) {
       if (this.messages.length > 1) lines.push(frame(`${message.from} → ${message.to} · ${message.subject}`));
+      for (const context of messageContextLines(message)) lines.push(frame(context));
       if (message.fact === 'unknown') lines.push(frame('Receipt state unknown'));
       if (message.corrects) lines.push(frame('Correction to an earlier message'));
       for (const line of wrapTextWithAnsi(message.text, inner)) lines.push(frame(line));

@@ -3,7 +3,7 @@ import { Text } from '@earendil-works/pi-tui';
 import { Runtime, type Entry } from './runtime.ts';
 import { Asks, type AskItem } from './ask.ts';
 import { modelView } from './model-view.ts';
-import { peerActivity, requestOutcomeLabel } from './communication-view.ts';
+import { peerActivity, requestOutcomeLabel, messageContextLines } from './communication-view.ts';
 import { Id, EnvelopeSchema, MessageInput, AskInput, PeersInput, InspectInput, Output, validate } from './schema.ts';
 import { sendExactSession } from './transport/send.ts';
 import { connect } from './transport/start.ts';
@@ -155,7 +155,7 @@ export default function comms(pi: ExtensionAPI) {
     const m = entry.message;
     const kinds = entry.facts.map(f => f.kind);
     const fact = kinds.includes('saved') ? 'saved' : kinds.includes('posted') ? 'posted' : kinds.includes('queued') ? 'queued' : 'unknown';
-    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
+    return { id: m.id, from: name(m.from), to: name(m.to), subject: m.subject, workRef: m.workRef, recipientLabel: m.recipientLabel, text: (entry.linkage ? 'Context lost: referenced request is unavailable; do not infer restored linkage.\n' : '') + m.text + m.refs.map(r => `\n${r.label}: ${r.uri}`).join(''), exchange: m.exchange, replyTo: m.replyTo, corrects: m.corrects, at: m.createdAt, fact };
   }
   function pump(busyBoundary = false) {
     if (!ctx || !runtime || runtime.paused || approvalDialog || ctx.hasPendingMessages() || (ctx.hasUI && ctx.ui.getEditorText().length)) return;
@@ -170,7 +170,7 @@ export default function comms(pi: ExtensionAPI) {
     }
     if (!ids.length) return;
     const entries = ids.map(id => runtime!.entry(id)!);
-    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
+    const content = entries.map(e => `From ${name(e.message.from)} · ${e.message.subject}\n${messageContextLines(e.message).map(line => `${line}\n`).join('')}${e.linkage ? 'Context lost: referenced request unavailable.\n' : ''}${e.message.corrects ? `Correction to message ${e.message.corrects}\n` : ''}${e.message.text}${e.message.refs.map(r => `\n${r.label}: ${r.uri}`).join('')}\n\nReply with respondTo: "${e.returnHandle}" (reusable)`).join('\n\n---\n\n');
     if (!busyBoundary) wakeReserved = true;
     try {
       pi.sendMessage({ customType: 'comms_batch', display: true, content, details: { messages: entries.map(e => ({ ...card(e), fact: 'posted' })), ids } }, busyBoundary ? { deliverAs: 'steer' } : { triggerTurn: true });
@@ -279,7 +279,7 @@ export default function comms(pi: ExtensionAPI) {
     const all = [...new Set([...known.map(p => p.id), ...(view === 'all' ? live.map(p => p.id) : [])])];
     const ranked = all.map(id => {
       const approval = known.find(p => p.id === id); const session = live.find(p => p.id === id);
-      return { id, name: session?.name ?? peerNames.get(id) ?? approval?.name ?? id, approved: !!approval, context: approval?.context ?? null, presence: session ? 'online' : 'offline', ...peerActivity(session), reason: approval ? 'user-approved colleague for this work' : 'approval required', cwd: session?.cwd, lastActivity: session?.lastActivity };
+      return { id, name: session?.name ?? peerNames.get(id) ?? approval?.name ?? id, approved: !!approval, context: approval?.context ?? null, peerLabels: runtime!.peerLabels(id), presence: session ? 'online' : 'offline', ...peerActivity(session), reason: approval ? 'user-approved colleague for this work' : 'approval required', cwd: session?.cwd, lastActivity: session?.lastActivity };
     });
     ranked.sort((a, b) => (a.presence === 'offline' ? 2 : a.approved ? 0 : 1) - (b.presence === 'offline' ? 2 : b.approved ? 0 : 1));
     const start = cursor ? ranked.findIndex(p => p.id === cursor) + 1 : 0;
@@ -364,7 +364,7 @@ export default function comms(pi: ExtensionAPI) {
       const data = await work(); const output = result(data);
       if (compact) {
         const sent = data as ReturnType<Runtime['view']>;
-        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}. Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
+        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
       }
       return output;
     }
@@ -375,18 +375,18 @@ export default function comms(pi: ExtensionAPI) {
     // Native validation/permission errors happen before execute and have no pi-comms details.
     if (typeof body?.ok !== 'boolean') return new Text(value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n') || 'No textual communication result available.', 0, 0);
     const summary = body.data?.timeoutSeconds !== undefined
-      ? body.data.items.map((item: AskItem) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''} · ${requestOutcomeLabel(item.outcome)}`).join('\n')
+      ? body.data.items.map((item: AskItem) => `${item.peer ? name(item.peer) : 'Request'} · ${item.subject ?? ''}${item.workRef ? ` · ${item.workRef}` : ''} · ${requestOutcomeLabel(item.outcome)}`).join('\n')
       : value.content?.filter(block => block.type === 'text').map(block => block.text ?? '').join('\n').split('\n').slice(0, 3).join('\n');
     return new Text(body?.ok ? `${summary}${(_options as { expanded?: boolean }).expanded ? `\n${JSON.stringify(body.data, null, 2)}` : '\nCtrl+O expands evidence'}` : theme.fg('error', body?.error ? `${body.error.message}\n${body.error.nextAction}` : 'Communication failed'), 0, 0);
   };
-  pi.registerTool({ name: 'comms_peers', label: 'Communication colleagues', description: 'Find exact colleagues: approved online, other online (approval needed), then known offline. Working/idle is a timestamped host report, not task progress; stale status is unknown. Discovery sends nothing. For multi-step workflows, load /skill:pi-comms.', parameters: PeersInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_peers', label: 'Communication colleagues', description: 'Discover exact colleagues and requester-supplied labels for each collaboration. Reachability is separate from working/idle status; labels are not authority. Approved online peers first; discovery sends nothing. For examples load /skill:pi-comms.', parameters: PeersInput, outputSchema: Output,
     execute: async (_id, input) => run(() => { validate(PeersInput, input); return peers(input.view, input.cursor); }), renderResult });
   async function prepareSend(input: MessageInput, signal?: AbortSignal, item?: AskItem) {
     const current = runtime!;
     validate(MessageInput, input);
     const resolved = input.to ? { ...input, to: await resolvePeer(input.to) } : input;
     const { to, source } = current.contactFor(resolved);
-    if (item) { item.peer = to; item.subject = source?.subject ?? input.subject; }
+    if (item) { item.peer = to; item.subject = source?.subject ?? input.subject; item.workRef = source?.workRef ?? input.workRef; }
     if (!current.isApproved(to)) {
       await ensureConnection();
       const peer = (await client!.listSessions()).find(p => p.id === to);
@@ -397,14 +397,14 @@ export default function comms(pi: ExtensionAPI) {
     return resolved;
   }
   const guidance = 'Send only necessary requests, questions, findings, corrections or material updates. Skip acknowledgement-only exchanges; stop when the request is satisfied.';
-  pi.registerTool({ name: 'comms_message', label: 'Peer message', description: 'Send without waiting: {to,subject,text}. Reply: {respondTo,text} with a reusable received handle, omitting to/subject. Exact unique names resolve once to native IDs. First contact asks the owner. Accepted does not prove read or completion. Unknown outcome: inspect before resending. Runtime handles reset on reload or switch.', promptGuidelines: [guidance], parameters: MessageInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_message', label: 'Peer message', description: 'Send: {to,subject,text,workRef?,recipientLabel?}; workRef groups this exchange and recipientLabel describes its recipient (not authority). Reply: {respondTo,text}; workRef inherits, omit to/subject/metadata. First contact asks owner. Exact identities stay pinned. Accepted is not completion; inspect unknown sends before retrying.', promptGuidelines: [guidance], parameters: MessageInput, outputSchema: Output,
     execute: async (_id, input, signal) => run(async () => {
       const current = runtime!;
       const sent = await current.send(await prepareSend(input, signal));
       if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
       return sent;
     }, true), renderResult });
-  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 peers independently and wait for each first linked reply or local ending: {requests:[{to,subject,text},...],timeoutSeconds?}. Replies may be clarifications, not completion. Each 60s default clock starts after acceptance, excluding approval. Timeout, Pause or interruption ends only local waiting; late replies remain possible. No automatic resends. Use comms_message when no wait is needed.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 existing peers: {requests:[{to,subject,text,workRef?,recipientLabel?},...],timeoutSeconds?}. Optional workRef groups each exchange; labels describe recipients, not authority. Returns the first linked reply (possibly clarification) or local ending, not work completion. Wait starts after acceptance; late replies remain possible. Never automatically resend.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
     execute: async (call, input, signal) => run(async () => {
       validate(AskInput, input);
       const current = runtime!, pending = asks!;
@@ -458,6 +458,6 @@ export default function comms(pi: ExtensionAPI) {
       return { ...message, content: output.content, details: output.structuredContent };
     }) };
   });
-  pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {requests:[messageId,...]} exact reply progress; {peer}, {exchange}, {message}, {queue:"self"} or {outbox:"self"} for evidence. Replies are not work completion. Unapproved payloads stay hidden from the model; only the owner can approve them. A missing runtime record is context lost, not delivery proof. Do not poll without a reason.', parameters: InspectInput, outputSchema: Output,
+  pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {workRef:"TICKET"} available related exchanges; {requests:[messageId,...]} response progress; {peer}, {exchange}, {message}, {queue:"self"} or {outbox:"self"} evidence. One selector. Work references do not expose other peers’ private messages. Unapproved content stays hidden; replies are not work completion.', parameters: InspectInput, outputSchema: Output,
     execute: async (_id, input) => run(async () => { validate(InspectInput, input); const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input; observeSaved(); return { ...runtime!.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } }; }), renderResult });
 }

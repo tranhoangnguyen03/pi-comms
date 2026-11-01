@@ -1,7 +1,7 @@
 import type { Entry, Runtime } from './runtime.ts';
 
 export type AskOutcome = 'replied' | 'timeout' | 'interrupted' | 'paused' | 'revoked' | 'disconnected' | 'context-lost' | 'not-sent' | 'rejected' | 'unknown';
-export type AskItem = { request?: string; peer?: string; subject?: string; outcome?: AskOutcome; code?: string; reply?: string };
+export type AskItem = { request?: string; peer?: string; subject?: string; workRef?: string; outcome?: AskOutcome; code?: string; reply?: string };
 type Wait = { item: AskItem; finish: (outcome: AskOutcome, reply?: string) => void; start: () => void; suspend: () => void };
 
 // Only wait/claim state lives here. Payloads, links and evidence stay in Runtime.
