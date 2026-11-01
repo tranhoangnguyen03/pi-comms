@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.5] - 2026-11-01
+
+- Allow optional `structured` JSON objects alongside readable messages and replies without a new tool or data store.
+- Add optional reply-only `report: { request, state }` for colleague-reported progress, needs-input, blocked and complete, linked to the exact original request in the same exchange.
+- Preserve report links across clarification turns; `comms_inspect({requests:[...]})` exposes the latest attributed report separately from the first direct reply and never infers work acceptance.
+- Show reported states and structured evidence in incoming native messages, human cards, inspection and tool results. Expose original message IDs to recipients so reports can name the correct request.
+- Test schema conversions, attribution, mixed-version limits, privacy, error cases and packaged native communication. Reporting metadata requires both peers on 0.1.5 or later.
+- Keep the original report target and unverified-link warning in collapsed ask results; reject non-JSON nested structured data, including non-finite numbers, before transport can change values.
+
 ## [0.1.4] - 2026-11-01
 
 - Add optional `workRef` to new messages and independent asks. Linked replies inherit it, and `comms_inspect({workRef})` groups exchanges visible to the inspecting participant.

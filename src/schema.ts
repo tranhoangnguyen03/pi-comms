@@ -6,6 +6,48 @@ const Text = Type.String({ minLength: 1, pattern: '\\S' });
 const Ref = Type.Object({ uri: Text, label: Text }, { additionalProperties: false });
 export const WorkRef = Type.String({ minLength: 1, maxLength: 120, pattern: '\\S' });
 const RecipientLabel = Type.String({ minLength: 1, maxLength: 120, pattern: '\\S' });
+// Optional data alongside the readable message. The sender chooses the field names;
+// pi-comms preserves the object and does not interpret domain-specific claims.
+const Structured = Type.Object({}, { additionalProperties: true, description: 'Optional JSON object of machine-readable details, not transport proof.' });
+const Report = Type.Object({
+  request: Type.String({ ...Id, description: 'Exact original request message ID this colleague is reporting on.' }),
+  state: Type.Union([
+    Type.Literal('progress'), Type.Literal('needs-input'),
+    Type.Literal('blocked'), Type.Literal('complete'),
+  ], { description: 'Colleague-reported work state; not work acceptance or runtime evidence.' }),
+}, { additionalProperties: false, description: 'Optional work report tied to an existing request in this exchange.' });
+// Validate the values actually representable on the JSON wire, before serializing.
+// An outer Type.Object check alone accepts Infinity and nested values that JSON
+// would coerce or drop. Walk only `structured` so existing message forms stay intact.
+function isJsonValue(value: unknown, active = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || active.has(value)) return false;
+  if (!Array.isArray(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+  }
+  active.add(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Array.isArray(value)) {
+    // Sparse array slots become null on the wire; extra own keys are dropped.
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== value.length + 1) return false;
+    for (let i = 0; i < value.length; i++) {
+      const descriptor = descriptors[String(i)];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isJsonValue(descriptor.value, active)) return false;
+    }
+  } else {
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return false;
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || !('value' in descriptor) || !isJsonValue(descriptor.value, active)) return false;
+    }
+  }
+  active.delete(value);
+  return true;
+}
+
 export const MessageInput = Type.Object({
   to: Type.Optional(Type.String({ ...Text, description: 'Native session ID or current exact unique name. Use only for a new exchange.' })),
   subject: Type.Optional(Type.String({ ...Text, description: 'Subject required with to; omit for a reply.' })),
@@ -13,6 +55,8 @@ export const MessageInput = Type.Object({
   text: Type.String({ ...Text, description: 'Full message payload.' }),
   workRef: Type.Optional(Type.String({ ...WorkRef, description: 'Optional ticket/work reference for a new exchange; replies inherit it. No access control.' })),
   recipientLabel: Type.Optional(Type.String({ ...RecipientLabel, description: 'Optional role/expertise label for the exact recipient in this exchange. New requests only; sender-supplied context, not authority.' })),
+  structured: Type.Optional(Structured),
+  report: Type.Optional(Report),
   refs: Type.Optional(Type.Array(Ref, { description: 'Work-product pointers, not uploads.' })),
   corrects: Type.Optional(Type.String({ ...Id, description: 'Your earlier message ID to this same peer, when correcting it.' })),
 }, { additionalProperties: false });
@@ -37,6 +81,7 @@ export type InspectInput = Static<typeof InspectInput>;
 export const EnvelopeSchema = Type.Object({
   id: Id, exchange: Id, subject: Text, text: Text, refs: Type.Array(Ref),
   workRef: Type.Optional(WorkRef), recipientLabel: Type.Optional(RecipientLabel),
+  structured: Type.Optional(Structured), report: Type.Optional(Report),
   replyTo: Type.Union([Id, Type.Null()]), corrects: Type.Union([Id, Type.Null()]),
   createdAt: Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}T' }),
 }, { additionalProperties: false });
@@ -44,11 +89,17 @@ export type Envelope = Static<typeof EnvelopeSchema>;
 export const Output = Type.Object({ ok: Type.Boolean(), data: Type.Optional(Type.Unknown()), error: Type.Optional(Type.Object({ code: Type.String(), message: Type.String(), nextAction: Type.String() })), observedAt: Type.String() });
 export function validate(schema: TSchema, value: unknown) {
   if (!Check<TSchema, unknown>(schema, value)) throw new Error('INVALID_INPUT');
+  if ((schema === MessageInput || schema === EnvelopeSchema) &&
+      Object.prototype.hasOwnProperty.call(value, 'structured') &&
+      !isJsonValue((value as { structured: unknown }).structured)) {
+    throw new Error('INVALID_INPUT: structured must contain only JSON values with finite numbers. No message was sent.');
+  }
   if (schema === MessageInput) {
     const input = value as MessageInput;
     if (input.respondTo && (input.to !== undefined || input.subject !== undefined)) throw new Error('INVALID_INPUT: reply routing was combined with new-message routing. For a new message use { to, subject, text }; omit respondTo. For a reply use { respondTo, text } with a real incoming return handle; omit to and subject. refs and corrects are optional; use corrects only for a real earlier message ID. No message was sent for this input.');
     if (!input.respondTo && (!input.to || !input.subject)) throw new Error('INVALID_INPUT: new-message routing requires to and subject. Retry with { to, subject, text }, or reply with { respondTo, text }. refs and corrects are optional; never fabricate IDs. No message was sent for this input.');
     if (input.respondTo && (input.workRef !== undefined || input.recipientLabel !== undefined)) throw new Error('INVALID_INPUT: replies inherit the work reference and cannot assign a recipient label. Use { respondTo, text } without workRef or recipientLabel. No message was sent.');
+    if (input.report && !input.respondTo) throw new Error('INVALID_INPUT: a work report must reply to an existing request with { respondTo, text, report: { request, state } }. No message was sent.');
   }
   if (schema === AskInput) for (const request of (value as AskInput).requests) validate(MessageInput, request);
   if (schema === InspectInput) {

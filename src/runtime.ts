@@ -5,7 +5,7 @@ import type { Attempt } from './session-send.ts';
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'saved' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
-export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost' };
+export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost' };
 export type Approval = { id: string; name: string; context: string };
 export class Runtime {
   private approvals = new Map<string, Approval>();
@@ -52,6 +52,12 @@ export class Runtime {
   async send(input: MessageInput, registered?: (entry: Entry) => void) {
     const { to, source } = this.contactFor(input);
     if (!this.isApproved(to)) throw new Error('CONTACT_NOT_APPROVED');
+    if (input.report) {
+      const request = this.records.get(input.report.request)?.message;
+      if (!source || !request || request.from !== to || request.to !== this.self || request.exchange !== source.exchange) {
+        throw new Error('INVALID_INPUT: work report must reference a received request from this exact colleague in the same exchange; no message was sent');
+      }
+    }
     const workRef = source?.workRef ?? input.workRef;
     const envelope: Envelope = {
       id: randomUUID(), exchange: source?.exchange ?? randomUUID(),
@@ -59,6 +65,8 @@ export class Runtime {
       text: input.text, refs: input.refs ?? [],
       ...(workRef ? { workRef } : {}),
       ...(!source && input.recipientLabel ? { recipientLabel: input.recipientLabel } : {}),
+      ...(input.structured ? { structured: input.structured } : {}),
+      ...(input.report ? { report: input.report } : {}),
       replyTo: source?.id ?? null, corrects: input.corrects ?? null,
       createdAt: new Date().toISOString(),
     };
@@ -90,13 +98,22 @@ export class Runtime {
         if (source.workRef !== envelope.workRef) throw new Error('INVALID_INPUT: reply must preserve the exchange work reference');
       }
     }
+    let reportLinkage: 'context-lost' | undefined;
+    if (envelope.report) {
+      if (!envelope.replyTo) throw new Error('INVALID_INPUT: a work report must be a reply');
+      const request = this.records.get(envelope.report.request)?.message;
+      if (!request) reportLinkage = 'context-lost';
+      else if (request.from !== this.self || request.to !== from || request.exchange !== envelope.exchange) {
+        throw new Error('INVALID_INPUT: work report references a different request, colleague or exchange');
+      }
+    }
     if (envelope.corrects) {
       const source = this.records.get(envelope.corrects)?.message;
       if (!source || source.from !== from || source.to !== this.self) throw new Error('INVALID_INPUT: invalid correction linkage');
     }
     const handle = randomUUID();
     this.returns.set(handle, message);
-    this.records.set(envelope.id, { message, facts: [], state: 'accepted', returnHandle: handle, ...(contextLost ? { linkage: 'context-lost' } : {}) });
+    this.records.set(envelope.id, { message, facts: [], state: 'accepted', returnHandle: handle, ...(contextLost ? { linkage: 'context-lost' } : {}), ...(reportLinkage ? { reportLinkage } : {}) });
     this.fact(envelope.id, 'queued', 'receiver runtime');
     // Unapproved messages are visible to the human, but cannot wake or enter model context.
     this.waiting.push(envelope.id);
@@ -144,9 +161,15 @@ export class Runtime {
       const request = this.records.get(id);
       if (!request || request.message.from !== this.self) return { request: id, outcome: 'context-lost' };
       const replies = records.filter(entry => entry.message.replyTo === id && entry.message.from === request.message.to);
+      // The final report may reply to a later clarification in the same exchange.
+      // Its explicit original-request link is separate from direct replyTo tracking.
+      const reports = records.filter(entry => entry.message.report?.request === id &&
+        entry.message.from === request.message.to && entry.message.exchange === request.message.exchange &&
+        !entry.reportLinkage && this.visible(entry, audience));
       return { request: id, peer: request.message.to, subject: request.message.subject, workRef: request.message.workRef ?? null, state: request.state,
         code: request.code, outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
-        responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)) };
+        responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)),
+        reportCount: reports.length, ...(reports.length ? { latestReport: this.project(reports.at(-1)!, audience) } : {}) };
     }) };
     if (input.peer || input.workRef || !input.exchange && !input.queue && !input.outbox) {
       const latest = new Map<string, Entry>();

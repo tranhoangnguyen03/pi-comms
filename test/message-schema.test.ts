@@ -13,7 +13,10 @@ function checkSchemas(schemas: any[]) {
   const [message, ask] = schemas;
   assert.deepEqual(message.required, ['text']);
   assert.deepEqual(ask.properties.requests.items.required, ['text']);
-  for (const input of [send, reply, { ...send, workRef: 'AUTH-42', recipientLabel: 'Security reviewer' }]) {
+  for (const input of [send, reply, { ...send, workRef: 'AUTH-42', recipientLabel: 'Security reviewer' },
+    { ...send, structured: { effort: 3, tests: [true, false] } },
+    { ...reply, report: { request: reply.respondTo, state: 'complete' }, structured: { tests_passing: true, finding_count: 2 } },
+  ]) {
     assert.ok(Check(message, input));
     assert.ok(Check(ask, { requests: [input] }));
   }

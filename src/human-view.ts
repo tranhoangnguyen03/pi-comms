@@ -25,6 +25,7 @@ export function inspectionText(data: Inspection, labels: Labels, technical = fal
       `Latest observation: ${observationLabel(entry)}`,
       `${entry.responses.length} linked response(s) — not proof of completed work.`);
     lines.push(...messageContextLines(m));
+    if (entry.reportLinkage) lines.push('Reported request unavailable: link unverified.');
     if (m.replyTo) lines.push('Reply to an earlier message.');
     if (m.corrects) lines.push('Correction to an earlier message.');
     if (entry.linkage) lines.push('Context lost: the referenced request is unavailable.');
