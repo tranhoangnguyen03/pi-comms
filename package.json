@@ -1,11 +1,18 @@
 {
   "name": "pi-comms",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Tran Hoang Nguyen",
-  "repository": { "type": "git", "url": "git+https://github.com/tranhoangnguyen03/pi-comms.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tranhoangnguyen03/pi-comms.git"
+  },
   "homepage": "https://github.com/tranhoangnguyen03/pi-comms#readme",
-  "bugs": { "url": "https://github.com/tranhoangnguyen03/pi-comms/issues" },
-  "publishConfig": { "access": "public" },
+  "bugs": {
+    "url": "https://github.com/tranhoangnguyen03/pi-comms/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT",
   "keywords": [
     "pi-package"
@@ -48,7 +55,9 @@
     "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
     "test:original": "cd .scratch/upstream && node --import tsx --test human-priority.pi.test.ts reply-tracker.test.ts"
   },
-  "overrides": { "undici": "8.12.2" },
+  "overrides": {
+    "undici": "8.12.2"
+  },
   "devDependencies": {
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",

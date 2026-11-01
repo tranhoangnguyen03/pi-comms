@@ -25,7 +25,7 @@ const recovery: Record<string, string> = {
   IDENTITY_CONFLICT: 'Close the other live process claiming this saved session, then reload.',
   OUTCOME_UNKNOWN: 'Inspect the prior message/outbox. Do not blindly resend; verify through the approved colleague if needed.',
   TARGET_UNAVAILABLE: 'The exact session is unavailable. Resume it or try again later; do not substitute a similar name.',
-  INVALID_INPUT: 'Follow the specific validation message above. Supply only fields needed for this operation; never fabricate IDs to fill optional fields.',
+  INVALID_INPUT: 'Follow the specific validation message above. Supply only fields needed for this operation; never fabricate IDs to fill optional fields. If the tool interface still forces optional fields, stop retrying and report the provider schema issue.',
 };
 
 export default function comms(pi: ExtensionAPI) {
@@ -356,7 +356,7 @@ export default function comms(pi: ExtensionAPI) {
   } });
   const result = (data: unknown, error?: { code: string; message: string; nextAction: string }) => {
     const body = { ok: !error, ...(error ? { error, ...(data ? { data } : {}) } : { data }), observedAt: new Date().toISOString() };
-    return { content: [{ type: 'text' as const, text: error ? `${error.code}: ${error.message}\n${error.nextAction}` : modelView(data, name) }], details: body, structuredContent: JSON.parse(JSON.stringify(body)), ...(error ? { isError: true } : {}) };
+    return { content: [{ type: 'text' as const, text: error ? `${error.message}\n${error.nextAction}` : modelView(data, name) }], details: body, structuredContent: JSON.parse(JSON.stringify(body)), ...(error ? { isError: true } : {}) };
   };
   const run = async (work: () => Promise<unknown> | unknown, compact = false) => {
     try {

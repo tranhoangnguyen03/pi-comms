@@ -38,7 +38,7 @@ For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. 
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.2.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.3.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -46,13 +46,13 @@ To try without modifying normal Pi settings, use an owned temporary agent direct
 ```sh
 mkdir -p /tmp/comms-try/package
 # Extract the reviewed tarball into /tmp/comms-try/package (npm tarballs contain package/).
-tar -xzf pi-comms-0.1.2.tgz -C /tmp/comms-try
+tar -xzf pi-comms-0.1.3.tgz -C /tmp/comms-try
 PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 ```
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.1` while that version is published). The `0.1.2` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.2` while that version is published). The `0.1.3` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 
@@ -105,7 +105,7 @@ Direct native ask replies stay claimed until model-context admission: they are n
 
 ### Recovery
 
-For a routing validation error, retry with exactly `{to, subject, text}` for a new message or `{respondTo, text}` for a reply. `refs` and `corrects` are optional; never invent a correction ID to satisfy a tool declaration. Routing validation rejects before sending. If a provider presents every routing field as required, that declaration conflicts with pi-comms: the serialized message schema requires only `text`, and runtime validation enforces the routing combination. Compare the loaded extension schema and the provider's outbound payload before changing the tool interface. Tests cover serialized schemas, Google and OpenAI Responses conversion, and the OpenAI Completions outbound payload without network access; downstream gateway rewriting is not covered.
+For a routing validation error, retry with exactly `{to, subject, text}` for a new message or `{respondTo, text}` for a reply. `refs` and `corrects` are optional; never invent a correction ID to satisfy a tool declaration. Routing validation rejects before sending. If a provider presents every routing field as required, that declaration conflicts with pi-comms: the serialized message schema requires only `text`, and runtime validation enforces the routing combination. Custom `openai-completions` gateways that treat an omitted `strict` field as required-all-fields need `"compat": {"supportsStrictMode": true}` in `~/.pi/agent/models.json` so Pi emits explicit `"strict": false`. Compare the loaded extension schema and the provider's outbound payload before changing the tool interface. Tests cover serialized schemas, Google and OpenAI Responses conversion, and the OpenAI Completions outbound payload without network access; downstream gateway rewriting is not covered.
 
 Same-ID reconnect refresh is internal: after a definite stale-epoch rejection, re-resolve only that same native ID once and recheck approval. Unknown send outcome never automatically retries. Concurrent active claims are rejected explicitly. A fork/new session has a different identity. Renaming a session updates discovery and contact labels without changing its native ID or approval binding; clearing its name restores the UUID display fallback.
 
