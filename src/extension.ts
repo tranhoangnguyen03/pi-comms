@@ -67,9 +67,11 @@ export default function comms(pi: ExtensionAPI) {
     const api: OrganizerApi = Object.freeze({
       version: 1,
       sessionId: current.self,
-      peers: async (input = {}) => (await run(() => {
+      peers: async (input = {}) => (await run(async () => {
         validate(PeersInput, input);
-        return peers(input.view, input.cursor);
+        const found = await peers(input.view, input.cursor);
+        activeRuntime(); // Reads must not return a replacement session's data.
+        return found;
       }, false, activeRuntime)).structuredContent,
       send: async (input, signal) =>
         (await run(() => sendApproved(input, signal), false, activeRuntime)).structuredContent,
@@ -402,11 +404,12 @@ export default function comms(pi: ExtensionAPI) {
   const run = async (work: () => Promise<unknown> | unknown, compact = false, guard?: () => void) => {
     try {
       // Organizer and normal model tools share result/error construction.
-      // The guard runs before and after async work, so stale handles never
-      // expose a replacement session's records or claim its send as their own.
+      // Refuse stale handles before work. For reads, callers also check after
+      // awaits. For sends, preserve an observed transport result even if a
+      // session switch happens just after dispatch; never hide send evidence.
       guard?.();
       if (!runtime) throw new Error('TARGET_UNAVAILABLE');
-      const data = await work(); guard?.(); const output = result(data);
+      const data = await work(); const output = result(data);
       if (compact) {
         const sent = data as ReturnType<Runtime['view']>;
         output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''}${sent.message.report ? ` Peer reports ${sent.message.report.state} on request ${sent.message.report.request} (not acceptance).` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
