@@ -99,6 +99,78 @@ test('a later blocked correction stays actionable and supersedes an earlier comp
   assert.equal((lead.inspect({ message: done.message.id }) as any).message.report.state, 'complete');
 });
 
+test('sender-side progress remains a conversation preview without an actionable local report', async () => {
+  const { lead, reviewer, outbound } = pair();
+  const { id, replyHandle } = await start(lead, reviewer, outbound);
+  const progress = await reviewer.send({
+    respondTo: replyHandle, text: 'Review halfway, evidence to follow',
+    report: { request: id, state: 'progress' },
+  });
+  const peerView: any = reviewer.inspect({ peer: self });
+  assert.equal(peerView.items[0].latestMessage, progress.message.id,
+    'the sender must see its latest outgoing progress instead of the older request');
+  assert.match(peerView.items[0].preview, /Review halfway/);
+  const overview: any = reviewer.inspect({});
+  assert.equal(overview.recentExchanges[0].latestMessage, progress.message.id);
+});
+
+test('unverified progress-only exchange remains discoverable in the overview', () => {
+  const runtime = new Runtime(self, async () => ({ outcome: 'accepted' }));
+  runtime.approveFromOwner(approve(peer));
+  const orphan = {
+    id: randomUUID(), exchange: randomUUID(), subject: 'Earlier context lost',
+    text: 'Progress with lost original request', refs: [], replyTo: randomUUID(),
+    corrects: null, createdAt: new Date().toISOString(),
+    report: { request: randomUUID(), state: 'progress' as const },
+  };
+  runtime.receive(peer, orphan);
+  assert.equal((runtime.inspect({ message: orphan.id }) as any).reportLinkage, 'context-lost');
+  const overview: any = runtime.inspect({});
+  assert.equal(overview.recentExchanges.length, 1,
+    'an unknown original request does not justify hiding the only exchange');
+  assert.equal(overview.recentExchanges[0].latestMessage, orphan.id);
+  assert.match(overview.recentExchanges[0].preview, /Progress with lost/);
+  assert.equal((runtime.inspect({ peer })).items[0].latestMessage, orphan.id);
+});
+
+test('explicit progress correction reaches the requester after the corrected result was already posted', async () => {
+  const { lead, reviewer, outbound, inbound } = pair();
+  const { id, replyHandle } = await start(lead, reviewer, outbound);
+  const prior = await report(reviewer, lead, inbound, replyHandle, id, 'complete', 'Previous evidence');
+  lead.posted(lead.planIntake(lead.eligible()).deliver.map(e => e.message.id));
+  assert.equal(lead.waiting.includes(prior.message.id), false, 'the old conclusion has already been delivered');
+
+  const corrected = await reviewer.send({
+    respondTo: replyHandle,
+    text: 'Previous evidence is wrong; still investigating.',
+    report: { request: id, state: 'progress' },
+    corrects: prior.message.id,
+  });
+  lead.receive(peer, inbound.at(-1)!);
+  const plan = lead.planIntake(lead.eligible());
+  assert.deepEqual(plan.deliver.map(e => e.message.id), [corrected.message.id],
+    'an explicit correction is actionable despite a progress work state');
+  assert.deepEqual(plan.summarized, []);
+  assert.match(lead.reportNote(plan.deliver[0]), /earlier peer state: complete/);
+  lead.posted(plan.deliver.map(e => e.message.id));
+  const row: any = lead.inspect({ requests: [id] }).responses[0];
+  assert.equal(row.latestReport.message.id, corrected.message.id);
+  assert.equal(row.currentReport.message.id, corrected.message.id,
+    'the correction must retract the earlier complete status for inspection');
+  assert.equal(row.currentReport.message.report.state, 'progress');
+  assert.equal((lead.inspect({ peer }) as any).items[0].latestMessage, corrected.message.id);
+
+  const stale = await report(reviewer, lead, inbound, replyHandle, id, 'progress', 'Uncorrected older progress');
+  const stalePlan = lead.planIntake(lead.eligible());
+  assert.deepEqual(stalePlan.deliver, []);
+  assert.deepEqual(stalePlan.summarized, [stale.message.id]);
+  lead.summarized(stalePlan.summarized);
+  const current: any = lead.inspect({ requests: [id] }).responses[0];
+  assert.equal(current.currentReport.message.id, corrected.message.id,
+    'a late ordinary progress update must not undo the explicit correction');
+  assert.equal(current.laterProgressCount, 1);
+});
+
 test('plain replies and requests for input are never swallowed by report grouping', async () => {
   const { lead, reviewer, outbound, inbound } = pair();
   const { id, replyHandle } = await start(lead, reviewer, outbound);

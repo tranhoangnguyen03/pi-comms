@@ -7,6 +7,7 @@
 - Preserve the last actionable peer-reported state when later progress arrives. Expose both the latest received report and current reported state in request inspection, noting any later progress. A later blocked or complete report updates that state; no peer claim becomes requester acceptance.
 - Keep `comms_ask`'s existing first-linked-reply behavior and all four agent tools unchanged. Preserve approval, Pause, human-input priority and exact request/peer linkage.
 - Verify automatic delivery and no-progress wake, late progress after completion, corrections, held/unapproved intake, native cards and installed Pi behavior.
+- Preserve conversation previews when no real actionable report supersedes progress; deliver explicit progress-state corrections even after the earlier result reached the requester. Corrective progress updates become the current reported state without letting ordinary late progress override them.
 
 ## [0.1.5] - 2026-11-01
 

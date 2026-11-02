@@ -139,11 +139,16 @@ export class Runtime {
       entry.message.from === request.to && entry.message.exchange === request.exchange &&
       !entry.reportLinkage && this.visible(entry, audience));
   }
+  // A correction is actionable even when its status is "progress": it may
+  // retract evidence that the requester has already seen.
+  private actionableReport(entry: Entry) {
+    return !!entry.message.report && (entry.message.report.state !== 'progress' || !!entry.message.corrects);
+  }
   // Project from existing records, never a second work-status store. An
   // actionable report remains current even if a late progress update arrives.
   reportState(requestId: string, audience: 'agent' | 'human' = 'agent') {
     const reports = this.reportsFor(requestId, audience);
-    const lastActionable = [...reports].reverse().find(e => e.message.report?.state !== 'progress');
+    const lastActionable = [...reports].reverse().find(entry => this.actionableReport(entry));
     const current = lastActionable ?? reports.at(-1);
     const laterProgressCount = lastActionable
       ? reports.slice(reports.indexOf(lastActionable) + 1).filter(e => e.message.report?.state === 'progress').length : 0;
@@ -155,7 +160,7 @@ export class Runtime {
     const { reports, current } = this.reportState(report.request);
     const earlier = reports.slice(0, reports.findIndex(e => e.message.id === entry.message.id));
     const progress = earlier.filter(e => e.message.report?.state === 'progress').length;
-    const previousActions = earlier.filter(e => e.message.report?.state !== 'progress');
+    const previousActions = earlier.filter(entry => this.actionableReport(entry));
     const parts = [];
     if (progress) parts.push(`${progress} earlier progress report(s) retained in inspection`);
     if (previousActions.length) parts.push(`earlier peer state: ${previousActions.at(-1)!.message.report!.state}`);
@@ -170,7 +175,7 @@ export class Runtime {
     for (const id of ids) {
       const entry = this.records.get(id);
       if (!entry || !this.waiting.includes(id) || !this.isApproved(entry.message.from)) continue;
-      if (entry.message.report?.state === 'progress' && !entry.reportLinkage) summarized.push(id);
+      if (entry.message.report?.state === 'progress' && !entry.reportLinkage && !entry.message.corrects) summarized.push(id);
       else deliver.push(entry);
     }
     return { deliver, summarized };
@@ -228,8 +233,12 @@ export class Runtime {
         if (input.workRef && (entry.message.workRef !== input.workRef || !this.visible(entry, audience))) continue;
         // A late progress report does not replace a more useful final/corrective
         // report as the exchange preview. Its full record stays inspectable.
-        if (entry.message.report?.state === 'progress' && this.reportState(entry.message.report.request, audience)
-          .current?.message.report?.state !== 'progress') continue;
+        if (entry.message.report?.state === 'progress' && !entry.message.corrects) {
+          const current = this.reportState(entry.message.report.request, audience).current;
+          // A missing current report means there is nothing to supersede this
+          // preview (notably for sent or unverified progress reports).
+          if (current && this.actionableReport(current)) continue;
+        }
         latest.delete(entry.message.exchange); latest.set(entry.message.exchange, entry);
       }
       const exchanges = [...latest.values()].reverse().map(entry => {

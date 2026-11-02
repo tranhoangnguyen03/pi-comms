@@ -319,6 +319,23 @@ test('native Pi delivers actionable request reports while grouping progress with
     assert.equal(final.currentReport.message.report.state, 'blocked');
     assert.equal(final.currentReport.message.id, correction.data.message.id);
     assert.equal(final.reportCount, 4);
+
+    // The blocked finding has reached the requester. A progress-state
+    // correction must be delivered, not silently grouped as ordinary progress.
+    const revised = data(await reviewer.tool('comms_message', {
+      respondTo: initial.returnHandle, text: 'M2C_EVIDENCE_RETRACTED: previous evidence is wrong',
+      report: { request: first.data.message.id, state: 'progress' },
+      corrects: correction.data.message.id,
+    }));
+    assert.equal(revised.ok, true);
+    await waitFor(() => lead.observed.some(messages => text(messages).includes('M2C_EVIDENCE_RETRACTED')));
+    const afterCorrection = data(await lead.tool('comms_inspect', {
+      requests: [first.data.message.id],
+    })).data.responses[0];
+    assert.equal(afterCorrection.currentReport.message.id, revised.data.message.id,
+      'the corrected state must replace the older blocked report');
+    assert.equal(afterCorrection.currentReport.message.report.state, 'progress');
+    assert.equal(afterCorrection.reportCount, 5);
   } finally { lead.draft(''); await reviewer.close(); await lead.close(); }
 });
 
