@@ -62,8 +62,22 @@ Use `comms_inspect({requests:["<actual outgoing message ID>"]})` to check **that
 
 Inspect uncertain outgoing operations before retrying. If an exact peer is offline, do not send to someone with a similar name. Contact approvals, queues, outbox records and return handles are currently memory-only and can be lost on restart or session switch.
 
-## Handover without changing identities
+## Explicit handover without changing identities
 
-A handover is an **authored new request** to an explicitly selected successor. Summarize the goal, key findings, decisions, open questions and links to work products; send that brief with `comms_message`. Keep the old session's identity and conversation intact. pi-comms does not create agents or silently transfer their authority.
+A human or organizing system chooses a successor. Write a concise brief (goal, findings, decisions, open questions, work-product links) and send a **new request**:
 
-For current command and parameter details see the package README. Do not treat the future roadmap as shipped capability.
+```js
+comms_message({
+  to: "<selected successor's exact session ID>",
+  subject: "Continue AUTH-42 review",
+  text: "Goal: check retry safety. Finding: duplicate-write risk. Open: assess guard. Please report findings.",
+  handoverFrom: "<earlier exchange ID>",
+  workRef: "AUTH-42",
+  refs: [{label:"Proposed fix",uri:"file:///path/to/proposal.md"}]
+})
+```
+
+Use `comms_inspect({exchange:"<earlier exchange ID>"})` to find the new exchange via its outgoing handover links. The earlier ID must exist in your readable session records; never invent it. The successor gets only your authored brief and a sender-supplied pointer, not the former transcript, permissions or pending work. The old colleague remains unchanged and new contact approval still applies.
+
+`handoverFrom` is optional on a new `comms_message` or `comms_ask` request, never on a reply. First-reply waiting remains unchanged; work reports on the successor's request reference the **new** message ID. Both peers need pi-comms 0.1.8+. Inspect uncertain delivery before resending.
+

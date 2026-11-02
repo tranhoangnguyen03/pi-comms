@@ -47,6 +47,15 @@ export class Runtime {
     validate(Id, to);
     const correction = input.corrects ? this.records.get(input.corrects)?.message : undefined;
     if (input.corrects && (!correction || correction.from !== this.self || correction.to !== to)) throw new Error('INVALID_INPUT: correction must reference your message to this exact peer');
+    if (input.handoverFrom) {
+      // The sender must have a known and visible earlier exchange. This is
+      // evidence of provenance, not permission to read or copy another peer's
+      // private history into the successor's session.
+      const prior = [...this.records.values()].some(entry =>
+        entry.message.exchange === input.handoverFrom &&
+        (entry.message.from === this.self || this.isApproved(entry.message.from)));
+      if (!prior) throw new Error('CONTEXT_LOST: handover source exchange is not available to this session; no message was sent');
+    }
     return { to, source };
   }
   async send(input: MessageInput, registered?: (entry: Entry) => void) {
@@ -65,6 +74,7 @@ export class Runtime {
       text: input.text, refs: input.refs ?? [],
       ...(workRef ? { workRef } : {}),
       ...(!source && input.recipientLabel ? { recipientLabel: input.recipientLabel } : {}),
+      ...(!source && input.handoverFrom ? { handoverFrom: input.handoverFrom } : {}),
       ...(input.structured ? { structured: input.structured } : {}),
       ...(input.report ? { report: input.report } : {}),
       replyTo: source?.id ?? null, corrects: input.corrects ?? null,
@@ -153,6 +163,15 @@ export class Runtime {
     const laterProgressCount = lastActionable
       ? reports.slice(reports.indexOf(lastActionable) + 1).filter(e => e.message.report?.state === 'progress').length : 0;
     return { reports, current, laterProgressCount };
+  }
+  // A source exchange can point to one or more explicit successor exchanges.
+  // Derive the links from the single communication record; never move, merge
+  // or retarget the source exchange or infer that the successor accepted work.
+  handoversFrom(exchange: string) {
+    return [...this.records.values()]
+      .filter(entry => entry.message.from === this.self && entry.message.handoverFrom === exchange)
+      .map(entry => ({ toExchange: entry.message.exchange, toPeer: entry.message.to,
+        message: entry.message.id, state: entry.state, code: entry.code ?? null }));
   }
   reportNote(entry: Entry) {
     const report = entry.message.report;
@@ -264,7 +283,8 @@ export class Runtime {
     }
     const selected = 'queue' in input ? this.waiting.map(id => this.records.get(id)!) : 'outbox' in input ? records.filter(e => e.message.from === this.self) : records.filter(e => e.message.exchange === input.exchange);
     if ('exchange' in input && !selected.length) throw new Error('CONTEXT_LOST');
-    return this.page(selected, input.cursor, audience);
+    const page = this.page(selected, input.cursor, audience);
+    return input.exchange ? { ...page, handovers: this.handoversFrom(input.exchange) } : page;
   }
 }
 export const MAX_PAGE_BYTES = 900_000;

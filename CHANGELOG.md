@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.8] - 2026-11-02
+
+- M3-B/F09: optional `handoverFrom` on a new `comms_message` or `comms_ask` request links a visible earlier exchange to an explicitly addressed successor.
+- The lead authors the brief and artifact pointers. No former transcript, identity, approvals, pending work, return handles or task acceptance transfer.
+- The sender's `comms_inspect({exchange:oldId})` derives successor-exchange links and observed send outcomes from the same records; recipient messages and native cards label provenance as sender-supplied.
+- Preserve original tools, first-reply waits, normal first-contact approvals, privacy boundaries and uncertain-send evidence. No handover task store.
+- Test three-session delivery, lineage, unchanged old work, lack of automatic disclosure and invalid-link rejection, including native Pi behavior.
+
 ## [0.1.7] - 2026-11-02
 
 - M3-A: introduce an optional, versioned **same-Pi-runtime** organizer integration API using Pi's shared `pi.events` bus. Supports peer discovery, exact-session send/reply, and read-only inspection over the existing pi-comms records.

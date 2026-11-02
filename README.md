@@ -48,6 +48,26 @@ Reports and structured data remain available in human inspection and tool output
 
 New `report` and `structured` fields require **pi-comms 0.1.5 or later on both participating sessions**. Older peers may reject these messages; report an uncertain delivery rather than retrying blindly. Conversations and report links remain memory-only until a separate durability milestone.
 
+## Explicit handover to a chosen successor (0.1.8+)
+
+A handover is an **authored new request** to a specific existing Pi session. The lead or organizing system chooses the successor and provides the brief. Use `handoverFrom` with the **earlier exchange ID** (not a message ID or reply handle):
+
+```js
+comms_message({
+  to: "<successor's exact session ID>",
+  subject: "Continue AUTH-42 review",
+  text: "Goal: review retries. Known: write duplication risk. Open: test idempotency guard. Report findings.",
+  handoverFrom: "<earlier exchange ID>",
+  workRef: "AUTH-42",
+  refs: [{label:"Proposed fix", uri:"file:///path/to/proposal.md"}]
+})
+comms_inspect({exchange:"<earlier exchange ID>"}) // shows successor links and actual send outcomes
+```
+
+The new recipient must be separately approved. The former session stays unchanged and receives no automatic notice. Nothing copies the earlier transcript, permissions, identity, pending messages, acceptance or return handles. The source exchange must be available to this sending session; unknown or withheld sources fail before dispatch. The successor receives a **sender-supplied pointer**, not access to the old conversation. The sender can inspect the original exchange to find the new one and the observed send outcome. Do not retry uncertain sends blindly.
+
+`comms_ask` may include `handoverFrom` in an ordinary new request; it still waits only for the first reply. The successor reports work on the **new** request ID. Both participants need pi-comms 0.1.8+ for this metadata; older peers may reject it.
+
 ## Organizing-package integration (M3-A, 0.1.7+)
 
 A local Pi extension can discover pi-comms through Pi's shared event bus, then call the **same session's** peer discovery, message send and inspection paths. This is an optional developer interface; it adds no agent tools or new setup step for standalone users. It does not launch, replace or manage agents.
@@ -80,7 +100,7 @@ For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. 
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.7.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.8.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -88,13 +108,13 @@ To try without modifying normal Pi settings, use an owned temporary agent direct
 ```sh
 mkdir -p /tmp/comms-try/package
 # Extract the reviewed tarball into /tmp/comms-try/package (npm tarballs contain package/).
-tar -xzf pi-comms-0.1.7.tgz -C /tmp/comms-try
+tar -xzf pi-comms-0.1.8.tgz -C /tmp/comms-try
 PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 ```
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.6`, which is published). The `0.1.7` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.6`, which is published). The `0.1.8` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 

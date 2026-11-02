@@ -37,7 +37,7 @@ The service has exactly three operations and two identifiers:
 
 Each operation resolves to the **same structured result** used by the public model tools: `{ok,data?,error?,observedAt}`. Errors provide `code`, `message` and `nextAction`. `send` returns the exact outgoing `message.id`, `exchange`, accepted/rejected/unknown send facts and work metadata in `data` when available. On error or uncertain send, **inspect the outbox before considering a retry**.
 
-There is no `approve`, `revoke`, `createSession`, `handover`, `acceptWork`, or `sendWithoutConsent` method. Owner approval still belongs to pi-comms and its native user confirmation UI.
+There is no `approve`, `revoke`, `createSession`, `acceptWork`, or `sendWithoutConsent` method. M3-B uses the same `send({to,subject,text,handoverFrom,refs?})` method with a visible earlier exchange ID. No special handover method or approval path exists. The sender can inspect the old exchange for derived `handovers` links and send outcomes. The successor sees a source pointer, not the original transcript. Owner approval still belongs to pi-comms and its native user confirmation UI.
 
 ## Example: one bounded consultant review
 
@@ -81,6 +81,6 @@ For first-contact handling, a caller with no native human confirmation UI receiv
 - **Session scope:** This is one running Pi session. On reload, session replacement, switch, restart or extension shutdown, discover a new handle. Runtime records, consent and reply handles are memory-only; no automatic replay or restore is implied.
 - **No transitive permission:** A↔B consent does not grant B↔C or permit a replacement session to impersonate B. Exact IDs remain binding.
 - **No task system:** The caller owns rosters, work instructions, task completion and acceptance. A peer's `report.state` is the peer's claim, never authoritative acceptance.
-- **F09 is separate:** Passing an authored handover brief and linking the old/new exchanges requires an explicit recipient-selection and evidence contract. This v1 does not transfer sessions or approvals.
+- **F09 (0.1.8+) uses v1:** Authored handovers supply an earlier exchange link through the same `send` method. Recipients are explicitly chosen; no transfer of sessions, identities, approvals or task acceptance occurs.
 
 The test suite includes a **separate organizing extension** loaded beside pi-comms in a real Pi 1.4.0 fixture. It requests the v1 interface, asks for first-contact consent on its first send, reuses approval on later sends, and reads a request-linked work report through both the integration and native inspection paths. That establishes the in-process contract; it is not a claim that another production organizing package has adopted the API.
