@@ -23,7 +23,7 @@ const waitFor = async (predicate: () => boolean | Promise<boolean>) => {
   while (!await predicate()) { if (Date.now() > deadline) throw new Error('Native fixture timed out'); await new Promise(r => setTimeout(r, 10)); }
 };
 const text = (messages: any[]) => messages.map(m => typeof m.content === 'string' ? m.content : m.content?.map((b: any) => b.text ?? '').join('')).join('\n');
-async function participant(label: string, interactive = true, extraTools: any[] = []) {
+async function participant(label: string, interactive = true, extraTools: any[] = [], additionalExtensions: string[] = []) {
   const dir = join(root, label); mkdirSync(dir);
   const faux = fauxProvider({ provider: `comms-base-${label}` });
   const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false }); models.registerNativeProvider(faux.provider);
@@ -37,7 +37,7 @@ async function participant(label: string, interactive = true, extraTools: any[] 
   }));
   const manager = SessionManager.create(dir, join(root, 'sessions'));
   const factory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }: any) => {
-    const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime: models, settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }), resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, additionalExtensionPaths: [extensionPath] } });
+    const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime: models, settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }), resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, additionalExtensionPaths: [extensionPath, ...additionalExtensions] } });
     const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel(), noTools: 'builtin', customTools: [createReadTool(cwd), ...extraTools] });
     return { ...created, services, diagnostics: [] };
   };
@@ -67,6 +67,127 @@ async function participant(label: string, interactive = true, extraTools: any[] 
     close: async () => { hold = false; releases.splice(0).forEach(r => r()); await runtime.session.abort(); await runtime.dispose(); },
   };
 }
+test('organizing extension uses shared API for approved sends and request-linked inspection', async () => {
+  // A small organizing package stands in for a consultant/team launcher. It
+  // uses Pi's documented inter-extension bus, not private pi-comms runtime.
+  const probePath = join(root, 'organizer-demo.mjs');
+  const resultFile = join(root, 'organizer-demo-result.json');
+  writeFileSync(probePath, `
+import { writeFileSync } from 'node:fs';
+export default function (pi) {
+  pi.registerCommand('organizer-demo', {
+    description: 'Local organizer integration fixture',
+    handler: async (args) => {
+      const request = JSON.parse(args);
+      let service;
+      pi.events.emit('pi-comms:organizer-api:v1', { version: 1, accept: (api) => { service = api; } });
+      // Test-only handle; verify that a previously captured capability cannot
+      // operate in a different Pi session after native session replacement.
+      globalThis.__m3aCapturedService = service;
+      const result = !service ? { ok: false, error: { code: 'NO_SERVICE' } } :
+        request.operation === 'peers' ? await service.peers(request.input) :
+        request.operation === 'send' ? await service.send(request.input) :
+        request.operation === 'inspect' ? await service.inspect(request.input) :
+        { ok: false, error: { code: 'INVALID_OPERATION' } };
+      writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({
+        service: service ? { version: service.version, sessionId: service.sessionId } : null, result,
+      }));
+    }
+  });
+}
+`);
+  const lead = await participant('organizer-lead', true, [], [probePath]);
+  const reviewer = await participant('organizer-reviewer');
+  const invoke = async (operation: string, input: unknown) => {
+    await lead.runtime.session.prompt(`/organizer-demo ${JSON.stringify({ operation, input })}`);
+    return JSON.parse(readFileSync(resultFile, 'utf8'));
+  };
+  try {
+    lead.confirm(true);
+    const initial = await invoke('peers', { view: 'all' });
+    assert.equal(initial.service.version, 1);
+    assert.equal(initial.service.sessionId, lead.id());
+    const before = initial.result.data.items.find((item: any) => item.id === reviewer.id());
+    assert.equal(before.approved, false);
+
+    const sent = await invoke('send', {
+      to: reviewer.id(), subject: 'Consultant review', text: 'Review exactly this issue.',
+      workRef: 'AUTH-42', recipientLabel: 'Engineering reviewer',
+    });
+    assert.equal(sent.result.ok, true);
+    assert.equal(sent.result.data.message.workRef, 'AUTH-42');
+    assert.equal(lead.dialogs.length, 1, 'organizer must use the same first-contact owner UI');
+    await waitFor(() => reviewer.observed.some(messages => text(messages).includes('Review exactly this issue.')));
+    const onReviewer = data(await reviewer.tool('comms_inspect', { message: sent.result.data.message.id })).data;
+    assert.equal(onReviewer.message.recipientLabel, 'Engineering reviewer');
+
+    const reply = data(await reviewer.tool('comms_message', {
+      respondTo: onReviewer.returnHandle,
+      text: 'Found an unsafe retry; a patch is needed.',
+      report: { request: sent.result.data.message.id, state: 'complete' },
+      structured: { finding_count: 1 },
+    }));
+    assert.equal(reply.ok, true);
+    await waitFor(async () => {
+      const inspection = data(await lead.tool('comms_inspect', { requests: [sent.result.data.message.id] })).data.responses[0];
+      return inspection.reportCount === 1;
+    });
+    const inspected = await invoke('inspect', { requests: [sent.result.data.message.id] });
+    assert.equal(inspected.result.ok, true);
+    assert.equal(inspected.result.data.responses[0].latestReport.message.id, reply.data.message.id);
+    assert.equal(inspected.result.data.responses[0].currentReport.message.report.state, 'complete');
+    assert.equal(lead.dialogs.length, 1, 'same pair needs no new grant for inspection');
+
+    lead.confirm(false);
+    const second = await invoke('send', { to: reviewer.id(), subject: 'A second review',
+      text: 'Another request from the same organizer.' });
+    assert.equal(second.result.ok, true);
+    assert.equal(lead.dialogs.length, 1, 'the integration uses existing bidirectional pair approval');
+    const ordinary = data(await lead.tool('comms_message', { to: reviewer.id(), subject: 'Native send',
+      text: 'A native tool send shares the same approval.' }));
+    assert.equal(ordinary.ok, true);
+    assert.equal(lead.dialogs.length, 1);
+    const peers = await invoke('peers', { view: 'known' });
+    assert.equal(peers.result.data.items.find((p: any) => p.id === reviewer.id()).approved, true);
+
+    // The organizer and direct tool must use one inspection implementation.
+    for (const input of [
+      { requests: [sent.result.data.message.id] },
+      { workRef: 'AUTH-42' },
+      { peer: reviewer.id() },
+      { queue: 'self' },
+    ]) {
+      const byOrganizer = (await invoke('inspect', input)).result;
+      const byTool = data(await lead.tool('comms_inspect', input));
+      assert.deepEqual(byOrganizer.data, byTool.data,
+        'organizer inspection must match direct comms_inspect records and local transport state');
+    }
+    const invalid = { queue: 'self', requests: [sent.result.data.message.id] };
+    const byOrganizer = (await invoke('inspect', invalid)).result;
+    const byTool = data(await lead.tool('comms_inspect', invalid));
+    assert.equal(byOrganizer.error.code, byTool.error.code, 'invalid selector errors must agree');
+
+    const previous = (globalThis as any).__m3aCapturedService;
+    assert.ok(previous && previous.sessionId === lead.id());
+    await lead.runtime.newSession();
+    assert.notEqual(lead.id(), previous.sessionId, 'a new session has a different identity');
+    for (const result of [
+      await previous.peers({ view: 'all' }),
+      await previous.inspect({}),
+      await previous.send({ to: reviewer.id(), subject: 'Stale handle', text: 'Must never send' }),
+    ]) {
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.code, 'CONTEXT_LOST',
+        'stale handles use the same structured error contract as all public tool results');
+    }
+    assert.equal(data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0,
+      'a stale organizer cannot send through the replacement session');
+  } finally {
+    delete (globalThis as any).__m3aCapturedService;
+    await reviewer.close(); await lead.close();
+  }
+});
+
 test('peer discovery reports live host activity separately from reachability', async () => {
   const coordinator = await participant('presence-coordinator'), reviewer = await participant('presence-reviewer');
   try {

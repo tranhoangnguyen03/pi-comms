@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.7] - 2026-11-02
+
+- M3-A: introduce an optional, versioned **same-Pi-runtime** organizer integration API using Pi's shared `pi.events` bus. Supports peer discovery, exact-session send/reply, and read-only inspection over the existing pi-comms records.
+- Reuse ordinary first-contact human confirmation, exact-recipient resolution, bidirectional pair approval, Pause/revoke and transport-result handling. Other extensions cannot assert owner approval or grant permissions through this interface.
+- Give integration clients session-scoped capabilities that reject use after runtime replacement; no added model tools, broker transport, independent inbox, task ledger or persistent state.
+- Verify a separate organizing extension uses the published local bus contract and returns original-request reports via the same inspection as standalone tools. F09 explicit handover remains a separate reviewed step.
+- Share exact inspection logic between the organizer API and `comms_inspect`; keep peer discovery bound to its starting session across async calls. New calls through stale organizer handles now return the same structured `CONTEXT_LOST` error shape as normal tool failures; a send already dispatched retains its observed delivery result rather than being misreported as unsent. Drop an unused, unshipped discovery helper so the event bus remains the one documented entry point.
+
 ## [0.1.6] - 2026-11-02
 
 - Deliver request-linked questions, blocked reports, completion reports and later corrections automatically through the existing human-first incoming-message path. No new ask mode or follow-up waiting call.

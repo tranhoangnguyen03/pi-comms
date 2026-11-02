@@ -12,6 +12,7 @@ import type { SessionInfo, ContactApproval, Message as WireMessage } from './tra
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
 import { approvalPrompt, showInspection } from './human-view.ts';
 import { getBrokerConnectTarget } from './transport/broker/paths.ts';
+import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
 const RESET = 'Contacts, approval, queues, outbox and return handles are memory-only and reset on reload/switch/restart. Native saved session IDs remain stable. Your first send asks for contact approval and continues if you allow it. Requester approval also permits normal replies. Receiver Pause/revoke and user directives still apply.';
 const HELP = 'Stop ends the current run; later peers may wake it. Pause holds peer admission/wakes, not current work or already-posted content. /comms approve | revoke | pause | resume | status | inspect | requests';
@@ -53,6 +54,32 @@ export default function comms(pi: ExtensionAPI) {
   let lastStatus: string | undefined;
   let lastPresenceSentAt = 0;
   registerInlineCards(pi);
+  // A local organizing extension can borrow this session's existing
+  // communication path. Event-bus data never grants owner approval or new
+  // authority. Calls remain tied to this exact live runtime.
+  serveOrganizerApi(pi.events, () => {
+    const current = runtime;
+    if (!current || stopped) return undefined;
+    const activeRuntime = () => {
+      if (stopped || runtime !== current || ctx?.sessionManager.getSessionId() !== current.self)
+        throw new Error('CONTEXT_LOST: organizer API belongs to an earlier Pi session');
+    };
+    const api: OrganizerApi = Object.freeze({
+      version: 1,
+      sessionId: current.self,
+      peers: async (input = {}) => (await run(async () => {
+        validate(PeersInput, input);
+        const found = await peers(input.view, input.cursor);
+        activeRuntime(); // Reads must not return a replacement session's data.
+        return found;
+      }, false, activeRuntime)).structuredContent,
+      send: async (input, signal) =>
+        (await run(() => sendApproved(input, signal), false, activeRuntime)).structuredContent,
+      inspect: async (input) =>
+        (await run(() => inspectCommunication(input, activeRuntime), false, activeRuntime)).structuredContent,
+    });
+    return api;
+  });
   // A new human instruction can reconsider contact; automatic model/peer continuations cannot.
   pi.on('input', event => { if (event.source !== 'extension') { declined.clear(); endAsks('interrupted'); } });
   function endAsks(reason: Parameters<Asks['end']>[0], peer?: string) {
@@ -284,10 +311,14 @@ export default function comms(pi: ExtensionAPI) {
     return matches[0].id;
   }
   async function peers(view = 'all', cursor?: string) {
+    const owner = runtime;
+    if (!owner || stopped) throw new Error('CONTEXT_LOST');
     await ensureConnection();
-    const live = (await client!.listSessions()).filter(p => p.id !== runtime!.self);
+    if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
+    const live = (await client!.listSessions()).filter(p => p.id !== owner.self);
+    if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
     live.forEach(peer => peerNames.set(peer.id, peer.name ?? peer.id));
-    const known = runtime!.known();
+    const known = owner.known();
     const all = [...new Set([...known.map(p => p.id), ...(view === 'all' ? live.map(p => p.id) : [])])];
     const ranked = all.map(id => {
       const approval = known.find(p => p.id === id); const session = live.find(p => p.id === id);
@@ -370,8 +401,13 @@ export default function comms(pi: ExtensionAPI) {
     const body = { ok: !error, ...(error ? { error, ...(data ? { data } : {}) } : { data }), observedAt: new Date().toISOString() };
     return { content: [{ type: 'text' as const, text: error ? `${error.message}\n${error.nextAction}` : modelView(data, name) }], details: body, structuredContent: JSON.parse(JSON.stringify(body)), ...(error ? { isError: true } : {}) };
   };
-  const run = async (work: () => Promise<unknown> | unknown, compact = false) => {
+  const run = async (work: () => Promise<unknown> | unknown, compact = false, guard?: () => void) => {
     try {
+      // Organizer and normal model tools share result/error construction.
+      // Refuse stale handles before work. For reads, callers also check after
+      // awaits. For sends, preserve an observed transport result even if a
+      // session switch happens just after dispatch; never hide send evidence.
+      guard?.();
       if (!runtime) throw new Error('TARGET_UNAVAILABLE');
       const data = await work(); const output = result(data);
       if (compact) {
@@ -418,14 +454,15 @@ export default function comms(pi: ExtensionAPI) {
     if (signal?.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
     return resolved;
   }
+  async function sendApproved(input: MessageInput, signal?: AbortSignal) {
+    const current = runtime!;
+    const sent = await current.send(await prepareSend(input, signal));
+    if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
+    return sent;
+  }
   const guidance = 'Send only necessary requests, questions, findings, corrections or material updates. Skip acknowledgement-only exchanges; stop when the request is satisfied.';
   pi.registerTool({ name: 'comms_message', label: 'Peer message', description: 'Send {to,subject,text,workRef?,recipientLabel?,structured?}. Reply {respondTo,text,structured?,report?}; report:{request:originalMessageId,state:progress|needs-input|blocked|complete} is a peer claim, not work acceptance. Reply inherits workRef; omit to/subject/workRef/recipientLabel. Exact identity and owner approval still apply. Unknown send: inspect before retry.', promptGuidelines: [guidance], parameters: MessageInput, outputSchema: Output,
-    execute: async (_id, input, signal) => run(async () => {
-      const current = runtime!;
-      const sent = await current.send(await prepareSend(input, signal));
-      if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
-      return sent;
-    }, true), renderResult });
+    execute: async (_id, input, signal) => run(() => sendApproved(input, signal), true), renderResult });
   pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 existing peers: {requests:[{to,subject,text,workRef?,recipientLabel?},...],timeoutSeconds?}. Optional workRef groups each exchange; labels describe recipients, not authority. Returns the first linked reply (possibly clarification) or local ending, not work completion. Wait starts after acceptance; late replies remain possible. Never automatically resend.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
     execute: async (call, input, signal) => run(async () => {
       validate(AskInput, input);
@@ -480,6 +517,20 @@ export default function comms(pi: ExtensionAPI) {
       return { ...message, content: output.content, details: output.structuredContent };
     }) };
   });
+  // One inspect path for human-facing tools and local organizing extensions.
+  // The optional guard prevents a captured organizer handle from crossing a
+  // session boundary after asynchronous peer-name resolution.
+  async function inspectCommunication(input: InspectInput, guard: () => void = () => {}) {
+    guard();
+    validate(InspectInput, input);
+    const owner = runtime;
+    if (!owner || stopped) throw new Error('CONTEXT_LOST');
+    const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input;
+    guard();
+    if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
+    observeSaved();
+    return { ...owner.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } };
+  }
   pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {requests:[messageId,...]} direct reply progress and latest peer-reported state linked to each request, including after clarification; {workRef:"TICKET"}, {peer}, {exchange}, {message}, {queue:"self"}, {outbox:"self"} evidence. One selector. Unapproved content stays hidden. Peer reports are claims, not acceptance.', parameters: InspectInput, outputSchema: Output,
-    execute: async (_id, input) => run(async () => { validate(InspectInput, input); const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input; observeSaved(); return { ...runtime!.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } }; }), renderResult });
+    execute: async (_id, input) => run(() => inspectCommunication(input)), renderResult });
 }
