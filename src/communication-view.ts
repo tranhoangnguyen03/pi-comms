@@ -4,6 +4,7 @@ export const factLabels: Record<string, string> = {
   accepted: 'Accepted by transport',
   queued: 'Buffered in receiver memory',
   posted: 'Posted to Pi',
+  summarized: 'Retained in inspection; not posted to Pi',
   saved: 'Observed in native history',
   rejected: 'Rejected',
 };

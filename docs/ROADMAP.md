@@ -42,15 +42,15 @@ Activity is an observation about a session, not proof of progress on a particula
 | F04: Contextual peer labels | Discover a colleague's role or expertise for the relevant collaboration | Existing peer metadata and approved-contact context; simple roster/status patterns from intercom and messenger |
 | F05: Work references | Group available exchanges under a ticket or investigation and inspect them together | Existing exchange/subject/reference records and inspection pagination |
 | F06: Structured reply data and work reports | Carry machine-readable results and explicit reports such as blocked or complete, linked to the intended request | Current envelope, response linkage and structured projections; useful report patterns from intercom and messenger without their task managers |
-| F07: Explicit outcome waiting | Let a caller choose to await a reported final outcome when the workflow needs it | Existing independent ask waiters, interruption handling and exact-request matching |
+| F07: Request-aware outcome delivery (revised) | Deliver actionable reported outcomes and clarify current state without making the lead manage a second wait | Existing human-first incoming-message path, request links, report inspection and native cards |
 
 Roles may differ between collaborations. Work references group records already available to the participant; they do not expose other sessions' private conversations. Replies should retain their work reference.
 
 Validate structured data for supported encoding, shape and size; leave domain-specific claims to the caller. Define a small optional work-report convention rather than requiring every message to become a form. Final reports must identify the original request even after clarification rounds.
 
-Keep today's first-reply ask behavior as the default. Choose the exact F07 interface during implementation; document its timeout and interruption meaning. Distinguish **peer reports complete** from **requester accepts the work**.
+Keep today's first-reply ask behavior **unchanged**. F07 was revised after design review: do **not** add a blocking outcome wait or a second form of `comms_ask`. Deliver questions, `needs-input`, `blocked`, `complete` and corrections through the existing human-first intake. Record progress-only updates without unnecessary model wakes; group their history with later actionable reports. Preserve raw messages and evidence, and distinguish the last actionable reported state from the latest received report so late progress cannot appear to undo completion. A reported outcome remains **the peer's claim**, never the requester's acceptance.
 
-**Complete when:** a reviewer asks a question, later reports its review complete with evidence, and the lead recognizes the correct request's outcome without parsing prose or mistaking an older reply for it.
+**Complete when:** a reviewer asks a question, later reports complete with evidence, and the lead receives the relevant outcome without re-sending or managing another wait. Progress-only messages remain inspectable without repeated model wakes; late progress cannot replace an actionable result; a later corrective report remains visible. Verify Pause, revocation, human priority and first-reply asks.
 
 **Refinement:** converge labels, report names and result wording across tools and views. Optional fields need explicit mixed-version behavior; do not silently drop information that changes meaning.
 

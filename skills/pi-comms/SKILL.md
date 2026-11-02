@@ -42,6 +42,14 @@ The original request's **Message ID** appears in the incoming message. It is not
 
 The requester can use `comms_inspect({requests:["<original outgoing message ID>"]})` to see the latest reported state even if it arrived through a later clarification. `comms_ask` still ends at the first linked reply, which may be a question.
 
+## Request-aware outcomes without more waiting
+
+No special wait mode is needed. Ask once with `comms_ask` when a first reply matters, or send asynchronously with `comms_message`. The colleague replies with plain text, questions or an optional `report`, using the original request ID. If clarification is needed, answer with the returned handle and continue your work; do not re-send the original request just to keep waiting.
+
+Normal incoming delivery brings later `needs-input`, `blocked`, `complete` and useful plain replies to you. Progress-only reports are recorded and remain inspectable but do not wake you on their own. When a later outcome arrives, earlier progress is summarized and retained in the exchange history. A delayed progress update cannot override the last actionable reported state. Use `comms_inspect({requests:["<original outgoing message ID>"]})` when you need the detailed history or current peer-reported outcome.
+
+A peer's `complete` is a **report**, not your acceptance of the work. A later correction may change the reported state. Keep exact request links and evaluate the evidence; do not invent extra task authority.
+
 ## Clarification and findings
 
 If a colleague asks a question, reply using the handle on its message. The colleague may later send the final findings on the same exchange. Link any correction to your own earlier message only when you have its real ID. The work owner judges completion; a transport receipt or first reply does not prove it.
