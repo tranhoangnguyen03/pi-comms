@@ -24,6 +24,9 @@ test('approval copy puts colleague, work and consequences before technical ident
     assert.ok(prompt.message.indexOf('Work:') < prompt.message.indexOf('Yes:'));
     assert.ok(prompt.message.indexOf('Yes:') < prompt.message.indexOf('Session:'));
     assert.match(prompt.message, /No\/Esc:/); assert.match(prompt.message, /requests, clarifications and replies/);
+    assert.match(prompt.message, /exact session as a contact/);
+    assert.match(prompt.message, /both directions/);
+    assert.match(prompt.message, /not a per-task limit/);
     assert.match(prompt.message, /Your directions and tool permissions still apply/);
     assert.match(prompt.message, /Approval lasts until reload\/restart/);
     assert.ok(prompt.message.includes(peer)); assert.ok(!prompt.message.includes('long request '.repeat(100)));

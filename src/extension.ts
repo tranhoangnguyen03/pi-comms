@@ -87,7 +87,7 @@ export default function comms(pi: ExtensionAPI) {
         }
         declined.delete(id);
         current.approveFromOwner({ id, name: label, context: direction === 'receive' ? `User accepted incoming request: ${work} (peer-supplied title; user directives remain controlling)` : work });
-        context.ui.notify(`Collaboration with ${label} approved for: ${work}. ${direction === 'send' ? 'Continuing the send.' : 'Held messages will enter at the next eligible boundary.'}`, 'info');
+        context.ui.notify(`Contact with ${label} approved (initial work context: ${work}). ${direction === 'send' ? 'Continuing the send.' : 'Held messages will enter at the next eligible boundary.'}`, 'info');
     }, signal ? AbortSignal.any([signal, stop.signal]) : stop.signal);
   }
   function cancelContact(id: string) {
@@ -291,7 +291,7 @@ export default function comms(pi: ExtensionAPI) {
     const all = [...new Set([...known.map(p => p.id), ...(view === 'all' ? live.map(p => p.id) : [])])];
     const ranked = all.map(id => {
       const approval = known.find(p => p.id === id); const session = live.find(p => p.id === id);
-      return { id, name: session?.name ?? peerNames.get(id) ?? approval?.name ?? id, approved: !!approval, context: approval?.context ?? null, peerLabels: runtime!.peerLabels(id), presence: session ? 'online' : 'offline', ...peerActivity(session), reason: approval ? 'user-approved colleague for this work' : 'approval required', cwd: session?.cwd, lastActivity: session?.lastActivity };
+      return { id, name: session?.name ?? peerNames.get(id) ?? approval?.name ?? id, approved: !!approval, context: approval?.context ?? null, peerLabels: runtime!.peerLabels(id), presence: session ? 'online' : 'offline', ...peerActivity(session), reason: approval ? 'approved exact-session contact' : 'approval required', cwd: session?.cwd, lastActivity: session?.lastActivity };
     });
     ranked.sort((a, b) => (a.presence === 'offline' ? 2 : a.approved ? 0 : 1) - (b.presence === 'offline' ? 2 : b.approved ? 0 : 1));
     const start = cursor ? ranked.findIndex(p => p.id === cursor) + 1 : 0;
@@ -345,7 +345,7 @@ export default function comms(pi: ExtensionAPI) {
         if (!peer || selected === runtime.self) throw new Error('TARGET_UNAVAILABLE');
         const collaboration = await commandCtx.ui.input('What work is this colleague approved for?');
         if (!collaboration?.trim()) return;
-        if (await commandCtx.ui.confirm(`Work with ${peer.name}?`, `Work: ${collaboration}\n\nAllows requests, clarifications and replies for this work.\nDoes not send a message or change your directions/tool permissions.\n\nSession: ${selected}\nApproval lasts until reload/restart.`, { signal })) {
+        if (await commandCtx.ui.confirm(`Work with ${peer.name}?`, `Work: ${collaboration}\n\nApproves this exact session as a contact for future comms_message and comms_ask exchanges, not just this work. Either side may revoke; runtime reset ends approval.\nDoes not send a message or change your directions/tool permissions.\n\nSession: ${selected}\nApproval lasts until reload/restart.`, { signal })) {
           if (signal.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
           current.approveFromOwner({ id: selected, name: peer.name, context: collaboration.trim() }); declined.delete(selected);
         }
