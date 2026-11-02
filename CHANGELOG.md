@@ -6,6 +6,7 @@
 - Reuse ordinary first-contact human confirmation, exact-recipient resolution, bidirectional pair approval, Pause/revoke and transport-result handling. Other extensions cannot assert owner approval or grant permissions through this interface.
 - Give integration clients session-scoped capabilities that reject use after runtime replacement; no added model tools, broker transport, independent inbox, task ledger or persistent state.
 - Verify a separate organizing extension uses the published local bus contract and returns original-request reports via the same inspection as standalone tools. F09 explicit handover remains a separate reviewed step.
+- Share exact inspection logic between the organizer API and `comms_inspect`; keep peer discovery bound to its starting session across async calls. Stale organizer handles now return the same structured `CONTEXT_LOST` error shape as normal tool failures. Drop an unused, unshipped discovery helper so the event bus remains the one documented entry point.
 
 ## [0.1.6] - 2026-11-02
 

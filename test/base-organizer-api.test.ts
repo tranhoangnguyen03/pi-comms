@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findOrganizerApi, serveOrganizerApi, ORGANIZER_API_CHANNEL, type OrganizerApi, type OrganizerBus } from '../src/organizer-api.ts';
+import { serveOrganizerApi, ORGANIZER_API_CHANNEL, type OrganizerApi, type OrganizerBus } from '../src/organizer-api.ts';
 
 function localBus(): OrganizerBus {
   const listeners = new Map<string, Set<(data: unknown) => void>>();
@@ -13,6 +13,11 @@ function localBus(): OrganizerBus {
     emit(channel, data) { for (const listener of listeners.get(channel) ?? []) listener(data); },
   };
 }
+function discover(bus: Pick<OrganizerBus, 'emit'>): OrganizerApi | undefined {
+  let service: OrganizerApi | undefined;
+  bus.emit(ORGANIZER_API_CHANNEL, { version: 1, accept: (api: OrganizerApi) => { service = api; } });
+  return service;
+}
 const api: OrganizerApi = Object.freeze({
   version: 1 as const,
   sessionId: '12345678-1234-1234-1234-123456789abc',
@@ -22,13 +27,13 @@ const api: OrganizerApi = Object.freeze({
 });
 test('organizer discovery shares one in-process API with no new grant or transport', async () => {
   const bus = localBus();
-  assert.equal(findOrganizerApi(bus), undefined, 'no pi-comms extension means no service');
+  assert.equal(discover(bus), undefined, 'no pi-comms extension means no service');
   const off = serveOrganizerApi(bus, () => api);
-  assert.equal(findOrganizerApi(bus), api);
-  assert.deepEqual((await findOrganizerApi(bus)!.peers()).data, { items: [] });
-  assert.equal((await findOrganizerApi(bus)!.send({ to: '', subject: '', text: '' })).error?.code, 'CONTACT_NOT_APPROVED');
+  assert.equal(discover(bus), api);
+  assert.deepEqual((await discover(bus)!.peers()).data, { items: [] });
+  assert.equal((await discover(bus)!.send({ to: '', subject: '', text: '' })).error?.code, 'CONTACT_NOT_APPROVED');
   off();
-  assert.equal(findOrganizerApi(bus), undefined, 'registration lifetime is bounded');
+  assert.equal(discover(bus), undefined, 'registration lifetime is bounded');
 });
 test('invalid event payloads and inactive sessions cannot manufacture capabilities', () => {
   const bus = localBus();
@@ -37,6 +42,6 @@ test('invalid event payloads and inactive sessions cannot manufacture capabiliti
   for (const payload of [null, {}, { version: 1, accept: true }, { version: 2, accept: () => count++ }])
     bus.emit(ORGANIZER_API_CHANNEL, payload);
   assert.equal(count, 0);
-  assert.equal(findOrganizerApi(bus), undefined);
+  assert.equal(discover(bus), undefined);
   off();
 });

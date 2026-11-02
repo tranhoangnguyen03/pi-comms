@@ -38,18 +38,3 @@ export function serveOrganizerApi(bus: OrganizerBus, getApi: () => OrganizerApi 
     if (api) (request.accept as (api: OrganizerApi) => void)(api);
   });
 }
-
-// Optional helper for organizing extensions that import the shared contract.
-// Extensions may also emit ORGANIZER_API_CHANNEL directly without importing
-// pi-comms. Returning undefined means no active service was discovered.
-export function findOrganizerApi(bus: Pick<OrganizerBus, 'emit'>): OrganizerApi | undefined {
-  let found: OrganizerApi | undefined;
-  bus.emit(ORGANIZER_API_CHANNEL, {
-    version: 1,
-    accept: (api: OrganizerApi) => {
-      if (!found && api.version === 1 && typeof api.send === 'function' &&
-          typeof api.inspect === 'function' && typeof api.peers === 'function') found = api;
-    },
-  });
-  return found;
-}

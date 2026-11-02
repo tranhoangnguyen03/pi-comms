@@ -67,24 +67,14 @@ export default function comms(pi: ExtensionAPI) {
     const api: OrganizerApi = Object.freeze({
       version: 1,
       sessionId: current.self,
-      peers: async (input = {}) => {
-        activeRuntime();
-        return (await run(() => { activeRuntime(); validate(PeersInput, input); return peers(input.view, input.cursor); })).structuredContent;
-      },
-      send: async (input, signal) => {
-        activeRuntime();
-        return (await run(() => sendApproved(input, signal))).structuredContent;
-      },
-      inspect: async (input) => {
-        activeRuntime();
-        return (await run(async () => {
-          activeRuntime();
-          validate(InspectInput, input);
-          const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input;
-          activeRuntime(); observeSaved();
-          return { ...current.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } };
-        })).structuredContent;
-      },
+      peers: async (input = {}) => (await run(() => {
+        validate(PeersInput, input);
+        return peers(input.view, input.cursor);
+      }, false, activeRuntime)).structuredContent,
+      send: async (input, signal) =>
+        (await run(() => sendApproved(input, signal), false, activeRuntime)).structuredContent,
+      inspect: async (input) =>
+        (await run(() => inspectCommunication(input, activeRuntime), false, activeRuntime)).structuredContent,
     });
     return api;
   });
@@ -319,10 +309,14 @@ export default function comms(pi: ExtensionAPI) {
     return matches[0].id;
   }
   async function peers(view = 'all', cursor?: string) {
+    const owner = runtime;
+    if (!owner || stopped) throw new Error('CONTEXT_LOST');
     await ensureConnection();
-    const live = (await client!.listSessions()).filter(p => p.id !== runtime!.self);
+    if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
+    const live = (await client!.listSessions()).filter(p => p.id !== owner.self);
+    if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
     live.forEach(peer => peerNames.set(peer.id, peer.name ?? peer.id));
-    const known = runtime!.known();
+    const known = owner.known();
     const all = [...new Set([...known.map(p => p.id), ...(view === 'all' ? live.map(p => p.id) : [])])];
     const ranked = all.map(id => {
       const approval = known.find(p => p.id === id); const session = live.find(p => p.id === id);
@@ -405,10 +399,14 @@ export default function comms(pi: ExtensionAPI) {
     const body = { ok: !error, ...(error ? { error, ...(data ? { data } : {}) } : { data }), observedAt: new Date().toISOString() };
     return { content: [{ type: 'text' as const, text: error ? `${error.message}\n${error.nextAction}` : modelView(data, name) }], details: body, structuredContent: JSON.parse(JSON.stringify(body)), ...(error ? { isError: true } : {}) };
   };
-  const run = async (work: () => Promise<unknown> | unknown, compact = false) => {
+  const run = async (work: () => Promise<unknown> | unknown, compact = false, guard?: () => void) => {
     try {
+      // Organizer and normal model tools share result/error construction.
+      // The guard runs before and after async work, so stale handles never
+      // expose a replacement session's records or claim its send as their own.
+      guard?.();
       if (!runtime) throw new Error('TARGET_UNAVAILABLE');
-      const data = await work(); const output = result(data);
+      const data = await work(); guard?.(); const output = result(data);
       if (compact) {
         const sent = data as ReturnType<Runtime['view']>;
         output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''}${sent.message.report ? ` Peer reports ${sent.message.report.state} on request ${sent.message.report.request} (not acceptance).` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}` }];
@@ -516,6 +514,20 @@ export default function comms(pi: ExtensionAPI) {
       return { ...message, content: output.content, details: output.structuredContent };
     }) };
   });
+  // One inspect path for human-facing tools and local organizing extensions.
+  // The optional guard prevents a captured organizer handle from crossing a
+  // session boundary after asynchronous peer-name resolution.
+  async function inspectCommunication(input: InspectInput, guard: () => void = () => {}) {
+    guard();
+    validate(InspectInput, input);
+    const owner = runtime;
+    if (!owner || stopped) throw new Error('CONTEXT_LOST');
+    const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input;
+    guard();
+    if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
+    observeSaved();
+    return { ...owner.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } };
+  }
   pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {requests:[messageId,...]} direct reply progress and latest peer-reported state linked to each request, including after clarification; {workRef:"TICKET"}, {peer}, {exchange}, {message}, {queue:"self"}, {outbox:"self"} evidence. One selector. Unapproved content stays hidden. Peer reports are claims, not acceptance.', parameters: InspectInput, outputSchema: Output,
-    execute: async (_id, input) => run(async () => { validate(InspectInput, input); const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input; observeSaved(); return { ...runtime!.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } }; }), renderResult });
+    execute: async (_id, input) => run(() => inspectCommunication(input)), renderResult });
 }

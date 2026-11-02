@@ -23,7 +23,7 @@ function piComms(pi: { events: { emit: (event: string, data: unknown) => void } 
 }
 ```
 
-The callback is synchronous in Pi's local bus. Calls made through the returned service are asynchronous. Keep the handle only while this same Pi session is active. A handle from an earlier session rejects attempts to operate after a session change.
+The callback is synchronous in Pi's local bus. Calls made through the returned service are asynchronous. **This event is the single supported discovery path**; no separate importable discovery helper is shipped. Keep the handle only while this same Pi session is active. Calls through a handle from an earlier session return a structured `CONTEXT_LOST` error, not another session's records or permissions.
 
 The service has exactly three operations and two identifiers:
 

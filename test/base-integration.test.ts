@@ -81,6 +81,9 @@ export default function (pi) {
       const request = JSON.parse(args);
       let service;
       pi.events.emit('pi-comms:organizer-api:v1', { version: 1, accept: (api) => { service = api; } });
+      // Test-only handle; verify that a previously captured capability cannot
+      // operate in a different Pi session after native session replacement.
+      globalThis.__m3aCapturedService = service;
       const result = !service ? { ok: false, error: { code: 'NO_SERVICE' } } :
         request.operation === 'peers' ? await service.peers(request.input) :
         request.operation === 'send' ? await service.send(request.input) :
@@ -146,7 +149,43 @@ export default function (pi) {
     assert.equal(lead.dialogs.length, 1);
     const peers = await invoke('peers', { view: 'known' });
     assert.equal(peers.result.data.items.find((p: any) => p.id === reviewer.id()).approved, true);
-  } finally { await reviewer.close(); await lead.close(); }
+
+    // The organizer and direct tool must use one inspection implementation.
+    for (const input of [
+      { requests: [sent.result.data.message.id] },
+      { workRef: 'AUTH-42' },
+      { peer: reviewer.id() },
+      { queue: 'self' },
+    ]) {
+      const byOrganizer = (await invoke('inspect', input)).result;
+      const byTool = data(await lead.tool('comms_inspect', input));
+      assert.deepEqual(byOrganizer.data, byTool.data,
+        'organizer inspection must match direct comms_inspect records and local transport state');
+    }
+    const invalid = { queue: 'self', requests: [sent.result.data.message.id] };
+    const byOrganizer = (await invoke('inspect', invalid)).result;
+    const byTool = data(await lead.tool('comms_inspect', invalid));
+    assert.equal(byOrganizer.error.code, byTool.error.code, 'invalid selector errors must agree');
+
+    const previous = (globalThis as any).__m3aCapturedService;
+    assert.ok(previous && previous.sessionId === lead.id());
+    await lead.runtime.newSession();
+    assert.notEqual(lead.id(), previous.sessionId, 'a new session has a different identity');
+    for (const result of [
+      await previous.peers({ view: 'all' }),
+      await previous.inspect({}),
+      await previous.send({ to: reviewer.id(), subject: 'Stale handle', text: 'Must never send' }),
+    ]) {
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.code, 'CONTEXT_LOST',
+        'stale handles use the same structured error contract as all public tool results');
+    }
+    assert.equal(data(await lead.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0,
+      'a stale organizer cannot send through the replacement session');
+  } finally {
+    delete (globalThis as any).__m3aCapturedService;
+    await reviewer.close(); await lead.close();
+  }
 });
 
 test('peer discovery reports live host activity separately from reachability', async () => {
