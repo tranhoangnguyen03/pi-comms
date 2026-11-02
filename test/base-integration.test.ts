@@ -322,6 +322,62 @@ test('native Pi delivers actionable request reports while grouping progress with
   } finally { lead.draft(''); await reviewer.close(); await lead.close(); }
 });
 
+test('one approved A-B and A-C contact permits message, ask and reverse requests without another prompt', async () => {
+  const a = await participant('consent-pair-a'), b = await participant('consent-pair-b'), c = await participant('consent-pair-c');
+  try {
+    a.confirm(true); b.confirm(false); c.confirm(false);
+
+    const firstB = data(await a.tool('comms_message', { to: b.id(), subject: 'Review B', text: 'Start B review' }));
+    const firstC = data(await a.tool('comms_message', { to: c.id(), subject: 'Review C', text: 'Start C review' }));
+    assert.equal(firstB.ok, true); assert.equal(firstC.ok, true);
+    assert.equal(a.dialogs.length, 2, 'two first contacts need exactly two owner decisions');
+
+    const known = async (participant: Awaited<ReturnType<typeof participant>>, other: string) =>
+      (data(await participant.tool('comms_peers', { view: 'known' })).data.items as any[])
+        .some(peer => peer.id === other && peer.approved);
+    await waitFor(async () => await known(b, a.id()) && await known(c, a.id()));
+    assert.equal(b.dialogs.length, 0, 'receiver implicitly accepts approved requester');
+    assert.equal(c.dialogs.length, 0);
+
+    // A future prompt would now be denied. A->B/C must still work through ask.
+    a.confirm(false);
+    const asked = data(await a.tool('comms_ask', {
+      requests: [
+        { to: b.id(), subject: 'Follow-up B', text: 'Check B again' },
+        { to: c.id(), subject: 'Follow-up C', text: 'Check C again' },
+      ],
+      timeoutSeconds: .15,
+    }));
+    assert.equal(asked.ok, true);
+    assert.equal(asked.data.items.length, 2);
+    assert.equal(a.dialogs.length, 2, 'switching from comms_message to comms_ask cannot re-prompt');
+    assert.equal(b.dialogs.length, 0); assert.equal(c.dialogs.length, 0);
+
+    // Reverse direction is a fresh message, not merely a linked reply.
+    const reverseB = data(await b.tool('comms_message', { to: a.id(), subject: 'B initiates', text: 'Independent B request' }));
+    const reverseC = data(await c.tool('comms_message', { to: a.id(), subject: 'C initiates', text: 'Independent C request' }));
+    assert.equal(reverseB.ok, true); assert.equal(reverseC.ok, true);
+    const reverseAskB = data(await b.tool('comms_ask', {
+      requests: [{ to: a.id(), subject: 'B asks A', text: 'B question to A' }], timeoutSeconds: .15,
+    }));
+    const reverseAskC = data(await c.tool('comms_ask', {
+      requests: [{ to: a.id(), subject: 'C asks A', text: 'C question to A' }], timeoutSeconds: .15,
+    }));
+    assert.equal(reverseAskB.ok, true); assert.equal(reverseAskC.ok, true);
+    assert.equal(b.dialogs.length, 0, 'B->A needs no second permission through either tool');
+    assert.equal(c.dialogs.length, 0, 'C->A needs no second permission through either tool');
+    assert.equal(a.dialogs.length, 2, 'receiving from approved B/C needs no new permission');
+
+    // Permission is between exact pairs, not transitive from A.
+    const unrelated = data(await b.tool('comms_message', {
+      to: c.id(), subject: 'B initiates C', text: 'A cannot authorize B-C',
+    }));
+    assert.equal(unrelated.ok, false);
+    assert.equal(unrelated.error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(b.dialogs.length, 1, 'B-C is a separate, unapproved contact pair');
+  } finally { await c.close(); await b.close(); await a.close(); }
+});
+
 test('parallel first contacts queue independent decisions and send exactly once', async () => {
   const a = await participant('parallel-a'), b = await participant('parallel-b'), c = await participant('parallel-c');
   const decisions: ((allowed: boolean) => void)[] = [];
