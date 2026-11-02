@@ -55,6 +55,7 @@ export const MessageInput = Type.Object({
   text: Type.String({ ...Text, description: 'Full message payload.' }),
   workRef: Type.Optional(Type.String({ ...WorkRef, description: 'Optional ticket/work reference for a new exchange; replies inherit it. No access control.' })),
   recipientLabel: Type.Optional(Type.String({ ...RecipientLabel, description: 'Optional role/expertise label for the exact recipient in this exchange. New requests only; sender-supplied context, not authority.' })),
+  handoverFrom: Type.Optional(Type.String({ ...Id, description: 'Optional earlier exchange ID from this session\'s visible records. New exchange only; recipient and brief must be chosen explicitly. No approval or history transfer.' })),
   structured: Type.Optional(Structured),
   report: Type.Optional(Report),
   refs: Type.Optional(Type.Array(Ref, { description: 'Work-product pointers, not uploads.' })),
@@ -80,7 +81,7 @@ export const InspectInput = Type.Object({
 export type InspectInput = Static<typeof InspectInput>;
 export const EnvelopeSchema = Type.Object({
   id: Id, exchange: Id, subject: Text, text: Text, refs: Type.Array(Ref),
-  workRef: Type.Optional(WorkRef), recipientLabel: Type.Optional(RecipientLabel),
+  workRef: Type.Optional(WorkRef), recipientLabel: Type.Optional(RecipientLabel), handoverFrom: Type.Optional(Id),
   structured: Type.Optional(Structured), report: Type.Optional(Report),
   replyTo: Type.Union([Id, Type.Null()]), corrects: Type.Union([Id, Type.Null()]),
   createdAt: Type.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}T' }),
@@ -100,7 +101,9 @@ export function validate(schema: TSchema, value: unknown) {
     if (!input.respondTo && (!input.to || !input.subject)) throw new Error('INVALID_INPUT: new-message routing requires to and subject. Retry with { to, subject, text }, or reply with { respondTo, text }. refs and corrects are optional; never fabricate IDs. No message was sent for this input.');
     if (input.respondTo && (input.workRef !== undefined || input.recipientLabel !== undefined)) throw new Error('INVALID_INPUT: replies inherit the work reference and cannot assign a recipient label. Use { respondTo, text } without workRef or recipientLabel. No message was sent.');
     if (input.report && !input.respondTo) throw new Error('INVALID_INPUT: a work report must reply to an existing request with { respondTo, text, report: { request, state } }. No message was sent.');
+    if (input.handoverFrom && input.respondTo) throw new Error('INVALID_INPUT: handoverFrom starts a separate new exchange with {to,subject,text,handoverFrom}; it cannot be attached to a reply. No message was sent.');
   }
+  if (schema === EnvelopeSchema && (value as Envelope).handoverFrom && (value as Envelope).replyTo) throw new Error('INVALID_INPUT: a handover link belongs only on the first message of a new exchange.');
   if (schema === AskInput) for (const request of (value as AskInput).requests) validate(MessageInput, request);
   if (schema === InspectInput) {
     const input = value as InspectInput;

@@ -188,6 +188,94 @@ export default function (pi) {
   }
 });
 
+test('native explicit handover links old and new exchanges without carrying consent or history', async () => {
+  const lead = await participant('handover-lead'), former = await participant('handover-former'),
+    successor = await participant('handover-successor');
+  try {
+    lead.confirm(true);
+    const original = data(await lead.tool('comms_message', {
+      to: former.id(), subject: 'Risk review', text: 'Review unsafe write retries.',
+      workRef: 'AUTH-42', recipientLabel: 'Initial reviewer',
+    }));
+    assert.equal(original.ok, true);
+    assert.equal(lead.dialogs.length, 1);
+    await waitFor(async () => data(await former.tool('comms_inspect', { message: original.data.message.id })).ok);
+    const previous = data(await former.tool('comms_inspect', { message: original.data.message.id })).data;
+    const finding = data(await former.tool('comms_message', {
+      respondTo: previous.returnHandle, text: 'Old sensitive evidence held only by first reviewer.',
+      report: { request: original.data.message.id, state: 'blocked' },
+    }));
+    assert.equal(finding.ok, true);
+    await waitFor(async () => {
+      const response = data(await lead.tool('comms_inspect', { requests: [original.data.message.id] })).data.responses[0];
+      return response.reportCount === 1;
+    });
+
+    const oldExchange = original.data.message.exchange;
+    const before = data(await lead.tool('comms_inspect', { exchange: oldExchange })).data;
+    assert.deepEqual(before.handovers, []);
+    const peers = data(await lead.tool('comms_peers', {})).data.items;
+    assert.equal(peers.find((p: any) => p.id === successor.id()).approved, false,
+      'former reviewer approval must not transfer to the successor');
+
+    const brief = 'Goal: review AUTH-42. Finding: unsafe retry remains open. Next: confirm idempotency guard. Evidence: retry plan.';
+    const sent = data(await lead.tool('comms_message', {
+      to: successor.id(), subject: 'Authored handover brief', text: brief,
+      handoverFrom: oldExchange, workRef: 'AUTH-42', recipientLabel: 'Replacement reviewer',
+      refs: [{ label: 'Retry plan', uri: 'file:///retry-plan.md' }],
+    }));
+    assert.equal(sent.ok, true);
+    assert.equal(lead.dialogs.length, 2, 'the successor requires a distinct explicit approval');
+    assert.equal(sent.data.message.handoverFrom, oldExchange);
+    assert.notEqual(sent.data.message.exchange, oldExchange);
+    assert.equal(sent.data.message.to, successor.id());
+    await waitFor(async () => data(await successor.tool('comms_inspect', { message: sent.data.message.id })).ok);
+    const onSuccessor = data(await successor.tool('comms_inspect', { message: sent.data.message.id })).data;
+    assert.equal(onSuccessor.message.text, brief);
+    assert.equal(onSuccessor.message.handoverFrom, oldExchange);
+    assert.equal(onSuccessor.message.replyTo, null);
+    assert.equal(onSuccessor.message.refs[0].label, 'Retry plan');
+    assert.equal(data(await successor.tool('comms_inspect', { message: original.data.message.id })).error.code, 'CONTEXT_LOST',
+      'old exchange is not replicated into the successor session');
+
+    await waitFor(() => successor.observed.some(messages => text(messages).includes('Authored handover brief')));
+    assert.match(text(successor.observed.at(-1)!), /Handover from earlier exchange/);
+    assert.doesNotMatch(text(successor.observed.at(-1)!), /Old sensitive evidence held only/);
+    const native = successor.runtime.session.sessionManager.getEntries().find((entry: any) =>
+      entry.type === 'custom_message' && (entry.details as any)?.ids?.includes(sent.data.message.id)) as any;
+    assert.ok(native);
+    assert.match(native.details.messages[0].handoverFrom, /^[0-9a-f-]{36}$/);
+    assert.equal(native.details.messages[0].handoverFrom, oldExchange);
+    assert.equal(lead.dialogs.length, 2);
+    assert.equal(successor.dialogs.length, 0, 'receiver never needs redundant permission');
+    assert.equal(data(await successor.tool('comms_peers', { view: 'known' })).data.items
+      .some((p: any) => p.id === former.id()), false);
+
+    const links = data(await lead.tool('comms_inspect', { exchange: oldExchange })).data;
+    assert.equal(links.items.length, 2, 'old exchange stays intact');
+    assert.deepEqual(links.handovers, [{
+      toExchange: sent.data.message.exchange, toPeer: successor.id(), message: sent.data.message.id,
+      state: 'accepted', code: null,
+    }]);
+    assert.equal(data(await former.tool('comms_inspect', { message: sent.data.message.id })).error.code, 'CONTEXT_LOST',
+      'former reviewer receives no implicit replacement notification or copied record');
+
+    const result = data(await successor.tool('comms_message', {
+      respondTo: onSuccessor.returnHandle, text: 'New review: idempotency guard required.',
+      report: { request: sent.data.message.id, state: 'complete' }, structured: { issues: 1 },
+    }));
+    assert.equal(result.ok, true);
+    await waitFor(async () => data(await lead.tool('comms_inspect', {
+      requests: [sent.data.message.id],
+    })).data.responses[0].reportCount === 1);
+    const after = data(await lead.tool('comms_inspect', { requests: [sent.data.message.id] })).data.responses[0];
+    assert.equal(after.currentReport.message.report.state, 'complete');
+    assert.equal(after.currentReport.message.exchange, sent.data.message.exchange);
+    const old = data(await lead.tool('comms_inspect', { requests: [original.data.message.id] })).data.responses[0];
+    assert.equal(old.currentReport.message.report.state, 'blocked');
+  } finally { await successor.close(); await former.close(); await lead.close(); }
+});
+
 test('peer discovery reports live host activity separately from reachability', async () => {
   const coordinator = await participant('presence-coordinator'), reviewer = await participant('presence-reviewer');
   try {
