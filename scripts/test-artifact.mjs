@@ -12,6 +12,7 @@ try {
   assert.ok(pack.files.some(f => f.path === 'dist/transport/broker/broker.js'));
   assert.ok(pack.files.some(f => f.path === 'THIRD-PARTY-NOTICES.md'));
   assert.ok(pack.files.some(f => f.path === 'skills/pi-comms/SKILL.md'), 'on-demand collaboration skill must be included');
+  assert.ok(pack.files.some(f => f.path === 'docs/INTEGRATION.md'), 'supported organizer integration contract must be packed');
   assert.ok(!pack.files.some(f => /^(prototype|test|src|\.scratch|node_modules)\//.test(f.path)));
   const prefix = join(root, 'install'); mkdirSync(prefix);
   writeFileSync(join(prefix, 'package.json'), '{"private":true,"type":"module"}');

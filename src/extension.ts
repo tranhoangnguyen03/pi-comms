@@ -12,6 +12,7 @@ import type { SessionInfo, ContactApproval, Message as WireMessage } from './tra
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
 import { approvalPrompt, showInspection } from './human-view.ts';
 import { getBrokerConnectTarget } from './transport/broker/paths.ts';
+import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
 const RESET = 'Contacts, approval, queues, outbox and return handles are memory-only and reset on reload/switch/restart. Native saved session IDs remain stable. Your first send asks for contact approval and continues if you allow it. Requester approval also permits normal replies. Receiver Pause/revoke and user directives still apply.';
 const HELP = 'Stop ends the current run; later peers may wake it. Pause holds peer admission/wakes, not current work or already-posted content. /comms approve | revoke | pause | resume | status | inspect | requests';
@@ -53,6 +54,40 @@ export default function comms(pi: ExtensionAPI) {
   let lastStatus: string | undefined;
   let lastPresenceSentAt = 0;
   registerInlineCards(pi);
+  // A local organizing extension can borrow this session's existing
+  // communication path. Event-bus data never grants owner approval or new
+  // authority. Calls remain tied to this exact live runtime.
+  serveOrganizerApi(pi.events, () => {
+    const current = runtime;
+    if (!current || stopped) return undefined;
+    const activeRuntime = () => {
+      if (stopped || runtime !== current || ctx?.sessionManager.getSessionId() !== current.self)
+        throw new Error('CONTEXT_LOST: organizer API belongs to an earlier Pi session');
+    };
+    const api: OrganizerApi = Object.freeze({
+      version: 1,
+      sessionId: current.self,
+      peers: async (input = {}) => {
+        activeRuntime();
+        return (await run(() => { activeRuntime(); validate(PeersInput, input); return peers(input.view, input.cursor); })).structuredContent;
+      },
+      send: async (input, signal) => {
+        activeRuntime();
+        return (await run(() => sendApproved(input, signal))).structuredContent;
+      },
+      inspect: async (input) => {
+        activeRuntime();
+        return (await run(async () => {
+          activeRuntime();
+          validate(InspectInput, input);
+          const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input;
+          activeRuntime(); observeSaved();
+          return { ...current.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' } };
+        })).structuredContent;
+      },
+    });
+    return api;
+  });
   // A new human instruction can reconsider contact; automatic model/peer continuations cannot.
   pi.on('input', event => { if (event.source !== 'extension') { declined.clear(); endAsks('interrupted'); } });
   function endAsks(reason: Parameters<Asks['end']>[0], peer?: string) {
@@ -418,14 +453,15 @@ export default function comms(pi: ExtensionAPI) {
     if (signal?.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
     return resolved;
   }
+  async function sendApproved(input: MessageInput, signal?: AbortSignal) {
+    const current = runtime!;
+    const sent = await current.send(await prepareSend(input, signal));
+    if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
+    return sent;
+  }
   const guidance = 'Send only necessary requests, questions, findings, corrections or material updates. Skip acknowledgement-only exchanges; stop when the request is satisfied.';
   pi.registerTool({ name: 'comms_message', label: 'Peer message', description: 'Send {to,subject,text,workRef?,recipientLabel?,structured?}. Reply {respondTo,text,structured?,report?}; report:{request:originalMessageId,state:progress|needs-input|blocked|complete} is a peer claim, not work acceptance. Reply inherits workRef; omit to/subject/workRef/recipientLabel. Exact identity and owner approval still apply. Unknown send: inspect before retry.', promptGuidelines: [guidance], parameters: MessageInput, outputSchema: Output,
-    execute: async (_id, input, signal) => run(async () => {
-      const current = runtime!;
-      const sent = await current.send(await prepareSend(input, signal));
-      if (sent.state !== 'accepted') throw new Error(`${sent.code ?? (sent.state === 'unknown' ? 'OUTCOME_UNKNOWN' : 'TARGET_UNAVAILABLE')}: message ${sent.message.id}; inspect outbox for evidence`);
-      return sent;
-    }, true), renderResult });
+    execute: async (_id, input, signal) => run(() => sendApproved(input, signal), true), renderResult });
   pi.registerTool({ name: 'comms_ask', label: 'Ask colleagues', description: 'Ask 1–30 existing peers: {requests:[{to,subject,text,workRef?,recipientLabel?},...],timeoutSeconds?}. Optional workRef groups each exchange; labels describe recipients, not authority. Returns the first linked reply (possibly clarification) or local ending, not work completion. Wait starts after acceptance; late replies remain possible. Never automatically resend.', promptGuidelines: [guidance], parameters: AskInput, outputSchema: Output,
     execute: async (call, input, signal) => run(async () => {
       validate(AskInput, input);
