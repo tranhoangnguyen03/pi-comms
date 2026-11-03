@@ -71,7 +71,17 @@ export class Asks {
       }
     }
   }
+  private checkAdmission(call: string) {
+    const operation = this.calls.get(call);
+    if (!operation || operation.presented) return;
+    // A readable historical record is not permission to newly admit an ask
+    // result. Keep already-presented results intact; hold unpresented replies.
+    for (const item of operation.items) {
+      if (item.reply && item.peer && !this.runtime.isApproved(item.peer)) this.end('revoked', call, item.peer);
+    }
+  }
   project(call: string, seconds: number) {
+    this.checkAdmission(call);
     const operation = this.calls.get(call)!;
     return { timeoutSeconds: seconds, items: operation.items.map(item => ({ ...item,
       outcome: item.outcome ?? operation.ended ?? 'not-sent',
@@ -81,9 +91,12 @@ export class Asks {
   present(call: string, source = 'native ask result context admission') {
     const operation = this.calls.get(call);
     if (!operation || operation.presented) return;
-    operation.presented = true;
+    this.checkAdmission(call);
     const ids = operation.items.flatMap(item => item.reply ? [item.reply] : []);
+    // Runtime records the offer before the host receives this context. A
+    // failure must not mark the call presented or release its retained reply.
     this.runtime.posted(ids, source);
+    operation.presented = true;
     ids.forEach(id => this.claims.delete(id));
   }
   has(call: string) { return this.calls.has(call); }
