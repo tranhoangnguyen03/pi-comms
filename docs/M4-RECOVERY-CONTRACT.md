@@ -1,139 +1,182 @@
-# M4 recovery contract — preflight for F10, F11 and F12
+# M4 — native-session recovery and a small durable mailbox
 
-**Status:** Proposed design and test contract, not shipped recovery behavior. This document is a review gate before enabling persistence or offline delivery. The [README](../README.md) remains the current contract.
+**Status: proposed design, not shipped behavior.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
 
-## The result we need
+## Decision
 
-A user can resume the **same saved Pi session** after a restart, recognize the earlier conversation with the same exact colleague, and continue safely. If a message could have arrived twice or its outcome is unknown, pi-comms must say so. Recovery must not silently send again, wake a replacement, or restore contact authority that the user did not grant.
+**Use Pi's existing session file for participant recovery. Use the existing native session IDs and broker scope for addressing. Add disk persistence only to the broker mailbox that must outlive its process.**
 
-Keep these concepts distinct:
+Do not add a participant sidecar database, a second transcript, a general event-store service, new identity credentials, a durable peer directory or a recovery tool. Keep the four agent tools, existing `/comms` controls and M3 organizer API.
 
-| Concept | Meaning | Authority |
+| State | Owner and proposed location | Lifetime |
 | --- | --- | --- |
-| Session identity | The specific native Pi saved-session ID | Pi host |
-| Communication record | Original message, peer IDs, exchange/request/reply links, return handle and observed facts | pi-comms, based on observed local events |
-| Contact decision | Which exact session may communicate, what lifetime was approved, and whether revoked | Human owner, not peer-supplied metadata |
-| Broker delivery | Routed, queued, received, expired or uncertain transport state | Broker observations, never proof that the agent read or completed work |
-| Work outcome | Peer-reported progress, blockage, completion and corrections | Peer claim, not requester acceptance |
+| Original messages, reply handles, links, readability and observed outcomes | Versioned private custom entries in the participant's **existing Pi session JSONL** | Native saved session |
+| Pause, explicit local refusals/revocations, optional remembered contact decisions | The same Pi session entries, not a separate permission store | Exact session; approved lifetime |
+| Runtime maps, report views, indexes and duplicate lookup | Rebuilt from those entries | Current runtime; disposable |
+| Pending offline payloads and bounded transport outcomes | One versioned broker-owned mailbox state file under the **existing comms directory** | Queue expiry and evidence retention |
+| Live connection, endpoint epoch and current presence | Existing broker/client mechanisms | Current connection; not durable identity |
+| Model-context history and branch selection | Pi host | Native session semantics |
 
-**The record is the backbone; approvals and delivery are distinct state with explicit owners.** Keep one authoritative communication record per participant and project all human, agent and organizer views from it. Do not build another inbox, transcript copy or task database.
+The broker mailbox is necessary storage, not a second conversation history. If every process stops, an acknowledged offline message needs somewhere to remain. Removing its disk state would remove broker-restart recovery from F12; that is **not** the selected simplification.
 
-## Observed baseline and important inherited behavior
+## What the source review established
 
-Reviewed against merged [M3-B main](https://github.com/tranhoangnguyen03/pi-comms/tree/3f937e80c65e0b6bcd0ede0048fff262d3b558cd), 2026-11-02.
+Baseline: pi-comms [ca3e74a](https://github.com/tranhoangnguyen03/pi-comms/tree/ca3e74a8f9d7b9608f2d5b102ba863f030e54c16), whose runtime is merged M3-B; pinned host **Pi 1.4.0**, [4a08025](https://github.com/earendil-works/pi/tree/4a080252f06caf63a525d7873c5d94d3c23887e0).
 
-1. **Runtime records vanish on reload/switch/restart.** `src/runtime.ts` stores approvals, revocations, message records, reply handles and waiting intake in Maps/arrays. `src/extension.ts` constructs a new `Runtime` on `session_start` and discards it on shutdown. Saved Pi session identity does not restore these maps today.
-2. **Broker recovery is incomplete.** `src/transport/broker/broker.ts` keeps `mailboxMessages`, `disconnectedSessions`, delivery records and receipt routes in memory. The existing 24-hour disconnected-session/mailbox TTL and 256-message cap are inherited code, **not** a crash-durable promise. Shutdown clears the in-memory stores. Some historical pending-ask and extension-state files exist but do not make the public Pi communication records durable.
-3. **The public send path does not promise offline delivery.** `src/transport/send.ts` resolves an exact currently connected target and rejects an unavailable peer. The broker's legacy disconnected-session routing also has a name/cwd matching fallback; it must **not** become the restored public path without an exact-ID audit.
-4. **A successful send is not task completion.** The broker can observe socket/receipt facts, but cannot know that a model read the content or accepted work. An unconfirmed send can be `unknown`. The sender must not treat it as safely unsent.
-5. **Approvals currently expire on runtime reset.** Approval prompts explicitly say so. Silently restoring a prior contact as permanently approved would change the owner's decision. Exact A↔B approval must not become A↔C approval after handover.
+- [`Runtime`](../src/runtime.ts) already owns messages, handles, approvals, intake and report projections. Extend it; do not invent another conversation model. Its current visibility check depends on current approval and must change for historical readability.
+- Pi's [`CustomEntry` and SessionManager](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/coding-agent/src/core/session-manager.ts) already support extension state that **does not enter model context**. `pi.appendEntry` is the extension write path; `ctx.sessionManager.getEntries()` supplies recovery data. Native transcript text alone is insufficient: it omits withheld arrivals, pre-dispatch intent and some organizer operations.
+- **Host limits matter.** Pi 1.4.0 buffers custom entries in a fresh unused session until a user/assistant conversation exists. It updates memory before persisting, can skip malformed input lines, and uses synchronous file writes without an explicit fsync in that append path. A file path, successful in-memory lookup or parsed session is not by itself a durability certificate.
+- Pi's `getEntries()` includes all branches. Native forks copy custom entries but create a new session ID. Communication controls therefore need explicit owner IDs and must not roll back with `/tree` navigation.
+- The existing [broker](../src/transport/broker/broker.ts) has scoped native IDs, endpoint epochs, live-holder conflict checks, receipt tracking and a mailbox. Registration can flush mail immediately. It does **not** cryptographically authenticate a saved-session owner against malicious same-user processes.
+- [`ExtensionStateManager`](../src/transport/broker/extension-state.ts) supplies an existing atomic-write/fsync/rename pattern. Its 64 KiB payload cap, namespace-owner protocol and fallback-to-backup behavior are **not** automatically appropriate for a delivery queue. Reuse the small file-writing mechanism after review, not the whole extension-state bus or its limits.
 
-These are existing gaps, not M4 features already implemented. [Broker source](https://github.com/tranhoangnguyen03/pi-comms/blob/3f937e80c65e0b6bcd0ede0048fff262d3b558cd/src/transport/broker/broker.ts), [runtime source](https://github.com/tranhoangnguyen03/pi-comms/blob/3f937e80c65e0b6bcd0ede0048fff262d3b558cd/src/runtime.ts), [exact send](https://github.com/tranhoangnguyen03/pi-comms/blob/3f937e80c65e0b6bcd0ede0048fff262d3b558cd/src/transport/send.ts).
+[`test/m4-storage-preflight.test.ts`](../test/m4-storage-preflight.test.ts) characterizes seven host behaviors: saved custom entries, first-conversation flushing, ephemeral sessions, branch navigation, forks, failed writes and malformed tails. These tests are architectural evidence, **not an M4 implementation or real-agent acceptance test**. See the PR's exact-head CI results for execution status.
 
-## Design contract shared by F10–F12
+## F10 — recover inside the native saved session
 
-**Keep the current four agent tools and M3 organizer API.** Normal messages, first-linked-reply asks, correction-aware reports, human-first intake and explicit handovers retain their meanings. pi-comms restores communication; it does not become a task manager, choose replacements, replay agent work or add a recovery tool.
+### A small record schema, not a new persistence framework
 
-There are several evidence owners, but **one participant-facing communication record**:
+Use one versioned custom-entry namespace, for example `pi-comms:v1`. Each entry carries the native owner session ID and the existing local broker/agent-directory scope. It records one of:
 
-| Fact | Source of truth | What it does not prove |
-| --- | --- | --- |
-| Exact saved session ID; native posted messages and tool results | Pi host | Current contact permission or continued remote work |
-| Original message, exchange/request/reply/report/correction/handover links, return handle and historical visibility | Exact participant's local record | Broker delivery or another participant's private history |
-| Consent lifetime, revocation and Pause | Human owner's decisions recorded locally | Task assignment, reachability or host tool permission |
-| Offline identity, broker queue, expiry, delivery receipt | Scoped broker evidence | Model-context admission or peer completion |
-| Progress, blocker, completion and correction | Attributed peer report | Requester acceptance |
-
-Preserve message IDs across evidence boundaries and show the same facts in agent inspection, native cards, human controls and organizer inspection. Local and broker evidence may use separate physical files; do not create competing transcripts or an additional task ledger.
-
-### F10 — restore records and controls **before broker registration**
-
-**Mandatory startup order:**
-
-1. Bind persisted records to the **exact native saved-session ID and its owner/agent-directory scope**. Reject unrelated sessions, copies, forks and conflicting simultaneous owners. No name, cwd, role or work-reference fallback.
-2. Load and validate the last committed generation: message IDs, original envelopes and links, return handles, per-message visibility evidence, outgoing intent/outcome, pending intake, dedup IDs, Pause and any controls made durable by the installed milestone. Reconcile saved native Pi messages/tool results to determine what actually entered Pi, rather than treating broker acceptance as model admission.
-3. **Only after the recovery barrier succeeds** register with the broker or allow reconnect mailbox flush. Apply restored revocations, Pause, current consent, user drafts and pending human input before new admission. Discard old consent-dialog callbacks, captured organizer handles and stale async operations after a session switch/reload.
-4. Resume through the existing human-first intake path. Never replay all restored messages to the model, rebuild a running `comms_ask` waiter, or wake a replacement session. Late replies still belong to the original request.
-
-**Failure and first-run distinction:** A truly new saved session without an earlier record can start clean. For an existing pre-M4 saved session, say plainly that old memory-only communication cannot be recovered; do not invent history. Corrupt/incompatible data, a missing expected generation or conflicting ownership is **not** a fresh session: hold unsafe sends, broker registration and new agent admission; preserve salvageable evidence and provide a short human-facing diagnosis/repair or export path. Never silently erase evidence and label it recovered.
-
-**Historical access is separate from current permission:**
-
-- All self-authored messages remain inspectable by their saved-session owner. Incoming history that was **authorized to be agent-readable at the time** remains readable by that same saved session after a runtime-only approval expires or a contact is revoked. Revocation blocks future communication, not already-authorized history.
-- Persist the **per-message historical visibility decision and evidence** at the time an incoming message first became readable to the agent. Restore that decision. Do **not** derive historical access from today's `isApproved(peer)`; distinguish “authorized for inspection” from “actually posted into native Pi.”
-- Content held from the agent before the restart stays withheld in agent inspection. If historical authorization cannot be established, default to withheld; it remains reviewable via the existing human path. A later valid approval may admit held messages through the ordinary pump but cannot invent earlier model admission.
-- Fresh/unadmitted arrivals and outbound sends still need valid **current** contact authority. Historical readability grants no new contact, no authority to successors and no permission to read another session's records.
-
-**Durable events:** Store outgoing message ID/intent before transport dispatch; refuse dispatch if the write fails. Store an incoming message ID/dedup fact before claiming durable receipt. Record known final transport outcome only on supporting evidence. A crash after dispatch and before final evidence save leaves **unknown**, not “not sent”; reconcile read-only broker/native evidence and never auto-resend with a new ID. Restore reusable return handles and all request/reply/report/correction/handover links. Do not persist/revive the transient first-reply wait itself.
-
-Use a small versioned atomic journal/checkpoint (or equivalent), owner-only file permissions, integrity checks, bounded retention and last-valid-commit recovery. Choose bounds from long-running collaborations; do not silently drop links or controlling decisions. **Pause survives restart of this exact session** and must take effect before any queued intake. F10 alone does not claim the F11 persistent-approval feature.
-
-### F11 — remembered consent is explicit and belongs to its owner
-
-- The **compatibility default remains runtime-only approval**. Earlier approvals never become durable merely because the record survives.
-- Extend the **existing human contact confirmation** with one optional lifetime choice, without a second routine approval prompt: “This session only” (default) versus “Remember this exact session pair across restarts until revoked.” State what survives and how to revoke; the agent should not select a permission mode.
-- Scope the persisted grant to the **approving owner's identity/scope plus both exact saved-session IDs**. A remembering B does not mean B's owner has independently remembered A, or vice versa. Do not transfer grants to forks, renamed roles, lookalike directories or replacement sessions.
-- **Transport assertion provenance:** Existing requester-side/bidirectional contact may accept a current, broker-validated sender-approval assertion for the **particular arrival and receiver's current runtime**, when no controlling local refusal exists. Bind it to the sender, exact recipient, scope and message; it is evidence of the *sender-side* owner's decision, **not** proof that the receiver's owner chose persistent consent. Never store it as the receiver's “remember until revoked” grant. Old queued/replayed assertions must not override a local denial. Without a valid receiver admission basis, hold content for human review rather than auto-granting access.
-- Persist an explicit owner's revocation **before confirming it**. Restore the deny before registration; it overrides locally queued content, stale transport assertions and prior grants on subsequent send/admission. Only a fresh owner action may reapprove. Revocation does not erase authorized old history, retract already posted messages or stop an agent running in a different process.
-- Remembered approval does not mean that the peer is online, working on a task or permitted to execute host tools. Keep user instructions, native permissions, Pause and human-input priority intact.
-
-### F12 — bounded offline delivery to a verified exact identity
-
-- Maintain a **durable, scope-bound offline recipient registry** based on a previously verified native-session registration. Record enough identity provenance to survive broker restart and reject wrong owner scope, deleted session, conflicting identity or stale/reused endpoint. Registration and reconnection must confirm the same exact session binding. A bare ID supplied by an unverified client, role, name, cwd, prefix or guessed epoch is insufficient. If this proof cannot be established with the supported broker trust model, reject the offline send.
-- Queue only eligible **asynchronous exact-session messages**, through the existing public send path, after auditing inherited mailbox code. No alias/name/cwd fallback, automatic replacement, separate agent send mode or blind new-ID retry. Unsupported versions must fail clearly or retain a documented safe live-only subset.
-- Before acknowledging `queued`, atomically commit the message ID, authenticated sender/target/scope, content, expiry and outcome/receipt tracking. Set expiry and count/byte caps from actual workflows; inherited 24h/256 are candidates, not promises. Reject before acceptance when full, or durably record and surface any later expiry/eviction/loss. An acknowledged queue item must not vanish silently on broker restart.
-- Keep **queued → receiver durably recorded → native Pi admission observed** distinct from **expired / rejected / unknown**, and from the separate peer-reported work outcome. Broker evidence never proves model reading or task completion. Sender sees enough detail for its next safe step without receipt-log noise.
-- Redelivery of the **same message ID** may be needed after a crash. Receiver persists dedup before durable acknowledgment and checks Pi-native history before possible model admission. No repeated model turn, no agent-controlled replay, no exactly-once execution claim.
-- **Do not change `comms_ask`:** It still waits within the active runtime for the **first linked reply**, not final completion. An offline target is not queued as a blocking ask and restart never restores the waiter. Report unavailable/interrupted/unknown outcomes **per item** while other requests continue. Late replies, if any, remain linked to the original request. Use ordinary eligible `comms_message` for async work during a peer's temporary absence.
-- On reconnection, validate identity and run all arrivals through restored consent/revocation/Pause/human-priority rules. An unapproved queued message stays held for human review; receipt, expiry or loss remains visible even if sender is offline.
-
-## Interruption and recovery acceptance matrix
-
-| Window or scenario | Required observed behavior |
+| Kind | Minimum information |
 | --- | --- |
-| New session vs existing missing/corrupt record | Clean start only for truly new identity; old unrecoverable data disclosed; corrupt/conflicting state holds unsafe operations |
-| Saved session restarts while broker has queued mail | Restore records, dedup, Pause and durable contact decisions **before registration/flush**; no race admitting mail |
-| Earlier authorized incoming history, current approval expired | Old content and links readable without renewed approval; **new contact still requires current consent** |
-| Earlier incoming content withheld from the agent | Still withheld from agent after restart; visible to owner for approval; no false historical access |
-| Pause before restart with queued arrivals | Pause remains active and blocks model wake until explicit resume and valid current admission |
-| Before outgoing intent saved | No send occurred; no invented outbox item |
-| Intent saved, before/during network dispatch | Original message ID with **unknown** outcome until reconciled; no automatic retry |
-| Broker accepted but local final status not recorded | Read-only evidence reconciliation or unknown, never “safe to resend” |
-| Receiver accepted into memory before durable write | No durable-received claim; same-ID reoffer safely deduplicates |
-| Receiver stored message, native Pi admission unknown | Inspectable held/uncertain state; no blind duplicate model turn |
-| Pi message posted before local posted fact recorded | Reconcile native saved history; never inject twice |
-| Old approval dialog/captured organizer handle after restart | Invalidated; cannot change new runtime or grant consent |
-| A remembers B, but B restarts | A's owner choice is not B's persistent choice; sender assertion obeys current scoped receiver admission policy |
-| Owner revokes contact while messages are queued | Durable local deny wins over stale assertions; previously authorized history remains readable |
-| Previously verified offline target; broker crashes | Exact registry and queued content survive, or visible expired/lost/unknown evidence; never a replacement recipient |
-| Multi-item `comms_ask` includes offline B | B item reports unavailable/interrupted; other items continue; no durable waiter or offline ask queue |
-| A hands work from B to C before restart | Distinct exact C request, permissions and exchange; B history and authority never transferred |
-| Mixed versions, downgrade, fork or storage overflow | Safe failure or documented subset; no identity/consent leak or overwrite of newer data |
+| Message | Existing full envelope, exact from/to, stable message/exchange/request links, reusable return handle where relevant, historical visibility |
+| Message change | Message ID plus a newly observed outcome, visibility decision or intake disposition, with its evidence source |
+| Local control | Pause/resume or exact-peer contact decision, its lifetime and whether the local owner or transport supplied it |
 
-## Human and agent experience
+The names above describe the proposed representation, not a new public API. Derive report state, handover links, indexes, pending intake and duplicate checks from the existing records. Do not persist a second task ledger, copy all Pi conversation entries or save full-runtime snapshots on every status tick. Existing native cards/tool results are projections and admission evidence, not an independent recovery store.
 
-No new agent tool, recovery command, receipt checklist, wait mode, extra inbox, polling loop or general task manager. The normal path resumes quietly. Where action is needed, one concise summary leads with the work and safe next step, such as **“Review with B restored. One outgoing result is uncertain; no message was resent.”** Low-level transaction facts remain inspectable with the existing `comms_inspect` and human `/comms` paths, with matching evidence labels in native cards and the M3 organizer API.
+Store the original envelope once in this recovery namespace because held messages and interrupted sends may never appear in a native card. Keep ordinary native presentation; some payload also appearing in a tool result/card does not justify maintaining a separate transcript database. Do not reconstruct missing return handles or permissions from prose.
 
-**Automated gates:** For each F10/F11/F12 slice, test the relevant rows above in focused runtime tests and **installed Pi** restart, broker-kill, disconnected-peer and version-transition scenarios. Assert actual visibility/admission, revocation/Pause priority, restored reply links, per-item ask results, dedup/no duplicate native posting and rejection of ambiguous offline identity. Baseline M3 scripted tests do **not** establish M4 recovery.
+### Read old history without reopening contact
 
-**Separate real-agent interrupted-review evaluation — not the M3 handover exercise:**
+A self-authored message or incoming message previously authorized for agent inspection remains readable by the **same saved session**, even after approval expires or the contact is revoked. Persist that per-message decision. Do not recompute it from `isApproved(peer)`.
 
-1. With two **existing live Pi sessions** A (lead) and B (reviewer), ask A naturally: **“Ask B to review the retry logic and report the risks. Keep working while B reviews.”** Let B ask a clarification or share early findings.
-2. Restart **A's same saved Pi session** during the review, leaving B to continue. Do not supply A with exchange IDs, special tool names, replay steps or a recovery checklist.
-3. Ask A: **“Continue the review with B. Tell me what we know, what's still waiting, and whether you need anything from me.”** Observe spontaneous use of restored history and request links; no duplicate asks, no false work-completion claim and appropriate current contact approval.
-4. Let B later report `complete` or `blocked` and a correction if relevant. Verify ordinary human-first delivery, report linkage, actionable-state precedence and no extra stale-progress wake.
-5. Run targeted variants: A paused before restart, approval expired, an earlier incoming message withheld, B disconnected during an eligible async send, and a separate offline `comms_ask` item. Verify that no manual recovery or duplicate resend is requested.
+Previously withheld messages remain withheld from the agent; the human can still inspect them through the existing path. Unknown historical authorization is not permission. Reading a record, admitting it to Pi, sending a new message and accepting a work result remain separate acts. Preserve these rules across message, request, exchange, work-reference and organizer inspection, including handover-source validation.
 
-Score **0/1/2** (failure/brief hint/natural success) for: recovered-history use; safe past-vs-new visibility; no redundant send; uncertainty and peer-reported outcome; user/Pause priority; and low agent/human burden. Preserve prompts, tool traces, relevant message IDs and counts of duplicate messages/human interventions. Redact private content before publication. Scripted-provider/native fixture passes are distinct from a real-model judgment run. [M3 A→B→C handover acceptance](M3-ACCEPTANCE.md) remains a separate exercise, not a substitute.
+### Restore before reconnect
 
-## Compatibility, staged delivery and cleanup
+1. Stop the old runtime's timers, waiters and callbacks. Bind the new runtime to the actual native session ID and local scope.
+2. Read this session's matching custom records in **append order across the full session**, not just the active model branch. Restore messages, visibility, return handles, negative contact decisions, Pause and dedup evidence. Old runtime-only positive approvals do not revive.
+3. Reconcile native `comms_batch` and ask-result evidence by original message ID. Restore existing report/correction/handover behavior without recreating old asks or new model turns.
+4. Only then register with the broker. The broker must also restore its own mailbox before it serves queue operations. Queued arrivals still pass through current consent, Pause and the existing human-first pump.
 
-1. **M4-0 / this PR:** Reviewed recovery contract and crash/agent acceptance protocol only. No runtime change, storage, schema, release or proof of M4 behavior.
-2. **M4-A / F10:** Versioned participant-local records, per-message historical visibility, restore-before-register, Pause, native history reconciliation and linked return handles. Runtime-only contact permission remains default; describe limits of revocation continuity before F11.
-3. **M4-B / F11:** Optional persistent exact-pair owner consent in existing dialog, durable explicit revocation, transport approval provenance and admission behavior. No retroactive migration of earlier consent.
-4. **M4-C / F12:** Durable exact-recipient offline identity registry and queue, expiry/loss evidence, receipts and dedup; remove alias fallback from the public exact-ID path; keep `comms_ask` semantics.
-5. **M4 completion:** Installed Pi failure/recovery tests, real-model/human interrupted-review evaluation and independent coherence/security/agent-ergonomics review. Issue #20 remains open until evidence passes.
+`/tree` changes what the model sees; it does not unsend a message, undo a revocation or make an already offered message new again. A fork/new session may contain host-copied transcript and custom data, but foreign-owner control records, reply handles and pending intake must **not** become operational state for its new ID. Pi itself can copy transcript text; pi-comms must not claim it prevents that. Normal Pi forking remains supported, not forbidden.
 
-Each slice must say **what is not yet durable**. Guard mixed-version behavior and schema downgrade so older writers cannot overwrite an unknown newer format. Document retention, export/backup, explicit deletion, corruption/fullness handling, recovery and cleanup. Retire transitional dual writes, old unsafe mailbox paths and duplicate stores on a defined supported migration. No broad framework rewrite or permanent second communication record.
+### Write and admission boundaries
 
-**Preflight exit criterion:** The design and failure matrix have been challenged against current source and at least one native fixture, with a bounded first F10 implementation slice. A document alone does not satisfy F10, F11, F12 or the real-agent acceptance test.
+For a recovery-capable saved session, record outgoing ID and intent before dispatch. Record incoming envelope/ID before issuing a **persistent** receipt. Preserve the same ID if evidence becomes uncertain. No automatic new-ID retry.
+
+Before offering a waiting message to Pi, record that an admission attempt is starting; later native saved-history evidence confirms posting. This distinguishes three cases after restart: definitely never offered (eligible for normal intake), already posted (do not post again), and uncertain admission (inspect/hold, do not guess). Merely saving an incoming message is neither posting it nor accepting its work.
+
+A write failure must stop the affected operation and report that persistence failed. Apply a user's Pause/revoke immediately in the live runtime, but never falsely confirm it survived restart. An entry still visible in memory after an exception is not proof of a committed write. Validate the actual saved data when reconciling an ambiguous commit; do not silently fall back to a separate sidecar or erase the evidence.
+
+### Native host limits and compatibility
+
+- **Saved-session guarantee:** M4 targets process reload/restart using the native session's recovery boundary. Do not advertise disk-loss, power-failure durability or rollback-proof security beyond the host's guarantees.
+- **Fresh and ephemeral sessions keep their existing live use.** An untouched session's custom entries may still be buffered; `--no-session` has no persistent file at all. Report live-only/volatile evidence accurately until the host actually saves it. Do not disable these sessions, ask the user to send a dummy prompt, fabricate a user message, or write directly into Pi's JSONL to force a flush. A supported host improvement is preferable if automatic early flush is needed; it requires its own evidence and compatibility review.
+- **F12 receipt boundary:** A fresh/ephemeral receiver may receive live, but cannot acknowledge persistent receipt from buffered state. For an already broker-queued item, retain broker responsibility until receiver persistence is evidenced or the queue reaches its terminal outcome. Do not report plain live delivery as restart-safe.
+- **Corruption:** Host parsing may omit malformed lines. F10 must check for malformed/truncated saved data and validate its own record shapes rather than treating successful `getEntries()` as proof that no control was lost. Use a narrow read-only validation of the current file where the host does not expose the needed result; no second writer, repair engine or checkpoint framework.
+- A damaged message/link can be withheld or marked uncertain without disabling unrelated work. An unreadable latest contact control requires holding that peer; if the affected authority cannot be identified, hold new communication for that session. Keep verified history inspectable. Do not block the rest of Pi or reset to empty recovered state.
+- Reuse native retention, export and deletion for participant data. No separate transcript cleanup or second compactor. Custom entries are outside model context, **not encrypted**; native export/share can include them. Preserve existing owner access and document this consequence. An old memory-only runtime cannot be reconstructed where no trustworthy record survived.
+
+## F11 — remember only the decision actually made
+
+Runtime-only approval remains the default. Add the optional remembered exact-pair choice inside the **existing contact confirmation**, with no second routine dialog, permission mode for the agent or new settings service. Earlier grants are never upgraded automatically.
+
+Use the same session-record writer for owner grant, revoke and Pause. **Negative controls survive from the first slice that restores incoming records**; do not postpone revocation durability while enabling replay. F11 adds optional remembered positive consent and the complete provenance behavior.
+
+Keep owner-issued and transport-derived decisions distinct. A's remembered choice is A's decision about exact B; it is not B's owner's permanent grant. A fresh valid sender assertion can support the existing receiver-runtime/bidirectional contact flow, subject to local refusal. Restoring an old assertion or reading old mail cannot create persistent receiver consent. A queued stale assertion alone is not proof of current authority; use a valid local grant or fresh supported confirmation, otherwise the ordinary human review path holds the arrival.
+
+Revocation takes precedence on this session's new sends and admission, including locally held messages. Only a fresh owner action changes it. It does not erase historical visibility, recall an already accepted remote send, retract native context or stop remote execution. Do not imply global instantaneous revocation when the transport cannot provide it.
+
+## F12 — persist the existing mailbox, not an identity service
+
+### Addressing and trust
+
+Use the same exact native session ID, broker/agent-directory boundary and existing scope checks as live communication. Keep live endpoint epochs and live-holder rejection. Names may help a user discover a peer, but routing remains pinned to the resolved ID. No name/cwd/prefix fallback and no successor substitution.
+
+For an offline async send, the sender uses the exact previously resolved/approved peer in **its own recovered records**, checking current owner authority. The trusted local extension supplies that target through the same send path. If the target is not known or approval is absent, use the existing unavailable/consent result; do not create an arbitrary offline address from a model's guess.
+
+The queue record already carries the exact target and scope. After broker restart, a matching normal registration is enough to route it under the existing trust model. There is **no separate durable offline recipient registry, identity certificate, credential exchange, liveness database or scan of other sessions' transcripts**. A peer that never returns simply reaches expiry. Do not claim to detect deletion of a remote saved-session file before it reconnects.
+
+This protects against accidental cross-session routing within the supported local trust boundary. It is not protection from malicious code with the same OS-user access. Preserve current platform/transport support and accurately describe its existing limits rather than adding a silent Windows/backend restriction. Strong cross-user or remote authentication is a different product decision, not a hidden prerequisite for native M4.
+
+### One bounded broker state file
+
+Persist the current mailbox and the bounded delivery facts needed to reconcile it, keyed by existing scope, sender and message ID. Pending records contain exact recipient, original payload/fingerprint, expiry and delivery stage. Terminal records retain the small ID/fingerprint/outcome evidence needed for sender reconciliation and dedup; payloads need not become a permanent broker transcript.
+
+The broker is the sole writer. Use a versioned atomic replacement of this bounded state, adapting the existing temp-write/fsync/rename utility pattern. Do not route it through extension-state owner election, inherit the unrelated 64 KiB cap or automatically treat an older backup as proof that the newest acceptance never happened. No new database dependency for the currently bounded workload; revisit only with measured evidence.
+
+Commit before acknowledging `queued`. Remove a pending payload only after a supported persistent receiver receipt or a committed terminal expiry/rejection. On full capacity, **reject the new item before acceptance**, rather than silently evicting an acknowledged message. Specify time, count and byte bounds with realistic fixtures before F12 ships; the inherited 24-hour/256-message values are not already accepted promises.
+
+Persist terminal outcomes long enough for the declared queue/reconnect window, then clean up under a documented policy. Dedup retention must cover every supported same-ID reoffer. If the required evidence is older than retention or storage is missing/corrupt, report **unknown**, not definitely unsent. A sender's saved queued-acceptance record remains evidence even when broker evidence is unavailable. Complete disk loss cannot magically produce a trustworthy detailed loss receipt.
+
+A broker may reoffer its accepted queue item with the **same ID**. Receiver records provide dedup; do not add a receiver dedup database. Reject an ID reused with different content. Do not automatically recreate an absent/unknown accepted item from the sender's outbox. That would turn inspection into a second queue and reopen duplicate-work risk.
+
+### Preserve existing tool behavior and useful evidence
+
+`comms_message` and organizer send share async queue eligibility. `comms_ask` remains live-only for dispatch and waits for the first linked reply within its current runtime. The common transport needs an internal dispatch policy so a target disconnecting between lookup and send cannot silently queue an ask. This is **not** a new agent-selected mode. Each batch item reports its own unavailable/interrupted/unknown result; other items continue. Restart never revives a waiter; late replies retain their original links.
+
+| Evidence | Meaning |
+| --- | --- |
+| Broker queued | Broker accepted responsibility and saved the item |
+| Receiver recorded | Receiver saved the arrival; it may still be held from the model |
+| Native admission observed | Pi recorded the message/result; not proof of model action |
+| Expired / rejected / unknown | A terminal outcome or a gap that needs judgment |
+| Peer progress / blocked / complete / correction | Attributed report; never requester acceptance |
+
+Expose only evidence actually available to each participant. Do not add cross-process acknowledgments solely to fill every field, or label a broker receipt as native admission. Use existing inspection, result and card paths; reconcile identical meanings across them. Progress-only records remain quiet, corrections actionable, and human drafts/Stop/Pause retain their existing distinctions.
+
+## Alternatives rejected and costs retained
+
+| Alternative | Why it is not selected |
+| --- | --- |
+| Reconstruct everything from visible Pi transcript | Cannot reliably recover held messages, original handles, pre-dispatch intent or organizer-only events |
+| Separate per-session JSON journal/checkpoint store | Duplicates Pi's persistence lifecycle, migration, export and cleanup for little added benefit here |
+| SQLite for all session and broker state | Useful if measured volume/concurrency demands it; not justified for one native session writer and a bounded single-writer mailbox today |
+| Reuse the whole extension-state bus as the mailbox | Imports owner election, unrelated cap and snapshot rollback semantics; borrow only the file utility pattern |
+| Durable offline identity registry/credentials | Exceeds the existing local trust boundary and duplicates information already present in exact IDs and queued records |
+| Sender-driven replay instead of a broker mailbox | Requires the sender to run, creates another queue and can repeat uncertain work; changes the accepted F12 outcome |
+| Eliminate all new disk persistence or defer F12 silently | Cannot preserve acknowledged offline mail across broker restart; requires an explicit scope change, not a simplification claim |
+
+**Costs that remain:** a small native-record schema and restore function; truthful handling of host write/admission uncertainty; one bounded broker mailbox file; a few internal queue/receipt capability changes and lifecycle tests. These costs follow from the promised behavior. Do not add factories for multiple storage backends, new registries or general recovery services around them.
+
+## Implementation boundaries and rollout
+
+| Slice | Focus and existing code to extend | Deliberately absent |
+| --- | --- | --- |
+| M4-0, this PR | Source-backed architecture, host characterization tests and acceptance contract | Runtime recovery, release or self-approval |
+| M4-A / F10 | `Runtime` record restoration/visibility; `extension.ts` native entry adapter, startup barrier, native evidence; durable Pause/refusal/revocation | Participant sidecar, offline mail, remembered positive grants |
+| M4-B / F11 | Existing owner consent UI, same record writer and transport provenance | Extra routine dialog, approval transfer or identity service |
+| M4-C / F12 | Existing broker mailbox/delivery records, client/exact send policy and receipt reconciliation; small file helper | Second inbox, durable ask, peer registry, alias routing |
+
+A single focused native-record helper may handle validation and restoration; avoid a pluggable persistence abstraction. Keep schema checks close to existing records and use the shared send/inspect paths for both tools and organizer API. Extend current model/human/card projections together when shipped behavior changes.
+
+Gate optional capabilities honestly for mixed versions. Do not silently discard meaningful fields or downgrade durable queue acceptance to best effort. Unknown custom-record versions remain read-only evidence and cannot grant authority. Rollback is not a way to restore new M4 guarantees in pre-M4 binaries: preserve files, state the limitation and use a compatible version for recovery. Native session retention remains host-owned; broker retention remains bounded. Remove transitional paths only after the supported migration; record a concrete cleanup owner in the implementation PR.
+
+## Acceptance: prove the benefit without extra agent work
+
+The new host characterization tests establish only host behavior. F10 must separately exercise the actual extension write path and lifecycle in installed Pi, including fresh sessions, process kill, reload, `/tree`, fork, compaction, write failure and both ordinary tools and organizer calls. Recheck these assumptions when the supported Pi version changes.
+
+| Scenario | Required M4 result |
+| --- | --- |
+| Same saved review resumes; approval expired/revoked | Authorized history and original links readable; new contact still gated |
+| Earlier withheld message | Still absent from agent inspection/context until current approval |
+| Pause/revoke before restart; broker has mail | Controls load before registration/flush; no unauthorized wake |
+| Known pending, posted or uncertain admission | Normal intake only for definitely unoffered eligible items; no automatic repeat of posted/uncertain ones |
+| Send crash before/after dispatch | Saved original ID; known outcome or unknown; no new-ID replay |
+| Native append fails but entry remains in memory | No false saved/receipt claim; affected operation stops |
+| Fresh unused or ephemeral session | Existing live use remains; no false persistent receipt or dummy user action |
+| Branch navigation and fork | Branch cannot undo external effects; new identity cannot inherit operational control/handles |
+| Broker dies after queued acknowledgment | Saved item or honest retained outcome; no alias substitution or silent success |
+| Full/corrupt/old-version mailbox | No acceptance without supported storage; evidence loss is unknown; verified history remains useful |
+| Offline item in `comms_ask` | Independent unavailable/interrupted result, no queue or restored waiter |
+| Remembered A grant and resumed B | Provenance retained; no invented permanent B-owner grant |
+| M2 reports and M3 handover after restart | Correction precedence, original request links and authored new C request remain intact |
+
+**Real-agent evaluation, separate from [M3 handover acceptance](M3-ACCEPTANCE.md):** Ask A, “Ask B to review the retry logic and report the risks. Keep working while B reviews.” Let B ask a question or send a finding. Restart A's same saved session while B continues, then say, “Continue the review with B. Tell me what we know, what's still waiting, and whether you need anything from me.” Supply no IDs, technical tool names or recovery instructions. Observe natural recovery, no repeated request and correct treatment of approval/uncertainty. Let B finish or correct its report. Repeat targeted variants for Pause, expired approval, withheld content, offline async mail and an unavailable ask item.
+
+Score recovered-history use, contact/readability boundaries, duplicate avoidance, honest outcomes, human priority and human effort as **0 failure / 1 brief hint / 2 natural success**. Preserve prompt/tool traces and count extra prompts and duplicate requests. No paid-model run is implied by scripted CI.
+
+An independent reviewer must challenge this architecture and the eventual implementation: does native storage meet the actual host boundary, do controls survive branches, is queue ownership singular, are local identity claims honest, and does ordinary collaboration require fewer repairs without new routine steps? Source review and green tests are evidence, not independent sign-off or M4 completion.
