@@ -7,8 +7,9 @@ import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
 type Intake = 'waiting' | 'offered' | 'posted' | 'summarized';
-export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake };
+export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
 export type Approval = { id: string; name: string; context: string };
+export const ASK_ADMISSION = 'native ask result context admission';
 export class Runtime {
   private approvals = new Map<string, Approval>();
   private revoked = new Set<string>();
@@ -82,7 +83,7 @@ export class Runtime {
             for (const id of event.ids) { const entry = this.required(id); if (entry.message.to !== this.self) throw new Error('Visibility attached to an outgoing message'); entry.readable = true; }
             break;
           case 'intake':
-            for (const id of event.ids) { const entry = this.required(id); if (entry.message.to !== this.self) throw new Error('Intake attached to an outgoing message'); entry.intake = event.disposition as Intake; }
+            for (const id of event.ids) { const entry = this.required(id); if (entry.message.to !== this.self) throw new Error('Intake attached to an outgoing message'); entry.intake = event.disposition as Intake; entry.intakeSource = event.source; }
             break;
           case 'pause': this.pause = event.value; break;
           case 'contact': if (event.revoked) this.revoked.add(event.peer); else this.revoked.delete(event.peer); break;
@@ -154,15 +155,19 @@ export class Runtime {
     // A previous failed update remains partial until recovery reconciles it.
     if (entry && this.saveStates.get(message.id) === 'volatile' && isDeepStrictEqual(entry.message, message)) this.saveStates.set(message.id, 'saved');
   }
+  wasAskAdmitted(id: string) {
+    const entry = this.records.get(id);
+    return entry?.intake === 'posted' && entry.intakeSource === ASK_ADMISSION;
+  }
   observedNative(ids: string[], evidenceRef: string, kind: 'batch' | 'ask' = 'batch') {
     for (const id of ids) {
       const entry = this.records.get(id);
       if (!entry || entry.message.to !== this.self) continue;
       // Pi can save a candidate tool result before a human interruption removes
-      // its reply from model context. Only a completed ask handoff plus native
-      // evidence establishes admission; raw tool-result storage alone does not.
-      if (kind === 'ask' && entry.intake !== 'posted') continue;
+      // its reply from model context. Raw tool-result storage is not admission.
+      if (kind === 'ask' && !this.wasAskAdmitted(id)) continue;
       entry.intake = 'posted'; entry.readable = true;
+      entry.intakeSource = kind === 'ask' ? ASK_ADMISSION : 'native Pi sendMessage';
       this.uncertainAdmission.delete(id);
       this.waiting = this.waiting.filter(waiting => waiting !== id);
       this.fact(id, 'saved', 'native session entry observed on disk', evidenceRef);
@@ -262,7 +267,7 @@ export class Runtime {
     const pending = ids.filter(id => this.waiting.includes(id) && this.records.get(id)?.intake === 'waiting');
     if (!pending.length) return;
     this.write({ kind: 'intake', ids: pending, disposition: 'offered', source }, pending);
-    pending.forEach(id => { this.records.get(id)!.intake = 'offered'; this.uncertainAdmission.add(id); });
+    pending.forEach(id => { const entry = this.records.get(id)!; entry.intake = 'offered'; entry.intakeSource = source; this.uncertainAdmission.add(id); });
   }
   posted(ids: string[], source = 'native Pi sendMessage') {
     if (!ids.length) return;
@@ -270,13 +275,13 @@ export class Runtime {
     this.write({ kind: 'intake', ids, disposition: 'posted', source }, ids);
     const posted = new Set(ids);
     this.waiting = this.waiting.filter(id => !posted.has(id));
-    ids.forEach(id => { const entry = this.required(id); entry.intake = 'posted'; this.uncertainAdmission.delete(id); this.addFact(entry, { kind: 'posted', at: new Date().toISOString(), source }); });
+    ids.forEach(id => { const entry = this.required(id); entry.intake = 'posted'; entry.intakeSource = source; this.uncertainAdmission.delete(id); this.addFact(entry, { kind: 'posted', at: new Date().toISOString(), source }); });
   }
   summarized(ids: string[]) {
     if (!ids.length) return;
     this.write({ kind: 'intake', ids, disposition: 'summarized', source: 'request-aware intake' }, ids);
     const done = new Set(ids); this.waiting = this.waiting.filter(id => !done.has(id));
-    ids.forEach(id => { const entry = this.required(id); entry.intake = 'summarized'; this.addFact(entry, { kind: 'summarized', at: new Date().toISOString(), source: 'request-aware intake' }); });
+    ids.forEach(id => { const entry = this.required(id); entry.intake = 'summarized'; entry.intakeSource = 'request-aware intake'; this.addFact(entry, { kind: 'summarized', at: new Date().toISOString(), source: 'request-aware intake' }); });
   }
   private reportsFor(requestId: string, audience: 'agent' | 'human' = 'agent') {
     const request = this.records.get(requestId)?.message;
