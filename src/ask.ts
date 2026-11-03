@@ -1,4 +1,4 @@
-import type { Entry, Runtime } from './runtime.ts';
+import { ASK_ADMISSION, type Entry, type Runtime } from './runtime.ts';
 
 export type AskOutcome = 'replied' | 'timeout' | 'interrupted' | 'paused' | 'revoked' | 'disconnected' | 'context-lost' | 'not-sent' | 'rejected' | 'unknown';
 export type AskItem = { request?: string; peer?: string; subject?: string; workRef?: string; outcome?: AskOutcome; code?: string; reply?: string };
@@ -88,7 +88,25 @@ export class Asks {
       ...(item.reply ? { response: this.runtime.inspect({ message: item.reply }) } : {}),
     })) };
   }
-  present(call: string, source = 'native ask result context admission') {
+  restoredProjection(value: unknown): unknown | undefined {
+    if (!value || typeof value !== 'object') return;
+    const data = value as { items?: unknown[]; timeoutSeconds?: number };
+    if (!Array.isArray(data.items)) return;
+    let changed = false;
+    const items = data.items.map(value => {
+      if (!value || typeof value !== 'object') return value;
+      const item = value as AskItem & { response?: unknown };
+      if (!item.reply || !this.runtime.entry(item.reply) || this.runtime.wasAskAdmitted(item.reply)) return item;
+      // A saved candidate may have been withdrawn, remained uncertain, or later
+      // arrived in a normal batch. Do not expose it again through an old ask.
+      // Pre-F10/forked text with no owned operational record remains Pi history.
+      changed = true;
+      const { reply: _reply, response: _response, ...rest } = item;
+      return { ...rest, outcome: 'interrupted', code: 'RECOVERED_ASK_NOT_ADMITTED' };
+    });
+    return changed ? { ...data, items } : undefined;
+  }
+  present(call: string, source = ASK_ADMISSION) {
     const operation = this.calls.get(call);
     if (!operation || operation.presented) return;
     this.checkAdmission(call);
