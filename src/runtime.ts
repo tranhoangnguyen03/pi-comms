@@ -22,7 +22,7 @@ export class Runtime {
   constructor(readonly self: string, private transport: (id: string, envelope: Envelope) => Promise<Attempt>, private writer?: RecordWriter) {}
   get paused() { return this.pause; }
   set paused(value: boolean) {
-    if (this.pause === value) return;
+    if (this.pause === value) { this.assertOperational(); return; }
     // A human stop applies immediately, even when saving the control fails.
     if (value) this.pause = true;
     this.write({ kind: 'pause', value });
@@ -148,10 +148,20 @@ export class Runtime {
     if (kind !== 'saved') this.write({ kind: 'fact', id, fact }, [id]);
     this.addFact(entry, fact);
   }
-  observedNative(ids: string[], evidenceRef: string) {
+  observedRecord(message: Message) {
+    const entry = this.records.get(message.id);
+    // The host may flush initially buffered custom entries after a real turn.
+    // A previous failed update remains partial until recovery reconciles it.
+    if (entry && this.saveStates.get(message.id) === 'volatile' && isDeepStrictEqual(entry.message, message)) this.saveStates.set(message.id, 'saved');
+  }
+  observedNative(ids: string[], evidenceRef: string, kind: 'batch' | 'ask' = 'batch') {
     for (const id of ids) {
       const entry = this.records.get(id);
       if (!entry || entry.message.to !== this.self) continue;
+      // Pi can save a candidate tool result before a human interruption removes
+      // its reply from model context. Only a completed ask handoff plus native
+      // evidence establishes admission; raw tool-result storage alone does not.
+      if (kind === 'ask' && entry.intake !== 'posted') continue;
       entry.intake = 'posted'; entry.readable = true;
       this.uncertainAdmission.delete(id);
       this.waiting = this.waiting.filter(waiting => waiting !== id);
