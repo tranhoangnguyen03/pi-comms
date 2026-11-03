@@ -1,0 +1,179 @@
+import test, { after } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai';
+import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+
+const root = mkdtempSync(join(tmpdir(), 'comms-f10-native-'));
+process.env.PI_CODING_AGENT_DIR = root;
+const extensionPath = process.env.PI_COMMS_TEST_EXTENSION ?? fileURLToPath(new URL('../dist/extension.js', import.meta.url));
+after(async () => {
+  try { process.kill(Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8')), 'SIGTERM'); } catch {}
+  await new Promise(resolve => setTimeout(resolve, 100)); rmSync(root, { recursive: true, force: true });
+});
+const waitFor = async (predicate: () => boolean | Promise<boolean>) => {
+  const until = Date.now() + 8000;
+  while (!await predicate()) { if (Date.now() >= until) throw new Error('F10 native fixture timed out'); await new Promise(resolve => setTimeout(resolve, 15)); }
+};
+const data = (result: any) => result.structuredContent ?? result.details;
+const text = (messages: any[]) => messages.map(message => typeof message.content === 'string' ? message.content : message.content?.map((block: any) => block.text ?? '').join('')).join('\n');
+async function participant(label: string, manager?: SessionManager) {
+  const dir = join(root, label); mkdirSync(dir, { recursive: true });
+  manager ??= SessionManager.create(dir, join(root, `${label}-sessions`));
+  const faux = fauxProvider({ provider: `f10-${label}-${randomUUID()}` });
+  const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false });
+  models.registerNativeProvider(faux.provider);
+  const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [];
+  let draft = '', confirm = true;
+  faux.setResponses(Array.from({ length: 100 }, () => async context => { observed.push(structuredClone(context.messages)); return fauxAssistantMessage('fixture response'); }));
+  const factory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }: any) => {
+    const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime: models,
+      settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
+      resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true, additionalExtensionPaths: [extensionPath] } });
+    const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model: faux.getModel(), noTools: 'builtin' });
+    return { ...created, services, diagnostics: [] };
+  };
+  const runtime = await createAgentSessionRuntime(factory, { cwd: dir, agentDir: root, sessionManager: manager });
+  const bind = async (session: any) => session.bindExtensions({ mode: 'tui', uiContext: {
+    ...session.extensionRunner.getUIContext(), getEditorText: () => draft,
+    notify: (message: string) => { notifications.push(message); }, setWidget: () => {}, setStatus: () => {},
+    confirm: async (title: string, message: string) => { dialogs.push(`${title}\n${message}`); return confirm; },
+    input: async () => 'Review continuity', select: async (_title: string, choices: string[]) => choices[0],
+  } });
+  await bind(runtime.session); runtime.setRebindSession(bind);
+  return { runtime, manager, observed, notifications, dialogs,
+    id: () => runtime.session.sessionId,
+    file: () => runtime.session.sessionManager.getSessionFile(),
+    command: (value: string) => runtime.session.prompt(`/comms ${value}`),
+    confirm: (value: boolean) => { confirm = value; }, draft: (value: string) => { draft = value; },
+    tool: async (name: string, input: unknown) => {
+      const runner = runtime.session.extensionRunner!, call = randomUUID();
+      return data(await runner.getToolDefinition(name)!.execute(call, input, undefined, undefined, runner.createToolContext(call)));
+    },
+    close: async () => { await runtime.session.abort(); await runtime.dispose(); },
+  };
+}
+function batchCount(p: Awaited<ReturnType<typeof participant>>, id: string) {
+  return p.runtime.session.sessionManager.getEntries().filter(entry => entry.type === 'custom_message' && entry.customType === 'comms_batch' && (entry.details as any)?.ids?.includes(id)).length;
+}
+
+test('F10 native: readable history, original return handles, Pause and revocation survive reopen', async () => {
+  const a = await participant('reopen-lead'); let b = await participant('reopen-reviewer');
+  try {
+    await a.runtime.session.prompt('Review session'); await b.runtime.session.prompt('Reviewer session');
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Review', text: 'F10_ORIGINAL_REVIEW', workRef: 'F10-NATIVE' });
+    assert.equal(sent.ok, true);
+    const id = sent.data.message.id;
+    await waitFor(() => b.observed.some(messages => text(messages).includes('F10_ORIGINAL_REVIEW')) && b.runtime.session.isIdle);
+    const incoming = (await b.tool('comms_inspect', { message: id })).data;
+    await b.command('pause'); await b.command(`revoke ${a.id()}`);
+    const oldId = b.id(), file = b.file()!;
+    await b.close(); b = await participant('reopen-reviewer', SessionManager.open(file));
+    assert.equal(b.id(), oldId);
+    const old = await b.tool('comms_inspect', { message: id });
+    assert.equal(old.ok, true); assert.equal(old.data.message.text, 'F10_ORIGINAL_REVIEW');
+    assert.equal(old.data.returnHandle, incoming.returnHandle);
+    assert.equal((await b.tool('comms_inspect', {})).data.paused, true);
+    assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
+    const fresh = await a.tool('comms_message', { to: oldId, subject: 'Held', text: 'F10_WITHHELD_AFTER_REVOKE' });
+    assert.equal(fresh.ok, true);
+    const held = await b.tool('comms_inspect', { message: fresh.data.message.id });
+    assert.equal(held.data.evidence, 'withheld');
+    assert.doesNotMatch(JSON.stringify(held), /F10_WITHHELD_AFTER_REVOKE/);
+    await b.command('resume'); await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(b.observed.length, 0); assert.equal(b.dialogs.length, 0, 'restored revoke does not prompt repeatedly');
+    const reply = await b.tool('comms_message', { respondTo: incoming.returnHandle, text: 'F10_LINKED_ANSWER', report: { request: id, state: 'complete' } });
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    assert.equal(reply.data.message.replyTo, id); assert.equal(reply.data.message.workRef, 'F10-NATIVE');
+    assert.equal(b.dialogs.length, 1, 'new send uses the existing owner confirmation, not history access');
+    await waitFor(() => a.observed.some(messages => text(messages).includes('F10_LINKED_ANSWER')) && a.runtime.session.isIdle && b.runtime.session.isIdle);
+    assert.equal(batchCount(b, id), 1, 'old native admission never becomes a second batch');
+    const reports = (await a.tool('comms_inspect', { requests: [id] })).data.responses[0];
+    assert.equal(reports.currentReport.message.id, reply.data.message.id);
+  } finally { await b.close(); await a.close(); }
+});
+
+test('F10 native: paused never-offered mail resumes through ordinary approval and human-first intake', async () => {
+  const a = await participant('held-lead'); let b = await participant('held-reviewer');
+  try {
+    await b.runtime.session.prompt('Existing saved review'); b.observed.length = 0;
+    await b.command('pause');
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Held work', text: 'F10_PENDING_REVIEW' });
+    assert.equal(sent.ok, true);
+    const id = sent.data.message.id;
+    assert.equal((await b.tool('comms_inspect', { message: id })).data.evidence, 'available', 'history authorization is not native admission');
+    assert.equal(batchCount(b, id), 0);
+    const file = b.file()!; await b.close(); b = await participant('held-reviewer', SessionManager.open(file));
+    assert.equal((await b.tool('comms_inspect', { message: id })).data.evidence, 'available');
+    assert.equal(b.observed.length, 0); assert.equal(b.dialogs.length, 0);
+    b.draft('human draft must win'); await b.command('resume');
+    await new Promise(resolve => setTimeout(resolve, 250)); assert.equal(b.observed.length, 0);
+    b.draft('');
+    await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
+    assert.equal(b.dialogs.length, 1, 'runtime-only approval expired; normal receive confirmation is sufficient');
+    assert.equal(batchCount(b, id), 1);
+  } finally { await b.close(); await a.close(); }
+});
+
+test('F10 native: corruption is detected before broker registration while verified old history stays readable', async () => {
+  const a = await participant('corrupt-lead'); let b = await participant('corrupt-reviewer');
+  try {
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Saved', text: 'F10_SALVAGEABLE_HISTORY' });
+    assert.equal(sent.ok, true);
+    await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
+    const id = sent.data.message.id, peerId = b.id(), file = b.file()!;
+    await b.close(); appendFileSync(file, '{"type":"custom","data":');
+    b = await participant('corrupt-reviewer', SessionManager.open(file));
+    const old = await b.tool('comms_inspect', { message: id });
+    assert.equal(old.ok, true); assert.equal(old.data.message.text, 'F10_SALVAGEABLE_HISTORY');
+    assert.equal(old.data.recovery.state, 'blocked');
+    assert.equal((await b.tool('comms_peers', {})).error.code, 'RECOVERY_BLOCKED');
+    const discovery = await a.tool('comms_peers', {});
+    assert.ok(!discovery.data.items.some((item: any) => item.id === peerId && item.presence === 'online'), 'recovery hold precedes registration');
+    assert.equal(b.observed.length, 0);
+    assert.match(readFileSync(file, 'utf8'), /\{"type":"custom","data":$/);
+  } finally { await b.close(); await a.close(); }
+});
+
+test('F10 native: first inbound use and --no-session remain live, with accurate storage evidence', async () => {
+  const a = await participant('fresh-lead'); let b = await participant('fresh-reviewer');
+  const memory = SessionManager.inMemory(join(root, 'ephemeral-reviewer'));
+  const ephemeral = await participant('ephemeral-reviewer', memory);
+  try {
+    assert.equal(b.file() !== undefined, true, 'an allocated path is not itself a saved file');
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'First use', text: 'F10_FIRST_INBOUND' });
+    assert.equal(sent.ok, true); assert.equal(sent.data.record.state, 'volatile', 'fresh sender was not disabled or forced to fabricate a user turn');
+    await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
+    const before = await b.tool('comms_inspect', { message: sent.data.message.id });
+    assert.equal(before.data.recovery.state, 'saved', 'actual first model turn causes native host persistence');
+    const file = b.file()!; await b.close(); b = await participant('fresh-reviewer', SessionManager.open(file));
+    assert.equal((await b.tool('comms_inspect', { message: sent.data.message.id })).data.message.text, 'F10_FIRST_INBOUND');
+    const live = await a.tool('comms_message', { to: ephemeral.id(), subject: 'No session file', text: 'F10_EPHEMERAL_INBOUND' });
+    assert.equal(live.ok, true);
+    await waitFor(() => ephemeral.observed.length === 1 && ephemeral.runtime.session.isIdle);
+    const held = await ephemeral.tool('comms_inspect', { message: live.data.message.id });
+    assert.equal(held.data.recovery.state, 'volatile');
+    assert.equal(ephemeral.file(), undefined);
+  } finally { await ephemeral.close(); await b.close(); await a.close(); }
+});
+
+test('F10 native: saved intent failure prevents dispatch without changing normal tool choice', async () => {
+  const a = await participant('writefail-lead'), b = await participant('writefail-reviewer');
+  try {
+    await a.runtime.session.prompt('Existing saved session');
+    const first = await a.tool('comms_message', { to: b.id(), subject: 'Initial', text: 'F10_BEFORE_WRITE_FAILURE' });
+    assert.equal(first.ok, true);
+    await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
+    const file = a.file()!; rmSync(file); mkdirSync(file);
+    const failed = await a.tool('comms_message', { to: b.id(), subject: 'Must not send', text: 'F10_MUST_NOT_DISPATCH' });
+    assert.equal(failed.ok, false); assert.equal(failed.error.code, 'PERSISTENCE_FAILED');
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(b.observed.length, 1);
+    assert.doesNotMatch(JSON.stringify((await b.tool('comms_inspect', {})).data), /F10_MUST_NOT_DISPATCH/);
+    assert.equal((await a.tool('comms_inspect', { message: first.data.message.id })).ok, true, 'known prior evidence stays inspectable');
+  } finally { await b.close(); await a.close(); }
+});
