@@ -10,11 +10,11 @@ import { EnvelopeSchema, Id, checkSize } from './schema.ts';
 export const RECORD_TYPE = 'pi-comms:state';
 export type SaveState = 'saved' | 'volatile';
 const FactSchema = Type.Object({
-  kind: Type.Union(['accepted', 'queued', 'posted', 'saved', 'summarized', 'rejected'].map(value => Type.Literal(value))),
+  kind: Type.Union([Type.Literal('accepted'), Type.Literal('queued'), Type.Literal('posted'), Type.Literal('saved'), Type.Literal('summarized'), Type.Literal('rejected')]),
   at: Type.String(), source: Type.String(), evidenceRef: Type.Optional(Type.String()),
 }, { additionalProperties: false });
-const IntakeSchema = Type.Union(['waiting', 'offered', 'posted', 'summarized'].map(value => Type.Literal(value)));
-const StateSchema = Type.Union(['accepted', 'rejected', 'unknown'].map(value => Type.Literal(value)));
+const IntakeSchema = Type.Union([Type.Literal('waiting'), Type.Literal('offered'), Type.Literal('posted'), Type.Literal('summarized')]);
+const StateSchema = Type.Union([Type.Literal('accepted'), Type.Literal('rejected'), Type.Literal('unknown')]);
 const StoredMessageSchema = Type.Object({ ...EnvelopeSchema.properties, from: Id, to: Id }, { additionalProperties: false });
 const StoredEntrySchema = Type.Object({
   message: StoredMessageSchema, facts: Type.Array(FactSchema), state: StateSchema,
