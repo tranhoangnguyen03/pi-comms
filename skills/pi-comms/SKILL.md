@@ -23,7 +23,7 @@ comms_message({to:"Reviewer", subject:"Retry review", text:"Check duplicate writ
 comms_inspect({workRef:"AUTH-42"})
 ```
 
-The label never grants authority, creates a team or changes native tool permissions. `comms_peers` can show labels you supplied for earlier accepted requests. Replies using `respondTo` inherit the work reference automatically; **do not** repeat `workRef` or `recipientLabel` on replies. Work-reference inspection shows only exchanges available and approved in your session, not other agents' private conversations. Use matching 0.1.4+ peers for metadata-bearing sends; uncertain delivery is not proof of a failed send.
+The label never grants authority, creates a team or changes native tool permissions. `comms_peers` can show labels you supplied for earlier accepted requests. Replies using `respondTo` inherit the work reference automatically; **do not** repeat `workRef` or `recipientLabel` on replies. Work-reference inspection shows exchanges this session may read, including previously authorized saved history after a contact expires or is revoked. It never reveals another session's private conversation. Use matching 0.1.4+ peers for metadata-bearing sends; uncertain delivery is not proof of a failed send.
 
 ## Structured findings and work reports
 
@@ -60,7 +60,7 @@ Avoid acknowledgement-only traffic. Send questions, corrections, findings and ma
 
 Use `comms_inspect({requests:["<actual outgoing message ID>"]})` to check **that request**, or `comms_inspect({})` for a quick overview. Do not poll repeatedly without a reason. Timeout ends the local wait, not the colleague's work. Pause holds incoming admission until `/comms resume`; Stop only stops the current run. Human input and drafts take priority over peer messages.
 
-Inspect uncertain outgoing operations before retrying. If an exact peer is offline, do not send to someone with a similar name. Contact approvals, queues, outbox records and return handles are currently memory-only and can be lost on restart or session switch.
+Inspect uncertain outgoing operations before retrying; do not resend just because a process restarted. If an exact peer is offline, do not substitute a similar name. Saved Pi sessions restore prior messages, work links, return handles, historical access, Pause and explicit revocation before reconnecting. Current positive contact approvals still expire on runtime reset. Fresh/ephemeral sessions have only live records until Pi saves a real conversation; old local ask waits never resume. F11 remembered approval and F12 offline delivery are not yet available.
 
 ## Explicit handover without changing identities
 
