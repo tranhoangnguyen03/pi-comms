@@ -153,25 +153,35 @@ test('report links cannot cross peers or exchanges; uncertainty is preserved whe
   assert.match(human, /link unverified/);
 });
 
-test('work reports stay withheld after revocation, while human views retain readable evidence', async () => {
+test('revocation preserves authorized report history but withholds later incoming reports', async () => {
   const { lead, reviewer, sentA, sentB } = pair();
   const req = await lead.send({ to: b, subject: 'Review', text: 'Please check' });
   reviewer.receive(a, sentA[0]);
-  await reviewer.send({ respondTo: reviewer.entry(req.message.id)!.returnHandle!, text: 'Done',
+  const handle = reviewer.entry(req.message.id)!.returnHandle!;
+  await reviewer.send({ respondTo: handle, text: 'Done',
     report: report(req.message.id, 'complete'), structured: { result: 'private finding' } });
   lead.receive(b, sentB[0]);
   const approved: any = lead.inspect({ requests: [req.message.id] }).responses[0];
   assert.equal(approved.reportCount, 1);
   lead.revokeFromOwner(b);
+  const history: any = lead.inspect({ requests: [req.message.id] }).responses[0];
+  assert.equal(history.reportCount, 1);
+  assert.equal(history.latestReport.message.id, sentB[0].id);
+  assert.match(modelView(lead.inspect({ requests: [req.message.id] }), () => 'Reviewer'), /private finding/);
+  assert.deepEqual(lead.eligible(), [], 'history inspection does not permit fresh model admission');
+
+  await reviewer.send({ respondTo: handle, text: 'NEW_WITHHELD_REPORT',
+    report: report(req.message.id, 'blocked'), structured: { result: 'NEW_WITHHELD_DETAILS' } });
+  lead.receive(b, sentB[1]);
   const withheld: any = lead.inspect({ requests: [req.message.id] }).responses[0];
-  assert.equal(withheld.reportCount, 0);
-  assert.equal(withheld.latestReport, undefined);
-  assert.doesNotMatch(modelView(lead.inspect({ requests: [req.message.id] }), () => 'Reviewer'), /private finding/);
-  const human = inspectionText(lead.inspect({ message: sentB[0].id }, 'human'),
+  assert.equal(withheld.reportCount, 1, 'unapproved new report does not replace visible prior work evidence');
+  assert.equal(withheld.currentReport.message.id, sentB[0].id);
+  assert.doesNotMatch(modelView(lead.inspect({ requests: [req.message.id] }), () => 'Reviewer'), /NEW_WITHHELD/);
+  const human = inspectionText(lead.inspect({ message: sentB[1].id }, 'human'),
     { self: a, name: id => id === a ? 'Lead' : 'Reviewer', approved: () => false });
-  assert.match(human, /Peer reports complete/);
-  assert.match(human, /private finding/);
-  assert.ok(lead.waiting.includes(sentB[0].id), 'read-only inspect does not admit held content');
+  assert.match(human, /Peer reports blocked/);
+  assert.match(human, /NEW_WITHHELD_DETAILS/);
+  assert.ok(lead.waiting.includes(sentB[0].id) && lead.waiting.includes(sentB[1].id), 'read-only inspect does not admit held content');
 
   const card = new InlineCard([{ id: sentB[0].id, from: 'Reviewer', to: 'Lead', subject: 'Review',
     text: 'Done', report: report(req.message.id, 'complete'), structured: { result: 'private finding' },
