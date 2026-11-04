@@ -112,8 +112,10 @@ export class Runtime {
   // Passed only to the human command handler, never registered as an agent tool.
   approveFromOwner(peer: Approval) {
     validate(Id, peer.id); this.assertOperational();
-    this.write({ kind: 'contact', peer: peer.id, revoked: false });
+    // Preserve a saved revocation if the newly authorized history cannot be
+    // recorded. A partial reapproval must not clear the durable deny.
     this.allowHistory(peer.id);
+    this.write({ kind: 'contact', peer: peer.id, revoked: false });
     this.revoked.delete(peer.id); this.approvals.set(peer.id, { ...peer });
   }
   // Only a fresh transport assertion reaches this path. It can authorize this
