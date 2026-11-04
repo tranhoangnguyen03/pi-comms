@@ -29,7 +29,7 @@ export const RecoveryEventSchema = Type.Union([
   Type.Object({ kind: Type.Literal('visibility'), ids: Type.Array(Id) }, { additionalProperties: false }),
   Type.Object({ kind: Type.Literal('intake'), ids: Type.Array(Id), disposition: IntakeSchema, source: Type.String() }, { additionalProperties: false }),
   Type.Object({ kind: Type.Literal('pause'), value: Type.Boolean() }, { additionalProperties: false }),
-  Type.Object({ kind: Type.Literal('contact'), peer: Id, revoked: Type.Boolean() }, { additionalProperties: false }),
+  Type.Object({ kind: Type.Literal('contact'), peer: Id, revoked: Type.Boolean(), readableIds: Type.Optional(Type.Array(Id)) }, { additionalProperties: false }),
 ]);
 export type RecoveryEvent = Static<typeof RecoveryEventSchema>;
 export type RecordWriter = (event: RecoveryEvent) => SaveState;
@@ -46,7 +46,10 @@ type StoredRecord = { version: 1; owner: string; scope: string; writeId: string;
 export function isRecoveryEvent(value: unknown): value is RecoveryEvent {
   if (!Check(RecoveryEventSchema, value)) return false;
   try {
-    if ((value as RecoveryEvent).kind === 'message') checkSize((value as Extract<RecoveryEvent, { kind: 'message' }>).entry.message);
+    const event = value as RecoveryEvent;
+    if (event.kind === 'message') checkSize(event.entry.message);
+    // An explicit deny can never make previously withheld content readable.
+    if (event.kind === 'contact' && event.revoked && event.readableIds?.length) return false;
     return true;
   } catch { return false; }
 }
