@@ -103,12 +103,16 @@ test('F10 native: paused never-offered mail resumes through ordinary approval an
     await b.runtime.session.prompt('Existing saved review'); b.observed.length = 0;
     await b.command('pause');
     const sent = await a.tool('comms_message', { to: b.id(), subject: 'Held work', text: 'F10_PENDING_REVIEW' });
-    assert.equal(sent.ok, true);
+    assert.equal(sent.ok, true, JSON.stringify(sent));
     const id = sent.data.message.id;
-    assert.equal((await b.tool('comms_inspect', { message: id })).data.evidence, 'available', 'history authorization is not native admission');
+    const before = await b.tool('comms_inspect', { message: id });
+    assert.equal(before.ok, true, JSON.stringify({ before, notifications: b.notifications }));
+    assert.equal(before.data.evidence, 'available', 'history authorization is not native admission');
     assert.equal(batchCount(b, id), 0);
     const file = b.file()!; await b.close(); b = await participant('held-reviewer', SessionManager.open(file));
-    assert.equal((await b.tool('comms_inspect', { message: id })).data.evidence, 'available');
+    const restored = await b.tool('comms_inspect', { message: id });
+    assert.equal(restored.ok, true, JSON.stringify(restored));
+    assert.equal(restored.data.evidence, 'available');
     assert.equal(b.observed.length, 0); assert.equal(b.dialogs.length, 0);
     b.draft('human draft must win'); await b.command('resume');
     await new Promise(resolve => setTimeout(resolve, 250)); assert.equal(b.observed.length, 0);
@@ -127,7 +131,11 @@ test('F10 native: corruption is detected before broker registration while verifi
     await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
     const id = sent.data.message.id, peerId = b.id(), file = b.file()!;
     await b.close(); appendFileSync(file, '{"type":"custom","data":');
-    b = await participant('corrupt-reviewer', SessionManager.open(file));
+    const reopened = SessionManager.open(file);
+    // The native loader may add a final newline; pi-comms must not repair,
+    // truncate or rewrite what remains after the host has opened the file.
+    b = await participant('corrupt-reviewer', reopened);
+    const beforeInspection = readFileSync(file, 'utf8');
     const old = await b.tool('comms_inspect', { message: id });
     assert.equal(old.ok, true); assert.equal(old.data.message.text, 'F10_SALVAGEABLE_HISTORY');
     assert.equal(old.data.recovery.state, 'blocked');
@@ -135,7 +143,8 @@ test('F10 native: corruption is detected before broker registration while verifi
     const discovery = await a.tool('comms_peers', {});
     assert.ok(!discovery.data.items.some((item: any) => item.id === peerId && item.presence === 'online'), 'recovery hold precedes registration');
     assert.equal(b.observed.length, 0);
-    assert.match(readFileSync(file, 'utf8'), /\{"type":"custom","data":$/);
+    assert.match(beforeInspection.trimEnd(), /\{"type":"custom","data":$/);
+    assert.equal(readFileSync(file, 'utf8'), beforeInspection, 'inspection does not modify malformed host data');
   } finally { await b.close(); await a.close(); }
 });
 
