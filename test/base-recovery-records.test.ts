@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { Runtime } from '../src/runtime.ts';
+import { Asks, type AskItem } from '../src/ask.ts';
 import { NativeSessionRecords, RECORD_TYPE, type NativeEntry, type RecoveryEvent } from '../src/session-records.ts';
 import type { Envelope } from '../src/schema.ts';
 
@@ -197,13 +198,17 @@ test('F10: malformed tails and unknown versions hold communication without erasi
   const f = fixture(t), b = peer(); f.runtime.approveFromOwner(b);
   const message = envelope(); f.runtime.receive(b.id, message);
   const file = f.manager.getSessionFile()!;
-  const before = readFileSync(file, 'utf8');
   appendFileSync(file, '{"type":"custom","data":');
-  const resumed = attach(SessionManager.open(file), f.root);
+  const manager = SessionManager.open(file);
+  // Pi may terminate the malformed tail with a newline while opening. Compare
+  // the adapter against the host-opened bytes, not an unsupported host promise.
+  const beforeInspection = readFileSync(file, 'utf8');
+  const resumed = attach(manager, f.root);
   assert.equal(resumed.log.info().state, 'blocked');
   assert.match(resumed.runtime.holdReason()!, /Malformed/);
   assert.equal((resumed.runtime.inspect({ message: message.id }) as any).message.text, message.text);
-  assert.equal(readFileSync(file, 'utf8'), before + '{"type":"custom","data":', 'inspection never repairs or truncates native data');
+  assert.match(beforeInspection.trimEnd(), /\{"type":"custom","data":$/);
+  assert.equal(readFileSync(file, 'utf8'), beforeInspection, 'inspection never repairs or truncates native data');
   const other = SessionManager.create(f.root, join(f.root, 'other'));
   other.appendMessage({ role: 'user', content: 'real turn', timestamp: Date.now() });
   other.appendCustomEntry(RECORD_TYPE, { version: 99, owner: other.getSessionId(), scope: f.root, writeId: randomUUID(), event: { kind: 'pause', value: false } });
@@ -219,4 +224,34 @@ test('F10: incomplete or conflicting records never restore an active collaborati
   assert.deepEqual(empty.eligible(), []);
   f.log.close();
   assert.throws(() => f.log.append({ kind: 'pause', value: true }), /CONTEXT_LOST/);
+});
+
+test('F10: a saved ask candidate is not restored as admitted or replayed through its old result', async t => {
+  const f = fixture(t), b = peer(); f.runtime.approveFromOwner(b);
+  const asks = new Asks(f.runtime), item: AskItem = {};
+  asks.open('interrupted-ask', [item]);
+  let waiting!: Promise<void>;
+  const request = await f.runtime.send({ to: b.id, subject: 'Review', text: 'One request' }, entry => {
+    waiting = asks.register('interrupted-ask', item, entry, 1);
+  });
+  asks.sent(request.message.id, request.state);
+  const reply = envelope({ exchange: request.message.exchange, replyTo: request.message.id, text: 'CANDIDATE_NOT_YET_ADMITTED' });
+  f.runtime.receive(b.id, reply); asks.admit(); await waiting;
+  const candidate = asks.project('interrupted-ask', 1);
+  const proof = f.manager.appendMessage({ role: 'toolResult', toolCallId: 'interrupted-ask', toolName: 'comms_ask',
+    content: [{ type: 'text', text: reply.text }], details: { ok: true, data: candidate }, isError: false, timestamp: Date.now() });
+  asks.end('interrupted'); f.log.close();
+  const resumed = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  resumed.runtime.observedNative([reply.id], proof, 'ask');
+  assert.ok(resumed.runtime.waiting.includes(reply.id), 'saving the candidate did not admit it');
+  const freshAsks = new Asks(resumed.runtime);
+  assert.equal(freshAsks.has('interrupted-ask'), false, 'old waits are not restored');
+  const projected = freshAsks.restoredProjection(candidate) as any;
+  assert.equal(projected.items[0].outcome, 'interrupted');
+  assert.doesNotMatch(JSON.stringify(projected), /CANDIDATE_NOT_YET_ADMITTED/);
+  assert.equal((resumed.runtime.inspect({ message: reply.id }) as any).message.text, reply.text, 'authorized history stays inspectable');
+  resumed.runtime.approveFromOwner(b);
+  assert.deepEqual(resumed.runtime.eligible(), [reply.id], 'definitely unoffered reply can use normal fresh admission');
+  resumed.runtime.posted([reply.id]);
+  assert.doesNotMatch(JSON.stringify(freshAsks.restoredProjection(candidate)), /CANDIDATE_NOT_YET_ADMITTED/, 'ordinary batch delivery does not duplicate the reply in the old ask result');
 });
