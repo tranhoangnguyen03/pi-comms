@@ -197,8 +197,9 @@ test('F10: failed history visibility write cannot clear an earlier saved revocat
 
   const manager = SessionManager.open(file);
   const restored = attach(manager, f.root, (type, data) => {
-    if ((data as { event?: { kind?: string } })?.event?.kind === 'visibility') {
-      throw new Error('simulated visibility save failure');
+    const event = (data as { event?: { kind?: string; revoked?: boolean; readableIds?: string[] } })?.event;
+    if (event?.kind === 'contact' && event.revoked === false && event.readableIds?.length) {
+      throw new Error('simulated partial reapproval save failure');
     }
     manager.appendCustomEntry(type, data);
   });
@@ -211,6 +212,12 @@ test('F10: failed history visibility write cannot clear an earlier saved revocat
   assert.equal(again.runtime.isRevoked(b.id), true, 'failed approval does not durably undo the deny');
   assert.equal(again.runtime.isApproved(b.id), false);
   assert.equal((again.runtime.inspect({ message: held.id }) as any).evidence, 'withheld');
+  again.runtime.approveFromOwner(b);
+  const approved = attach(SessionManager.open(file), f.root);
+  assert.equal(approved.runtime.isRevoked(b.id), false);
+  assert.equal(approved.runtime.isApproved(b.id), false, 'positive consent remains runtime-only in F10');
+  assert.equal((approved.runtime.inspect({ message: held.id }) as any).message.text, held.text,
+    'the completed reapproval commits historical readability with the cleared deny');
 });
 
 test('F10: failure after host commit is distinguished from an unsaved in-memory entry', t => {
