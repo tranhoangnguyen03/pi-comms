@@ -186,6 +186,33 @@ test('F10: failed save never dispatches or claims a control survived; memory is 
   assert.equal(f.runtime.isApproved(b.id), false);
 });
 
+test('F10: failed history visibility write cannot clear an earlier saved revocation', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b);
+  f.runtime.revokeFromOwner(b.id);
+  const held = envelope({ text: 'WITHHELD_UNTIL_EXPLICIT_REAPPROVAL' });
+  f.runtime.receive(b.id, held);
+  const file = f.manager.getSessionFile()!;
+  f.log.close();
+
+  const manager = SessionManager.open(file);
+  const restored = attach(manager, f.root, (type, data) => {
+    if ((data as { event?: { kind?: string } })?.event?.kind === 'visibility') {
+      throw new Error('simulated visibility save failure');
+    }
+    manager.appendCustomEntry(type, data);
+  });
+  assert.equal(restored.runtime.isRevoked(b.id), true);
+  assert.throws(() => restored.runtime.approveFromOwner(b), /PERSISTENCE_FAILED/);
+  assert.equal(restored.runtime.isApproved(b.id), false);
+  assert.equal(restored.log.info().state, 'blocked');
+
+  const again = attach(SessionManager.open(file), f.root);
+  assert.equal(again.runtime.isRevoked(b.id), true, 'failed approval does not durably undo the deny');
+  assert.equal(again.runtime.isApproved(b.id), false);
+  assert.equal((again.runtime.inspect({ message: held.id }) as any).evidence, 'withheld');
+});
+
 test('F10: failure after host commit is distinguished from an unsaved in-memory entry', t => {
   const f = fixture(t);
   const wrapped = attach(f.manager, f.root, (type, data) => { f.manager.appendCustomEntry(type, data); throw new Error('listener failed after append'); });
