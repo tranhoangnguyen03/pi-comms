@@ -32,9 +32,9 @@ Send is asynchronous; ask waits for the first linked reply to each independent r
 
 New messages and `comms_ask` requests can include optional `workRef` (such as `"AUTH-42"`) and `recipientLabel` (such as `"Security reviewer"`). The reference groups this exchange with related work. The label describes the **exact recipient for this exchange** as supplied by the sending session. It is neither a global profile nor permission to direct the recipient. Agents may pass labels supplied by their user; organizing packages can use the same fields without managing roles inside pi-comms.
 
-Replies use only `{respondTo,text}` (plus existing optional refs/corrections): the runtime **inherits the exchange's work reference**, and the sender's recipient label stays attached to the original request. `comms_peers` lists recent sender-supplied labels with their exchange and optional work reference; labels may differ between collaborations. `comms_inspect({workRef:"AUTH-42"})` lists exchanges under that exact reference **only from this session's available and approved communication**; use `comms_inspect({exchange:"<actual UUID>"})` to read that exchange. Unapproved contents and references remain unavailable to the agent.
+Replies use only `{respondTo,text}` (plus existing optional refs/corrections): the runtime **inherits the exchange's work reference**, and the sender's recipient label stays attached to the original request. `comms_peers` lists recent sender-supplied labels with their exchange and optional work reference; labels may differ between collaborations. `comms_inspect({workRef:"AUTH-42"})` lists exchanges under that exact reference **only from communication this session may read**; use `comms_inspect({exchange:"<actual UUID>"})` to read that exchange. Previously withheld contents and references remain unavailable to the agent. Earlier authorized history stays readable after a contact's approval expires.
 
-Both `workRef` and `recipientLabel` are optional. Ordinary unscoped messages keep their existing wire format. To use the new metadata with another session, both participants need pi-comms **0.1.4 or later**; older receivers do not understand the added fields and may reject the message. The sender must treat uncertain outcomes as uncertain and never blindly resend. Work references do not persist across runtime resets, confer access, infer task completion or combine transcripts across participants.
+Both `workRef` and `recipientLabel` are optional. Ordinary unscoped messages keep their existing wire format. To use the new metadata with another session, both participants need pi-comms **0.1.4 or later**; older receivers do not understand the added fields and may reject the message. The sender must treat uncertain outcomes as uncertain and never blindly resend. Work references do not confer access, infer task completion or combine transcripts across participants. F10 restores work-linked records in saved Pi sessions, not in fresh or ephemeral sessions.
 
 ## Structured replies and colleague-reported work (0.1.5+)
 
@@ -44,9 +44,9 @@ A reply may also include `report: {request:"<original request message ID>",state
 
 The original request ID appears in the recipient's incoming message as **Message ID**. The `respondTo` return handle is a separate value. A report must refer to a request actually received from this colleague in the **same exchange**. After a clarification round, reply using the current handle but continue to reference the original request ID in `report.request`. The collapsed ask view names **the reported request**, distinguishes it from the current ask when different, and warns when the report link is unverified. `comms_inspect({requests:[...]})` exposes the latest verified report and how many reports the peer sent, separate from direct reply progress—even when the report replies to a later clarification. Unknown original request records are marked unverified rather than accepted as evidence.
 
-Reports and structured data remain available in human inspection and tool output. Contact revocation still withholds message content from the agent. `comms_ask` continues to wait for the **first linked reply**; it does not wait for the final report. Later peer reports follow the normal incoming path, with progress-only updates grouped rather than forcing extra model turns.
+Reports and structured data remain available in human inspection and tool output. Contact revocation blocks new communication but does not hide previously authorized history from the same saved session. `comms_ask` continues to wait for the **first linked reply**; it does not wait for the final report. Later peer reports follow the normal incoming path, with progress-only updates grouped rather than forcing extra model turns.
 
-New `report` and `structured` fields require **pi-comms 0.1.5 or later on both participating sessions**. Older peers may reject these messages; report an uncertain delivery rather than retrying blindly. Conversations and report links remain memory-only until a separate durability milestone.
+New `report` and `structured` fields require **pi-comms 0.1.5 or later on both participating sessions**. Older peers may reject these messages; report an uncertain delivery rather than retrying blindly. F10 restores saved-session conversation and report links; fresh and ephemeral sessions retain volatile runtime records until Pi actually saves them.
 
 ## Explicit handover to a chosen successor (0.1.8+)
 
@@ -94,9 +94,15 @@ Tool results, message inspection and expanded cards use consistent labels for tr
 
 For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. It covers choosing `comms_message` versus `comms_ask`, multi-round clarification, late replies, Pausing reception, and drafting a deliberate handover to a different existing session. Pi advertises the skill's name and purpose when it discovers the package; the full instructions load only on demand. Loading the skill is optional; the four agent tools work without it.
 
-## Recovery preflight (M4 — not yet implemented)
+## Saved-session recovery (M4-A / F10 — 0.1.9)
 
-M4 will address saved-session recovery, durable contact consent and bounded disconnected delivery **together**, without creating another inbox or claiming that a saved message has reached the model. See the [M4 recovery contract and crash-window test plan](docs/M4-RECOVERY-CONTRACT.md). Until a reviewed M4 implementation ships, the current README's memory-only limits still apply. The [M3 hands-on acceptance plan](docs/M3-ACCEPTANCE.md) remains unexecuted and is not a gate for M4 preflight.
+A saved Pi session retains communication records, original request/reply/report/correction and handover links, reusable return handles, previously authorized history, Pause and explicit revocation. pi-comms restores those facts **before broker registration** and checks native history before admitting old incoming messages. It never replays uncertain outgoing requests or restarts an old `comms_ask` wait.
+
+**Past access is not new permission.** Previously agent-readable incoming messages remain inspectable in the same saved session after contact approval expires or a contact is revoked. Incoming content that was withheld stays withheld, and new sends/intake still need current consent. Positive contact approval remains runtime-only until F11.
+
+**Limits:** A fresh, unused or `--no-session` run continues with live-only records until Pi writes a real saved session. We do not fabricate turns or force Pi's file flush. Storage outcomes show `saved`, `volatile` or `partial` evidence. Corrupt or unknown saved controls hold unsafe communication while verified history remains inspectable; recovery does not block unrelated Pi work. Native session persistence does not promise protection from disk loss or an interrupted host write.
+
+**Still pending:** F11's optional remembered contact approval and F12's durable offline queue. The public exact-session send still rejects unavailable recipients. See [M4 recovery design and limits](docs/M4-RECOVERY-CONTRACT.md). The separate M3 real-agent handover evaluation is not an F10 recovery test.
 
 ## Build and try in isolation
 
@@ -104,7 +110,7 @@ M4 will address saved-session recovery, durable contact consent and bounded disc
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.8.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.9.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -136,13 +142,13 @@ Unapproved content remains fully human-visible in `/comms inspect`; model inspec
 
 ## Everyday commands
 
-- `/comms` or `/comms status`: approval/context, waiting count, hold reason, broker location and reset limitations.
+- `/comms` or `/comms status`: current approval, waiting count, recovery/storage state and broker location.
 - `/comms requests`: review/reconsider held incoming contact requests, including queued messages from a contact you revoked.
 - `/comms approve [exact-session-id]`: optional explicit contact setup/change through human selection/context/confirmation.
 - `/comms revoke [exact-session-id]`: remove contact approval after confirmation; queued traffic remains held.
 - `/comms pause`: keep buffering arrivals without peer admission/wakes.
 - `/comms resume`: resume eligible intake.
-- `/comms inspect [message-id]`: read waiting messages or a specific message without consuming/admitting it. The read-only view shows counterpart, subject, full content, references and observed state—not editable JSON. Use arrows/PageUp/PageDown to scroll, **d** for technical evidence, **n/p** for more/previous messages, and **Esc/q** to close. It is a snapshot, not a second inbox. A malformed ID produces a notice rather than opening unrelated messages; an unavailable ID explains the memory-only reset limit. RPC clients use equivalent read-only selections; model inspection is plain text and script results retain structured evidence.
+- `/comms inspect [message-id]`: read waiting messages or a specific message without consuming/admitting it. The read-only view shows counterpart, subject, full content, references and observed state—not editable JSON. Use arrows/PageUp/PageDown to scroll, **d** for technical evidence, **n/p** for more/previous messages, and **Esc/q** to close. It is a snapshot, not a second inbox. A malformed ID produces a notice rather than opening unrelated messages; an unavailable ID explains that it is not in the current saved session (older memory-only records cannot be reconstructed). RPC clients use equivalent read-only selections; model inspection is plain text and script results retain structured evidence.
 
 **Stop ends the current run. A queued or later peer message can wake it again. Pause holds incoming peer admission/wakes until Resume.** Pause does not stop existing work or retract admitted content. Stop/corrections do not roll back effects already performed.
 
@@ -152,12 +158,12 @@ Native inline cards show one counterpart/subject heading followed by the full pa
 
 - `comms_peers({})`: approved online peers first, other online peers marked approval-required, then known offline peers. Includes collaboration context and observed activity where available. `view: "known"` filters to approved peers. Discovery never contacts anyone. If none are reachable, check that all participants load pi-comms and share its broker agent directory; intercom-only sessions are not bridged.
 - `comms_message({to, subject, text, refs?, corrects?})`: start an exchange using a native ID or current exact unique name; first contact asks the requester and continues this send if allowed. Do not ask the user to preconfigure contacts. Cancellation sends nothing; do not retry unless the user asks.
-- `comms_message({respondTo, text, refs?, corrects?})`: answer the clearly labelled **reusable** return handle after turns/tools; it is not consumed by a reply. Omit `to` and `subject`. Handles may be lost on reload/switch/restart; no preflight is required.
+- `comms_message({respondTo, text, refs?, corrects?})`: answer the clearly labelled **reusable** return handle after turns/tools; it is not consumed by a reply. Omit `to` and `subject`. In a saved Pi session, original handles survive reload/restart; switching to another session does not transfer them. New sends still require current contact approval.
 - `comms_ask({requests:[messageInput,...],timeoutSeconds?})`: one to 30 independent new-message or respondTo requests. Dispatches approved requests without waiting for earlier answers, including under serial host tool scheduling. Each item returns its first exact linked reply, refusal/error, timeout or local ending; one item does not cancel siblings. Multiple ask calls may overlap.
 - `comms_inspect({requests:[outgoingMessageId,...]})`: who replied to each selected request and the latest reply, plus response count. An older response in the same exchange does not answer a newer request. Distinguishes no reply yet, rejected, unknown and unavailable records; never infers task completion. Use the exchange for full history.
 - `comms_inspect({})`: compact overview of waiting intake, paused/receiving state, recent exchanges and uncertain outgoing operations.
 - `comms_inspect({peer,cursor?})`: list a peer's exchanges with latest activity/preview; peer accepts a native ID or current exact unique name.
-- `comms_inspect({message})`, `({exchange,cursor?})`, `({queue:"self",cursor?})`, `({outbox:"self",cursor?})`: non-consuming runtime evidence. Use only one selector. All model views withhold unapproved/revoked incoming payloads and handles. Not a polling duty.
+- `comms_inspect({message})`, `({exchange,cursor?})`, `({queue:"self",cursor?})`, `({outbox:"self",cursor?})`: non-consuming runtime evidence. Use only one selector. All model views withhold incoming payloads/handles not yet authorized for that session; previously authorized history stays readable even after approval expires or is revoked. Not a polling duty.
 
 Provider declarations expose described top-level fields. Runtime checks enforce mutually exclusive send/reply and inspection selectors; unknown fields still reject. An exact unique name resolves **once** to its native ID before validation/approval. Ambiguous names return explicit native-ID choices; no fuzzy/prefix matching or name substitution while waiting or retrying. Corrections reference the sender's prior message to the same peer. References are pointers, never uploads. Messages over 900,000 serialized bytes reject with a reference-based next step. Inspection pages retain full approved items and return a cursor. `localTransport.connectivity` describes this session's broker connection, not the counterpart's presence; use `comms_peers` for exact colleague presence. Multiple replies are allowed, not owed. Incoming model text puts sender/subject and full payload first, then `Reply with respondTo: "<handle>"`. Successful send text is concise; full structured records remain available to scripts and inspection.
 
@@ -183,11 +189,11 @@ Same-ID reconnect refresh is internal: after a definite stale-epoch rejection, r
 - **Saved:** a native session entry was actually observed locally.
 - **Response:** a linked peer message exists. None of these means work completed.
 
-No crash durability. Approvals, buffers, local asks, message/outbox records and return handles reset on reload, session switch or process restart. Resuming the same saved session preserves its native address, not lost runtime linkage/approval. The next contact attempt asks for approval again; report context lost/unknown instead of inventing recovery. The broker retains legacy best-effort mailbox behavior internally, but the public exact-send path rejects unavailable peers instead of promising offline delivery.
+F10 restores saved-session message/outbox records, authorized historical visibility, reply handles, Pause and explicit negative controls after reload or restart. Positive contact approvals still reset; a new send may require the existing approval flow. Fresh unused or in-memory sessions remain live-only until Pi saves them; an interrupted native write does not establish durability. Local ask waiters never resume automatically. Inspect unknown outgoing results before attempting new work. The broker's inherited mailbox remains memory-only; the public exact-send path still rejects unavailable peers until F12.
 
 ## Update and rollback
 
-Pause and finish/inspect outstanding work before replacing the package. Record useful work products outside the transport. Exit participating sessions and their shared broker, replace the reviewed artifact, then restart and renew contacts. Requester-only approval requires the `owner-contact-v1` broker capability and matching reviewed participant artifacts; an older broker rejects this send path rather than silently dropping the approval. Rollback uses the previously retained artifact in the same way. Buffers/linkage may be lost in either direction. There is no durable schema migration or guaranteed replay. Do not blindly repeat uncertain sends after restart.
+Pause and finish/inspect outstanding work before replacing the package. Record useful work products outside the transport. Exit participating sessions and their shared broker, replace the reviewed artifact, then restart and renew contacts. Requester-only approval requires the `owner-contact-v1` broker capability and matching reviewed participant artifacts; an older broker rejects this send path rather than silently dropping the approval. Rollback uses the retained older artifact, but pre-F10 builds cannot restore F10 native communication records. Do not erase or rewrite saved session files during rollback; return to a compatible build to recover those records. No automatic work replay or durable offline delivery is promised. Do not blindly repeat uncertain sends after restart.
 
 ## Verification
 
