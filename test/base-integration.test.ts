@@ -1197,7 +1197,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     const afterRestart = data(await a.tool('comms_message', { to: bid, subject: 'After broker restart', text: 'receiver rejoined without a user tool call' }));
     assert.equal(afterRestart.ok, true);
     await waitFor(() => b!.runtime.session.isIdle && b!.observed.some(m => text(m).includes('receiver rejoined')));
-    // Native runtime switch/new/resume retains saved identity, but clears volatile approval/linkage.
+    // Native switch/new/resume preserves saved history and handles, but not current contact approval.
     const originalPath = b.runtime.session.sessionFile!;
     await b.runtime.newSession(); const newid = b.id(); assert.notEqual(newid, bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
@@ -1205,7 +1205,8 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     assert.equal(offline.ok, false);
     await b.runtime.switchSession(originalPath); assert.equal(b.id(), bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    assert.equal(data(await b.tool('comms_message', { respondTo: handle, text: 'lost linkage' })).error.code, 'CONTEXT_LOST');
+    assert.equal(data(await b.tool('comms_inspect', { message: sent.data.message.id })).data.returnHandle, handle, 'reopened saved session retains original reply handle');
+    assert.equal(data(await b.tool('comms_message', { respondTo: handle, text: 'Not yet approved' })).error.code, 'CONTACT_NOT_APPROVED', 'history is not new send permission');
     b.confirm(true); await b.command(`approve ${aid}`);
     const refreshed = data(await a.tool('comms_message', { to: bid, subject: 'Same saved session', text: 'fresh live connection, same public address' }));
     assert.equal(refreshed.ok, true);
@@ -1214,7 +1215,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     assert.ok(leaf);
     await b.runtime.fork(leaf.id); assert.notEqual(b.id(), bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    assert.match(b.notifications.join('\n'), /reset on reload\/switch\/restart/);
+    assert.match(b.notifications.join('\n'), /Contact approval still ends on reload\/switch\/restart/);
     assert.equal(data(await a.tool('comms_inspect', { message: held.data.message.id })).ok, true);
   } finally {
     await b?.close(); await a?.close();
