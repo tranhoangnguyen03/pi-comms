@@ -86,7 +86,20 @@ export class Runtime {
             for (const id of event.ids) { const entry = this.required(id); if (entry.message.to !== this.self) throw new Error('Intake attached to an outgoing message'); entry.intake = event.disposition as Intake; entry.intakeSource = event.source; }
             break;
           case 'pause': this.pause = event.value; break;
-          case 'contact': if (event.revoked) this.revoked.add(event.peer); else this.revoked.delete(event.peer); break;
+          case 'contact': {
+            if (event.revoked) this.revoked.add(event.peer);
+            else {
+              // Apply a completed owner reapproval as a single saved decision.
+              // Validate all referenced messages before clearing a durable deny.
+              const visible = (event.readableIds ?? []).map(id => this.required(id));
+              if (visible.some(entry => entry.message.to !== this.self || entry.message.from !== event.peer)) {
+                throw new Error('Contact visibility belongs to another peer');
+              }
+              visible.forEach(entry => { entry.readable = true; });
+              this.revoked.delete(event.peer);
+            }
+            break;
+          }
         }
       } catch (error) {
         this.holdRecovery(`Saved communication is incomplete: ${error instanceof Error ? error.message : String(error)}`);
@@ -112,10 +125,12 @@ export class Runtime {
   // Passed only to the human command handler, never registered as an agent tool.
   approveFromOwner(peer: Approval) {
     validate(Id, peer.id); this.assertOperational();
-    // Preserve a saved revocation if the newly authorized history cannot be
-    // recorded. A partial reapproval must not clear the durable deny.
-    this.allowHistory(peer.id);
-    this.write({ kind: 'contact', peer: peer.id, revoked: false });
+    // Reapproval and newly readable held history are one saved decision.
+    // Failure cannot clear a revocation without its matching visibility.
+    const visible = [...this.records.values()].filter(entry => entry.message.from === peer.id && !entry.readable);
+    const ids = visible.map(entry => entry.message.id);
+    this.write({ kind: 'contact', peer: peer.id, revoked: false, ...(ids.length ? { readableIds: ids } : {}) }, ids);
+    visible.forEach(entry => { entry.readable = true; });
     this.revoked.delete(peer.id); this.approvals.set(peer.id, { ...peer });
   }
   // Only a fresh transport assertion reaches this path. It can authorize this
