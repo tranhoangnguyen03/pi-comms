@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.9] - 2026-11-04
+
+- M4-A / F10: restore communication messages, work/report/correction/handover links, return handles, known outcomes and historical agent readability for the **same saved Pi session**, using Pi's native extension-state entries instead of another transcript database.
+- Restore records, Pause and explicit negative contact decisions before broker registration; new outgoing/incoming communication still requires current approval. Old authorized history remains readable after approval expires or the peer is revoked; previously withheld content stays withheld.
+- Keep native Pi's real persistence limits visible: fresh/ephemeral sessions can be live-only; failed writes, malformed records and uncertain native admission are not silently reported as saved or replayed. Restore without reviving local `comms_ask` waits or automatically resending unknown operations.
+- Preserve existing four agent tools, human-first intake, corrections and M3 organizer API. F11 remembered positive approvals and F12 broker-crash-durable offline mail are **not** included.
+- Cover saved-session restart, Pause/revocation, read versus admission, withheld mail, forks/branches, corruption, storage failure and installed-package recovery paths. See the M4 contract for remaining host and acceptance limits.
+
 ## [0.1.8] - 2026-11-02
 
 - M3-B/F09: optional `handoverFrom` on a new `comms_message` or `comms_ask` request links a visible earlier exchange to an explicitly addressed successor.
