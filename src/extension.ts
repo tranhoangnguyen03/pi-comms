@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import { Runtime, type Entry } from './runtime.ts';
-import { NativeSessionRecords, type NativeEntry } from './session-records.ts';
+import { NativeSessionRecords, RECORD_TYPE, isRecoveryEvent, type NativeEntry } from './session-records.ts';
 import { Asks, type AskItem } from './ask.ts';
 import { modelView } from './model-view.ts';
 import { peerActivity, requestOutcomeLabel, messageContextLines } from './communication-view.ts';
@@ -166,7 +166,7 @@ export default function comms(pi: ExtensionAPI) {
   }
   function status() {
     if (!ctx || !runtime) return;
-    const unapproved = runtime.waiting.filter(id => !runtime!.isApproved(runtime!.entry(id)!.message.from)).length;
+    const unapproved = runtime.waiting.filter(id => { const entry = runtime!.entry(id)!; return entry.intake === 'waiting' && !runtime!.isApproved(entry.message.from); }).length;
     const widget = runtime.holdReason() ? `Communication held: ${runtime.holdReason()} /comms inspect retains available history.` : unapproved ? `${unapproved} message(s) held for contact approval · /comms requests to review · /comms inspect for full content` : undefined;
     if (widget !== lastWidget) { ctx.ui.setWidget('comms-requests', widget ? [widget] : undefined); lastWidget = widget; }
     const line = `${runtime.paused ? 'Paused' : 'Receiving'} · ${runtime.waiting.length} waiting${unapproved ? ` (${unapproved} unapproved)` : ''} · ${runtime.holdReason() ? 'recovery hold' : connectionError ?? hold() ?? 'ready'}${records?.info().state === 'volatile' ? ' · live-only records' : ''}`;
@@ -254,6 +254,10 @@ export default function comms(pi: ExtensionAPI) {
     const native = entries ?? log.nativeEntries();
     if (log.info().state === 'blocked') owner.holdRecovery(log.info().reason ?? 'Native session recovery failed');
     for (const entry of native) {
+      if (entry.type === 'custom' && entry.customType === RECORD_TYPE) {
+        const data = entry.data as { version?: number; owner?: string; scope?: string; event?: unknown } | undefined;
+        if (data?.version === 1 && data.owner === owner.self && data.scope === log.scope && isRecoveryEvent(data.event) && data.event.kind === 'message') owner.observedRecord(data.event.entry.message);
+      }
       if (entry.type === 'custom_message' && entry.customType === 'comms_batch') {
         const details = entry.details as { owner?: string; ids?: string[] } | undefined;
         if (details?.owner && details.owner !== owner.self) continue;
@@ -263,7 +267,7 @@ export default function comms(pi: ExtensionAPI) {
       if (entry.type === 'message' && entry.message?.role === 'toolResult' && entry.message.toolName === 'comms_ask') {
         const details = entry.message.details as { data?: { items?: AskItem[] } } | undefined;
         const items = details?.data?.items;
-        if (Array.isArray(items) && entry.id) owner.observedNative(items.flatMap(item => typeof item?.reply === 'string' ? [item.reply] : []), entry.id);
+        if (Array.isArray(items) && entry.id) owner.observedNative(items.flatMap(item => typeof item?.reply === 'string' ? [item.reply] : []), entry.id, 'ask');
       }
     }
   }
@@ -502,23 +506,42 @@ export default function comms(pi: ExtensionAPI) {
         return pending.project(call, seconds);
       } finally { abort.removeEventListener('abort', interrupted); if (askStops.get(call) === stop) askStops.delete(call); }
     }), renderResult });
+  const admissionFailure = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = message.split(':')[0];
+    status();
+    return result(undefined, { code, message, nextAction: recovery[code] ?? recovery.PERSISTENCE_FAILED });
+  };
   pi.on('tool_result', (event, context) => {
     if (event.toolName !== 'comms_ask' || !asks?.has(event.toolCallId)) return;
     if (context.signal?.aborted || approvalDialog) asks.end('interrupted', event.toolCallId);
     admitAsks();
-    const output = result(asks.project(event.toolCallId, Number(event.input.timeoutSeconds ?? 60)));
-    if (event.parentToolCallId) asks.present(event.toolCallId, 'ask result handed to nested caller');
-    return output;
+    try {
+      if (event.parentToolCallId) asks.present(event.toolCallId, 'ask result handed to nested caller');
+      return result(asks.project(event.toolCallId, Number(event.input.timeoutSeconds ?? 60)));
+    } catch (error) { return admissionFailure(error); }
   });
   pi.on('context', (event, context) => {
     if (!asks) return;
     if (context.signal?.aborted || approvalDialog) endAsks('interrupted');
     admitAsks();
     return { messages: event.messages.map(message => {
-      if (message.role !== 'toolResult' || message.toolName !== 'comms_ask' || !asks!.has(message.toolCallId)) return message;
-      const seconds = (message.details as { data?: { timeoutSeconds?: number } })?.data?.timeoutSeconds ?? 60;
-      const output = result(asks!.project(message.toolCallId, seconds)); asks!.present(message.toolCallId);
-      return { ...message, content: output.content, details: output.structuredContent };
+      if (message.role !== 'toolResult' || message.toolName !== 'comms_ask') return message;
+      const data = (message.details as { data?: { timeoutSeconds?: number } })?.data;
+      if (!asks!.has(message.toolCallId)) {
+        const restored = asks!.restoredProjection(data);
+        if (restored === undefined) return message;
+        const output = result(restored);
+        return { ...message, content: output.content, details: output.structuredContent };
+      }
+      try {
+        asks!.present(message.toolCallId);
+        const output = result(asks!.project(message.toolCallId, data?.timeoutSeconds ?? 60));
+        return { ...message, content: output.content, details: output.structuredContent };
+      } catch (error) {
+        const output = admissionFailure(error);
+        return { ...message, content: output.content, details: output.structuredContent };
+      }
     }) };
   });
   async function inspectCommunication(input: InspectInput, guard: () => void = () => {}) {
