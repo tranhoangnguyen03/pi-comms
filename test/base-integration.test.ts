@@ -1063,13 +1063,14 @@ test('revoked paused contact is recoverable through the same requests command ad
     const sent = data(await a.tool('comms_message', { to: b.id(), subject: 'Held review', text: 'REVOKED_QUEUE_CONTENT' })).data;
     await waitFor(async () => data(await b!.tool('comms_inspect', { queue: 'self' })).data.items.some((e: any) => e.message.id === sent.message.id));
     await b.command(`revoke ${a.id()}`);
-    assert.doesNotMatch(JSON.stringify(data(await b.tool('comms_inspect', { queue: 'self' }))), /REVOKED_QUEUE_CONTENT/);
+    assert.match(JSON.stringify(data(await b.tool('comms_inspect', { message: sent.message.id }))), /REVOKED_QUEUE_CONTENT/, 'revocation must not hide already-authorized history');
     assert.ok(b.widgetUpdates.some(widget => JSON.stringify(widget)?.includes('/comms requests')));
     const dialogsBefore = b.dialogs.length;
     await a.tool('comms_message', { to: b.id(), subject: 'Resend cannot reapprove', text: 'REVOKED_RESEND_CONTENT' });
     await new Promise(r => setTimeout(r, 200));
     for (const input of [{}, { peer: a.id() }, { queue: 'self' }, { exchange: sent.message.exchange }]) {
-      assert.doesNotMatch(JSON.stringify(data(await b.tool('comms_inspect', input))), /REVOKED_/);
+      const inspected = JSON.stringify(data(await b.tool('comms_inspect', input)));
+      assert.doesNotMatch(inspected, /REVOKED_RESEND_CONTENT/, 'new messages remain withheld after revocation');
     }
     assert.equal(b.dialogs.length, dialogsBefore, 'ordinary resend neither reapproves nor reopens receiver decision');
     await b.command('requests');
@@ -1101,7 +1102,7 @@ test('human inspection distinguishes queue, malformed ID and unavailable runtime
     await b.command('inspect 00000000-0000-0000-0000-000000000000');
     assert.equal(b.inspectedByHuman.length, views);
     assert.match(b.notifications.at(-1)!, /not available|unavailable/i);
-    assert.match(b.notifications.at(-1)!, /reload.*switch.*restart/i);
+    assert.match(b.notifications.at(-1)!, /saved session|memory-only/i);
     await b.command('inspect'); assert.equal(b.inspectedByHuman.length, views + 1);
     assert.match(b.inspectedByHuman.at(-1)!, /UNCHANGED_HELD_MESSAGE/);
     await b.command(`inspect ${sent.message.id}`); assert.equal(b.inspectedByHuman.length, views + 2);
@@ -1121,7 +1122,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
   try {
     a = await participant('coordinator'); b = await participant('reviewer');
     const aid = a.id(), bid = b.id();
-    assert.match(a.notifications.join('\n'), /memory-only/);
+    assert.match(a.notifications.join('\n'), /Saved Pi sessions retain communication records/);
     const all = data(await a.tool('comms_peers', {})).data.items;
     assert.ok(all.some((p: any) => p.id === bid && !p.approved));
     let denied = data(await a.tool('comms_message', { to: bid, subject: 'review', text: 'read only' }));
