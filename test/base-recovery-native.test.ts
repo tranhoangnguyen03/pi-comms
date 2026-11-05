@@ -81,7 +81,11 @@ test('F10 native: readable history, original return handles, Pause and revocatio
     assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
     const fresh = await a.tool('comms_message', { to: oldId, subject: 'Held', text: 'F10_WITHHELD_AFTER_REVOKE' });
     assert.equal(fresh.ok, true);
+    // Transport acceptance is not receiver admission. Wait for the exact
+    // arrival before checking its privacy; do not weaken the visibility check.
+    await waitFor(async () => (await b.tool('comms_inspect', { message: fresh.data.message.id })).ok === true);
     const held = await b.tool('comms_inspect', { message: fresh.data.message.id });
+    assert.equal(held.ok, true, JSON.stringify(held));
     assert.equal(held.data.evidence, 'withheld');
     assert.doesNotMatch(JSON.stringify(held), /F10_WITHHELD_AFTER_REVOKE/);
     await b.command('resume'); await new Promise(resolve => setTimeout(resolve, 250));
