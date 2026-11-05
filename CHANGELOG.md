@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.9] - 2026-11-06
+
+- Allow separately installed Pi/PiG agent homes to use one opt-in, same-user pi-comms broker through an absolute `PI_COMMS_BROKER_DIR`, while each agent retains its own credentials, settings, sessions and records.
+- Keep the default per-agent broker path, exact-session approval, Pause/revoke and volatile recovery rules unchanged. Test both connection and listener path selection and reject cwd-dependent overrides.
+
 ## [0.1.8] - 2026-11-02
 
 - M3-B/F09: optional `handoverFrom` on a new `comms_message` or `comms_ask` request links a visible earlier exchange to an explicitly addressed successor.
