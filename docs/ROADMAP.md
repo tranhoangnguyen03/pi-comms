@@ -67,6 +67,8 @@ The work owner chooses the replacement and authorizes contact. The sending agent
 
 **Complete when:** one organizing package can establish a bounded collaboration, collect linked reports and hand work to a selected replacement using the same records and controls as standalone use.
 
+**Acceptance evidence:** [M3 real-agent/organizer evaluation](M3-ACCEPTANCE.md) defines the broad request “move work from B to C” without supplying tool details; scripted Pi integrations do not establish this model judgment. The hands-on run is not yet recorded.
+
 **Refinement:** remove integration-specific shortcuts once the shared interface covers the demonstrated use. Keep standalone setup equally simple.
 
 ## M4: Collaboration that survives interruptions
@@ -76,6 +78,8 @@ The work owner chooses the replacement and authorizes contact. The sending agent
 | F10: Resumable communication records | Restore exchange history, request/reply links, return handles and known outgoing outcomes after reload or restart | Current runtime record model; intercom session-history handling and hcom's storage/acknowledgement patterns |
 | F11: Approval and revocation continuity | Continue the same explicitly approved collaboration without unnecessary repeat prompts while preserving revocations | Current contact decisions, bound to stable session identity and their agreed lifetime |
 | F12: Bounded disconnected delivery | Hold eligible messages for the exact unavailable session and expose pending, delivered, expired or uncertain outcomes | Existing inherited mailbox code, reviewed against hcom and agent-comms reconnect/delivery cases |
+
+Review the [M4 recovery contract, inherited mailbox audit and crash-window matrix](M4-RECOVERY-CONTRACT.md) before changing storage, consent lifetime or offline routing. This is a **preflight**; none of F10–F12 is implemented by that document.
 
 Choose a single coherent storage and recovery design for these outcomes. Audit the inherited mailbox before enabling or copying more of it. Queue size and expiry must follow the intended workflow rather than an arbitrary five-minute promise.
 

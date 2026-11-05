@@ -94,6 +94,10 @@ Tool results, message inspection and expanded cards use consistent labels for tr
 
 For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. It covers choosing `comms_message` versus `comms_ask`, multi-round clarification, late replies, Pausing reception, and drafting a deliberate handover to a different existing session. Pi advertises the skill's name and purpose when it discovers the package; the full instructions load only on demand. Loading the skill is optional; the four agent tools work without it.
 
+## Recovery preflight (M4 — not yet implemented)
+
+M4 will address saved-session recovery, durable contact consent and bounded disconnected delivery **together**, without creating another inbox or claiming that a saved message has reached the model. See the [M4 recovery contract and crash-window test plan](docs/M4-RECOVERY-CONTRACT.md). Until a reviewed M4 implementation ships, the current README's memory-only limits still apply. The [M3 hands-on acceptance plan](docs/M3-ACCEPTANCE.md) remains unexecuted and is not a gate for M4 preflight.
+
 ## Build and try in isolation
 
 ```sh
