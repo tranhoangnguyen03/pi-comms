@@ -37,7 +37,20 @@ export function getAgentDirPath(
   return isAbsolute(configured) ? configured : resolve(cwd, configured);
 }
 
-export function getIntercomDirPath(agentDir: string = getAgentDirPath()): string {
+/**
+ * A separately installed agent keeps its own Pi credentials and sessions but may
+ * opt into a same-user local communication broker shared with other agent homes.
+ * An override must be absolute so launching from a project cannot redirect it.
+ */
+export function getIntercomDirPath(
+  agentDir: string = getAgentDirPath(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const root = env.PI_COMMS_BROKER_DIR?.trim();
+  if (root) {
+    if (!isAbsolute(root)) throw new Error("PI_COMMS_BROKER_DIR must be an absolute path");
+    return resolve(root);
+  }
   return join(agentDir, "comms");
 }
 
@@ -65,18 +78,20 @@ export function getBrokerPortFilePath(intercomDir: string = getIntercomDirPath()
 export function getBrokerSocketPath(
   platform: NodeJS.Platform = process.platform,
   agentDir: string = getAgentDirPath(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
+  const brokerDir = getIntercomDirPath(agentDir, env);
   if (platform === "win32") {
-    return `\\\\.\\pipe\\pi-comms-${sanitizePipeSegment(agentDir)}`;
+    return `\\\\.\\pipe\\pi-comms-${sanitizePipeSegment(brokerDir)}`;
   }
 
-  return join(getIntercomDirPath(agentDir), "broker.sock");
+  return join(brokerDir, "broker.sock");
 }
 
 export function getBrokerConnectTarget(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
-  intercomDir: string = getIntercomDirPath(getAgentDirPath(env)),
+  intercomDir: string = getIntercomDirPath(getAgentDirPath(env), env),
 ): BrokerConnectTarget {
   if (shouldUseWindowsTcpTransport(platform, env)) {
     const endpointFile = getBrokerPortFilePath(intercomDir);
@@ -101,7 +116,7 @@ export function getBrokerConnectTarget(
     return { transport: "tcp", host: endpoint.host, port: endpoint.port, stateId: endpoint.stateId };
   }
 
-  return getBrokerSocketPath(platform, getAgentDirPath(env));
+  return getBrokerSocketPath(platform, getAgentDirPath(env), env);
 }
 
 export function getBrokerListenTarget(

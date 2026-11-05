@@ -84,3 +84,28 @@ For first-contact handling, a caller with no native human confirmation UI receiv
 - **F09 (0.1.8+) uses v1:** Authored handovers supply an earlier exchange link through the same `send` method. Recipients are explicitly chosen; no transfer of sessions, identities, approvals or task acceptance occurs.
 
 The test suite includes a **separate organizing extension** loaded beside pi-comms in a real Pi 1.4.0 fixture. It requests the v1 interface, asks for first-contact consent on its first send, reuses approval on later sends, and reads a request-linked work report through both the integration and native inspection paths. That establishes the in-process contract; it is not a claim that another production organizing package has adopted the API.
+
+## Independently installed agents sharing one broker (proposed support)
+
+An independent PiG/Pi application can keep its private credentials, settings and
+sessions in its own agent directory while joining the same-user local pi-comms
+broker as other installed agents. Set **`PI_COMMS_BROKER_DIR`** to the same
+absolute private directory in each participating launch environment. For example:
+
+```sh
+export PI_CODING_AGENT_DIR="$HOME/.pig-agent/reviewer/.pi"
+export PI_COMMS_BROKER_DIR="$HOME/.pig-agent/shared-comms"
+```
+
+Another agent uses its **own** `PI_CODING_AGENT_DIR` but the **same**
+`PI_COMMS_BROKER_DIR`. When the override is absent, the broker stays in
+`<agent-dir>/comms` as before. This option chooses **transport location only**.
+It does not share agent credentials, conversations, settings or memory.
+Normal exact-session identities, contact approval, Pause and revocation still apply.
+Use this only among processes belonging to the same trusted OS user; the
+broker is not a remote or cross-user trust boundary.
+
+The option does not launch agents, make an offline session available, or solve
+M4 history recovery. Every agent must be running, or an external controller
+must start/resume it, for its exact session to be reachable. Treat a newly
+started session as a different contact subject to normal consent.
