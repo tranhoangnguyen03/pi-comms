@@ -6,7 +6,7 @@ import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState 
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
-type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized';
+type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized' | 'dismissed';
 export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
 export type Approval = { id: string; name: string; context: string };
 export const ASK_ADMISSION = 'native ask result context admission';
@@ -124,7 +124,7 @@ export class Runtime {
         entry.intake = 'offered';
         entry.facts = entry.facts.filter(fact => !(fact.kind === 'posted' && fact.source === 'native Pi sendMessage'));
       }
-      if (entry.intake === 'summarized' || entry.intake === 'handed-off') continue;
+      if (entry.intake === 'summarized' || entry.intake === 'handed-off' || entry.intake === 'dismissed') continue;
       this.waiting.push(entry.message.id);
       if (entry.intake !== 'waiting') this.uncertainAdmission.add(entry.message.id);
     }
@@ -298,6 +298,40 @@ export class Runtime {
     this.returns.set(handle, message); this.records.set(envelope.id, entry); this.waiting.push(envelope.id);
     return true;
   }
+  pendingCounts() {
+    return {
+      waiting: this.waiting.filter(id => this.records.get(id)?.intake === 'waiting').length,
+      uncertain: this.uncertainAdmission.size,
+    };
+  }
+  uncertainIncoming() {
+    return this.waiting.map(id => this.records.get(id)!)
+      .filter(entry => !!entry && entry.message.to === this.self && this.uncertainAdmission.has(entry.message.id));
+  }
+  // Human-only resolution of a message Pi may or may not have admitted.
+  // This does not grant peer contact, invent a native receipt or create a
+  // new message ID. All other agent-facing communication paths remain unchanged.
+  resolveUncertainFromOwner(id: string, choice: 'retry' | 'dismiss') {
+    validate(Id, id); this.assertOperational();
+    const entry = this.required(id);
+    if (entry.message.to !== this.self || !this.uncertainAdmission.has(id) ||
+        !this.waiting.includes(id)) {
+      throw new Error('INVALID_INPUT: message is not awaiting an uncertain-admission decision');
+    }
+    if (choice === 'retry' && !this.isApproved(entry.message.from)) {
+      throw new Error('CONTACT_NOT_APPROVED: approve this exact peer before delivering again');
+    }
+    // A retry may reach Pi twice; the owner explicitly accepts that risk.
+    // It is NOT a transport resend. Reuse the original incoming record and
+    // its return handle; subsequent normal intake saves its own new offer.
+    const disposition = choice === 'retry' ? 'waiting' : 'dismissed';
+    const source = choice === 'retry' ? 'owner accepted possible duplicate admission' : 'owner dismissed uncertain admission';
+    this.write({ kind: 'intake', ids: [id], disposition, source }, [id]);
+    entry.intake = disposition; entry.intakeSource = source;
+    this.uncertainAdmission.delete(id);
+    if (choice === 'dismiss') this.waiting = this.waiting.filter(waiting => waiting !== id);
+    return this.view(entry);
+  }
   eligible() {
     if (this.recoveryIssue) return [];
     return this.waiting.filter(id => this.isApproved(this.records.get(id)!.message.from) && this.records.get(id)!.intake === 'waiting' && !this.uncertainAdmission.has(id));
@@ -445,7 +479,7 @@ export class Runtime {
         const items = exchanges.slice(start, start + 30);
         return { items, nextCursor: start + items.length < exchanges.length ? items.at(-1)!.exchange : null };
       }
-      return { waiting: this.waiting.length, paused: this.paused, recentExchanges: exchanges.slice(0, 8),
+      return { ...this.pendingCounts(), paused: this.paused, recentExchanges: exchanges.slice(0, 8),
         uncertainOutgoing: records.filter(e => e.message.from === this.self && e.state === 'unknown').slice(-8).map(e => ({ message: e.message.id, to: e.message.to, code: e.code ?? 'OUTCOME_UNKNOWN' })),
         uncertainAdmission: [...this.uncertainAdmission].slice(-8), ...(this.recoveryIssue ? { recoveryHold: this.recoveryIssue } : {}) };
     }
