@@ -1244,7 +1244,7 @@ test('nested ask hands structured output to its caller without banning compositi
     const reply = nested.result.structuredContent.data.items[0].reply;
     const evidence = data(await a.tool('comms_inspect', { message: reply })).data;
     assert.equal(evidence.message.text, 'NESTED_REPLY');
-    assert.ok(evidence.facts.some((f: any) => f.kind === 'posted' && f.source === 'ask result handed to nested caller'));
+    assert.ok(evidence.facts.some((f: any) => f.kind === 'handed-off' && f.source === 'ask result handed to nested caller'));
     assert.ok(!evidence.facts.some((f: any) => f.kind === 'saved'), 'nested handoff is not a native saved child result');
     assert.equal(a.runtime.session.sessionManager.getEntries().filter(e => e.type === 'custom_message' && e.customType === 'comms_batch').length, 0);
     const savedPath = a.runtime.session.sessionFile!;
