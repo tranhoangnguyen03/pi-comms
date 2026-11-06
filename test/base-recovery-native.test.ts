@@ -29,6 +29,7 @@ async function participant(label: string, manager?: SessionManager) {
   models.registerNativeProvider(faux.provider);
   const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [];
   let draft = '', confirm = true, hold = false;
+  let selectChoice: ((title: string, options: string[]) => string | undefined) | undefined;
   const releases: (() => void)[] = [];
   faux.setResponses(Array.from({ length: 100 }, () => async context => {
     observed.push(structuredClone(context.messages));
@@ -47,7 +48,7 @@ async function participant(label: string, manager?: SessionManager) {
     ...session.extensionRunner.getUIContext(), getEditorText: () => draft,
     notify: (message: string) => { notifications.push(message); }, setWidget: () => {}, setStatus: () => {},
     confirm: async (title: string, message: string) => { dialogs.push(`${title}\n${message}`); return confirm; },
-    input: async () => 'Review continuity', select: async (_title: string, choices: string[]) => choices[0],
+    input: async () => 'Review continuity', select: async (title: string, choices: string[]) => selectChoice?.(title, choices) ?? choices[0],
   } });
   await bind(runtime.session); runtime.setRebindSession(bind);
   return { runtime, manager, observed, notifications, dialogs,
@@ -55,6 +56,7 @@ async function participant(label: string, manager?: SessionManager) {
     file: () => runtime.session.sessionManager.getSessionFile(),
     command: (value: string) => runtime.session.prompt(`/comms ${value}`),
     confirm: (value: boolean) => { confirm = value; }, draft: (value: string) => { draft = value; },
+    select: (next: (title: string, options: string[]) => string | undefined) => { selectChoice = next; },
     hold: (value: boolean) => { hold = value; }, release: () => { releases.shift()?.(); },
     tool: async (name: string, input: unknown) => {
       const runner = runtime.session.extensionRunner!, call = randomUUID();
@@ -261,4 +263,45 @@ test('F10 native: cleared busy-boundary steer remains offered, not falsely poste
     releaseSubscription?.();
     await b.close(); await a.close();
   }
+});
+
+test('F10 native: owner dismisses a cleared steer through /comms requests, then restart stays quiet', async () => {
+  const a = await participant('dismiss-lead'); let b = await participant('dismiss-reviewer');
+  let unsubscribe: (() => void) | undefined;
+  try {
+    await b.runtime.session.prompt('Saved reviewer context'); b.observed.length = 0;
+    b.hold(true);
+    let cleared = false;
+    unsubscribe = b.runtime.session.subscribe(event => {
+      if (event.type === 'turn_end' && !cleared) {
+        b.runtime.session.clearQueue();
+        cleared = true;
+      }
+    });
+    const busy = b.runtime.session.prompt('Busy review before dismissal');
+    await waitFor(() => b.observed.length === 1);
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Risk', text: 'CLEAR_THEN_DISMISS' });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    const id = sent.data.message.id;
+    await waitFor(async () => (await b.tool('comms_inspect', { message: id })).ok === true);
+    b.release(); await busy;
+    unsubscribe(); unsubscribe = undefined;
+    assert.equal(cleared, true);
+    assert.equal((await b.tool('comms_inspect', { message: id })).data.admission, 'uncertain');
+    b.select((_title, options) => options.find(option => option.startsWith('Dismiss')));
+    await b.command('requests');
+    const dismissed = await b.tool('comms_inspect', { message: id });
+    assert.equal(dismissed.data.intake, 'dismissed', JSON.stringify(dismissed));
+    assert.equal(dismissed.data.message.text, 'CLEAR_THEN_DISMISS');
+    assert.deepEqual((await b.tool('comms_inspect', {})).data.uncertainAdmission, []);
+    assert.equal((await b.tool('comms_inspect', {})).data.waiting, 0);
+    assert.equal(batchCount(b, id), 0);
+    assert.ok(b.dialogs.some(x => /Dismiss uncertain message/.test(x)));
+    const file = b.file()!; await b.close(); b = await participant('dismiss-reviewer', SessionManager.open(file));
+    assert.equal((await b.tool('comms_inspect', { message: id })).data.intake, 'dismissed');
+    const summary = (await b.tool('comms_inspect', {})).data;
+    assert.equal(summary.waiting, 0);
+    assert.equal(summary.uncertain, 0);
+    assert.equal(b.observed.length, 0, 'no model replay of dismissed message on restart');
+  } finally { unsubscribe?.(); await b.close(); await a.close(); }
 });
