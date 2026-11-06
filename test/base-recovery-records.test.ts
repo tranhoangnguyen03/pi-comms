@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
-import { Runtime } from '../src/runtime.ts';
+import { Runtime, NESTED_HANDOFF } from '../src/runtime.ts';
 import { Asks, type AskItem } from '../src/ask.ts';
 import { NativeSessionRecords, RECORD_TYPE, type NativeEntry, type RecoveryEvent } from '../src/session-records.ts';
 import type { Envelope } from '../src/schema.ts';
@@ -288,4 +288,69 @@ test('F10: a saved ask candidate is not restored as admitted or replayed through
   assert.deepEqual(resumed.runtime.eligible(), [reply.id], 'definitely unoffered reply can use normal fresh admission');
   resumed.runtime.posted([reply.id]);
   assert.doesNotMatch(JSON.stringify(freshAsks.restoredProjection(candidate)), /CANDIDATE_NOT_YET_ADMITTED/, 'ordinary batch delivery does not duplicate the reply in the old ask result');
+});
+
+test('F10: an offered busy-boundary batch discarded before native append stays uncertain', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b);
+  const incoming = envelope({ text: 'QUEUED_BUT_NEVER_ADMITTED' });
+  f.runtime.receive(b.id, incoming);
+  f.runtime.offered([incoming.id], 'native Pi sendMessage');
+  // This models a cleared steering queue: the host never added a
+  // comms_batch custom_message to its saved session.
+  const before = f.runtime.inspect({ message: incoming.id }) as any;
+  assert.equal(before.intake, 'offered');
+  assert.equal(before.admission, 'uncertain');
+  assert.equal(before.facts.some((fact: any) => fact.kind === 'posted'), false);
+  assert.deepEqual(f.runtime.eligible(), []);
+  assert.ok(f.runtime.waiting.includes(incoming.id), 'no evidence to remove it from pending intake');
+  assert.equal(f.manager.getEntries().filter(entry => entry.type === 'custom_message' && entry.customType === 'comms_batch').length, 0);
+
+  const resumed = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  const restored = resumed.runtime.inspect({ message: incoming.id }) as any;
+  assert.equal(restored.intake, 'offered');
+  assert.equal(restored.admission, 'uncertain');
+  assert.equal(restored.facts.some((fact: any) => fact.kind === 'posted' || fact.kind === 'saved'), false);
+  assert.ok(resumed.runtime.waiting.includes(incoming.id));
+  assert.deepEqual(resumed.runtime.eligible(), [], 'unknown host admission must not trigger automatic replay');
+
+  const entryId = f.manager.appendCustomMessageEntry('comms_batch', 'native batch', true, { owner: f.manager.getSessionId(), ids: [incoming.id] });
+  resumed.runtime.observedNative([incoming.id], entryId);
+  const confirmed = resumed.runtime.inspect({ message: incoming.id }) as any;
+  assert.equal(confirmed.intake, 'posted');
+  assert.equal(confirmed.admission, undefined);
+  assert.equal(confirmed.facts.some((fact: any) => fact.kind === 'posted'), true);
+  assert.equal(confirmed.facts.some((fact: any) => fact.kind === 'saved'), true);
+  assert.equal(resumed.runtime.waiting.length, 0);
+});
+
+test('F10: completed nested caller handoff is not resurrected as waiting after restart', async t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b);
+  const asks = new Asks(f.runtime), item: AskItem = {};
+  asks.open('nested-recovery', [item]);
+  let waiting!: Promise<void>;
+  const request = await f.runtime.send({ to: b.id, subject: 'Nested review', text: 'Review risk' }, entry => {
+    waiting = asks.register('nested-recovery', item, entry, 1);
+  });
+  asks.sent(request.message.id, request.state);
+  const reply = envelope({ exchange: request.message.exchange, replyTo: request.message.id, text: 'COMPLETED_NESTED_HANDOFF' });
+  f.runtime.receive(b.id, reply); asks.admit(); await waiting;
+  asks.present('nested-recovery', NESTED_HANDOFF);
+  const delivered = f.runtime.inspect({ message: reply.id }) as any;
+  assert.equal(delivered.intake, 'handed-off');
+  assert.equal(delivered.intakeSource, NESTED_HANDOFF);
+  assert.equal(f.runtime.waiting.length, 0);
+  assert.equal(delivered.admission, undefined);
+  assert.equal(delivered.facts.some((fact: any) => fact.kind === 'saved'), false, 'not a native child transcript');
+
+  const resumed = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  const restored = resumed.runtime.inspect({ message: reply.id }) as any;
+  assert.equal(restored.intake, 'handed-off');
+  assert.equal(restored.intakeSource, NESTED_HANDOFF);
+  assert.equal(restored.admission, undefined);
+  assert.equal(resumed.runtime.waiting.length, 0);
+  assert.equal((resumed.runtime.inspect({}) as any).uncertainAdmission.length, 0);
+  assert.equal(restored.facts.some((fact: any) => fact.kind === 'saved'), false);
+  assert.equal((new Asks(resumed.runtime)).has('nested-recovery'), false, 'the old ask waiter is not restored');
 });
