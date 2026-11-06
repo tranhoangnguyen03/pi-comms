@@ -107,7 +107,17 @@ export class Runtime {
       }
     }
     for (const entry of this.records.values()) {
-      if (entry.message.to !== this.self || entry.intake === 'summarized' || entry.intake === 'handed-off') continue;
+      if (entry.message.to !== this.self) continue;
+      // Earlier F10 drafts used 'posted' for a completed nested-caller
+      // handoff. Its explicit source is sufficient to migrate that local
+      // disposition, but NOT general Pi posting or model consumption.
+      if (entry.intake === 'posted' && entry.intakeSource === NESTED_HANDOFF) {
+        entry.intake = 'handed-off';
+        for (const fact of entry.facts) {
+          if (fact.kind === 'posted' && fact.source === NESTED_HANDOFF) fact.kind = 'handed-off';
+        }
+      }
+      if (entry.intake === 'summarized' || entry.intake === 'handed-off') continue;
       this.waiting.push(entry.message.id);
       if (entry.intake !== 'waiting') this.uncertainAdmission.add(entry.message.id);
     }
