@@ -865,17 +865,33 @@ test('contact cancellation, no UI, incoming hold/reconsideration and Stop never 
   } finally { await headless?.close(); await b?.close(); await a?.close(); }
 });
 
-test('cancelled outbound send stays unsent while a later requester-approved incoming contact is accepted', async () => {
+test('explicit outbound No survives transport assertion and same-session restart until owner reapproves', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('direction-a'); b = await participant('direction-b');
-    const denied = data(await a.tool('comms_message', { to: b.id(), subject: 'Outbound', text: 'cancel this send' }));
+    await a.runtime.session.prompt('Saved contact choice'); const initialTurns = a.observed.length;
+    const denied = data(await a.tool('comms_message', { to: b.id(), subject: 'Outbound', text: 'NO_TO_CONTACT' }));
     assert.equal(denied.error.code, 'CONTACT_NOT_APPROVED'); assert.equal(a.dialogs.length, 1);
+    assert.match(a.dialogs[0].message, /No\/Esc: refuse this exact contact/);
+    assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
     b.confirm(true);
-    assert.equal(data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'a different incoming request' })).ok, true);
-    await waitFor(() => a!.observed.length === 1 && a!.runtime.session.isIdle);
-    assert.equal(a.dialogs.length, 1, 'B’s independent human approval covers the incoming collaboration');
-    assert.match(text(a.observed[0]), /a different incoming request/);
+    const later = data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'NEW_INCOMING_AFTER_NO' }));
+    assert.equal(later.ok, true);
+    await waitFor(async () => data(await a!.tool('comms_inspect', { queue: 'self' })).data.items.length === 1);
+    const held = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
+    assert.equal(held.evidence, 'withheld', 'transport assertion cannot override explicit owner No');
+    assert.equal(a.dialogs.length, 1, 'incoming contact does not prompt or reapprove after refusal');
+    assert.equal(a.observed.length, initialTurns);
+
+    const originalPath = a.runtime.session.sessionFile!;
+    await a.runtime.switchSession(originalPath);
+    const restored = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
+    assert.equal(restored.evidence, 'withheld', 'refusal survives same-session reload');
+    assert.equal(a.observed.length, initialTurns);
+    a.confirm(true); await a.command('requests');
+    await waitFor(() => a!.observed.length > initialTurns && a!.runtime.session.isIdle);
+    assert.match(text(a.observed.at(-1)!), /NEW_INCOMING_AFTER_NO/);
+    assert.equal(data(await a.tool('comms_inspect', { message: later.data.message.id })).data.evidence, 'available');
   } finally { await b?.close(); await a?.close(); }
 });
 
