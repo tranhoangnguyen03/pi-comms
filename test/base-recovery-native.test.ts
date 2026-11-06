@@ -237,6 +237,25 @@ test('F10 native: cleared busy-boundary steer remains offered, not falsely poste
     assert.equal(restored.data.admission, 'uncertain');
     assert.equal(batchCount(b, id), 0);
     assert.equal(b.observed.length, 0);
+    const pending = (await b.tool('comms_inspect', {})).data;
+    assert.equal(pending.waiting, 0, 'uncertain work is not counted as normal waiting intake');
+    assert.equal(pending.uncertain, 1);
+    // The existing human requests path first obtains current consent, then
+    // an explicit duplicate-risk decision. It uses the original message ID.
+    await b.command('requests');
+    assert.ok(b.dialogs.some(dialog => /wants to work with you/.test(dialog)), 'no silent contact reapproval after restart');
+    assert.ok(b.dialogs.some(dialog => /may have already received|may make the agent act twice/.test(dialog)), 'duplicate-work risk was disclosed');
+    await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
+    const admitted = await b.tool('comms_inspect', { message: id });
+    assert.equal(admitted.data.intake, 'posted');
+    assert.equal(admitted.data.admission, undefined);
+    assert.equal(batchCount(b, id), 1);
+    const afterAction = b.file()!; await b.close(); b = await participant('cleared-steer-reviewer', SessionManager.open(afterAction));
+    const afterRestart = await b.tool('comms_inspect', { message: id });
+    assert.equal(afterRestart.data.intake, 'posted');
+    assert.equal((await b.tool('comms_inspect', {})).data.uncertain, 0);
+    assert.equal(batchCount(b, id), 1, 'owner decision did not create a second message ID or duplicate native post');
+    assert.equal(b.observed.length, 0, 'recovered posted message is not woken again');
   } finally {
     releaseSubscription?.();
     await b.close(); await a.close();
