@@ -371,3 +371,20 @@ test('F10: legacy posted-source nested handoff restores as completed, not awaiti
   assert.equal(recovered.runtime.waiting.length, 0);
   assert.deepEqual((recovered.runtime.inspect({}) as any).uncertainAdmission, []);
 });
+
+test('F10: premature posted receipts from earlier F10 drafts become offered/uncertain', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b);
+  const incoming = envelope({ text: 'OLDER_QUEUED_STEER' });
+  f.runtime.receive(b.id, incoming);
+  // Simulate the old mistaken immediate state transition after sendMessage().
+  f.runtime.posted([incoming.id], 'native Pi sendMessage');
+  assert.equal((f.runtime.inspect({ message: incoming.id }) as any).intake, 'posted');
+  const recovered = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  const state = recovered.runtime.inspect({ message: incoming.id }) as any;
+  assert.equal(state.intake, 'offered', 'no native evidence has confirmed this old steering offer');
+  assert.equal(state.admission, 'uncertain');
+  assert.equal(state.facts.some((fact: any) => fact.kind === 'posted'), false);
+  assert.equal(recovered.runtime.waiting.includes(incoming.id), true);
+  assert.deepEqual(recovered.runtime.eligible(), [], 'do not automatically replay an uncertain send');
+});
