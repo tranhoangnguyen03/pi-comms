@@ -115,6 +115,7 @@ test('F10 native: paused never-offered mail resumes through ordinary approval an
     const sent = await a.tool('comms_message', { to: b.id(), subject: 'Held work', text: 'F10_PENDING_REVIEW' });
     assert.equal(sent.ok, true, JSON.stringify(sent));
     const id = sent.data.message.id;
+    await waitFor(async () => (await b.tool('comms_inspect', { message: id })).ok === true);
     const before = await b.tool('comms_inspect', { message: id });
     assert.equal(before.ok, true, JSON.stringify({ before, notifications: b.notifications }));
     assert.equal(before.data.evidence, 'available', 'history authorization is not native admission');
