@@ -104,8 +104,10 @@ export default function comms(pi: ExtensionAPI) {
       const allowed = await context.ui.confirm(prompt.title, prompt.message, { signal: abort });
       if (abort.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
       if (!allowed) {
+        // A completed human No is a durable refusal in either direction.
+        // Abort/Stop throws CONTACT_CANCELLED above and never creates a deny.
+        current.revokeFromOwner(id);
         declined.add(id);
-        if (direction === 'receive') current.revokeFromOwner(id);
         throw new Error('CONTACT_NOT_APPROVED');
       }
       declined.delete(id);
@@ -167,9 +169,14 @@ export default function comms(pi: ExtensionAPI) {
   function status() {
     if (!ctx || !runtime) return;
     const unapproved = runtime.waiting.filter(id => { const entry = runtime!.entry(id)!; return entry.intake === 'waiting' && !runtime!.isApproved(entry.message.from); }).length;
-    const widget = runtime.holdReason() ? `Communication held: ${runtime.holdReason()} /comms inspect retains available history.` : unapproved ? `${unapproved} message(s) held for contact approval · /comms requests to review · /comms inspect for full content` : undefined;
+    const pending = runtime.pendingCounts();
+    const hints = [
+      unapproved ? `${unapproved} message(s) held for contact approval · /comms requests to review · /comms inspect for full content` : '',
+      pending.uncertain ? `${pending.uncertain} uncertain message(s) need your choice: deliver again (possible duplicate) or dismiss · /comms requests` : '',
+    ].filter(Boolean);
+    const widget = runtime.holdReason() ? `Communication held: ${runtime.holdReason()} /comms inspect retains available history.` : hints.join('\n') || undefined;
     if (widget !== lastWidget) { ctx.ui.setWidget('comms-requests', widget ? [widget] : undefined); lastWidget = widget; }
-    const line = `${runtime.paused ? 'Paused' : 'Receiving'} · ${runtime.waiting.length} waiting${unapproved ? ` (${unapproved} unapproved)` : ''} · ${runtime.holdReason() ? 'recovery hold' : connectionError ?? hold() ?? 'ready'}${records?.info().state === 'volatile' ? ' · live-only records' : ''}`;
+    const line = `${runtime.paused ? 'Paused' : 'Receiving'} · ${pending.waiting} waiting${pending.uncertain ? ` · ${pending.uncertain} uncertain` : ''}${unapproved ? ` (${unapproved} unapproved)` : ''} · ${runtime.holdReason() ? 'recovery hold' : connectionError ?? hold() ?? 'ready'}${records?.info().state === 'volatile' ? ' · live-only records' : ''}`;
     if (line !== lastStatus) { ctx.ui.setStatus('comms', line); lastStatus = line; }
   }
   function name(id: string) { return id === runtime?.self ? ctx?.sessionManager.getSessionName() ?? 'You' : peerNames.get(id) ?? runtime?.known().find(p => p.id === id)?.name ?? id; }
@@ -435,7 +442,7 @@ export default function comms(pi: ExtensionAPI) {
       catch (error) { commandCtx.ui.notify(String(error), 'info'); }
       return;
     }
-    commandCtx.ui.notify(`${HELP}\n${runtime.waiting.length} waiting · ${hold() ?? 'ready'}\n${runtime.known().map(p => `${name(p.id)} · ${p.id} · ${p.context}`).join('\n')}\n${RESET}\nRecord storage: ${records?.info().state ?? 'volatile'}${runtime.holdReason() ? ` · ${runtime.holdReason()}` : ''}\nBroker: ${JSON.stringify(getBrokerConnectTarget())}`, 'info');
+    commandCtx.ui.notify(`${HELP}\n${runtime.pendingCounts().waiting} waiting · ${runtime.pendingCounts().uncertain} uncertain · ${hold() ?? 'ready'}\n${runtime.known().map(p => `${name(p.id)} · ${p.id} · ${p.context}`).join('\n')}\n${RESET}\nRecord storage: ${records?.info().state ?? 'volatile'}${runtime.holdReason() ? ` · ${runtime.holdReason()}` : ''}\nBroker: ${JSON.stringify(getBrokerConnectTarget())}`, 'info');
   } });
   const result = (data: unknown, error?: { code: string; message: string; nextAction: string }) => {
     const body = { ok: !error, ...(error ? { error, ...(data ? { data } : {}) } : { data }), observedAt: new Date().toISOString() };
