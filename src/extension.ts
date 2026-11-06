@@ -11,7 +11,7 @@ import { connect } from './transport/start.ts';
 import { IntercomClient } from './transport/broker/client.ts';
 import type { SessionInfo, ContactApproval, Message as WireMessage } from './transport/types.ts';
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
-import { approvalPrompt, showInspection } from './human-view.ts';
+import { approvalPrompt, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
 import { getAgentDirPath, getBrokerConnectTarget } from './transport/broker/paths.ts';
 import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
@@ -424,6 +424,7 @@ export default function comms(pi: ExtensionAPI) {
             entry.message.text, 'receive', undefined, true);
         }
         let resolved = false;
+        let persisted: 'saved' | 'volatile' | 'partial' | undefined;
         await withDialog(async signal => {
           if (runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
           observeSaved();
@@ -434,20 +435,24 @@ export default function comms(pi: ExtensionAPI) {
             ? 'Pi may have already received this message. Delivering it again with the SAME message ID and return handle may make the agent act twice. This is not an outgoing resend.'
             : 'pi-comms will stop offering this message. If Pi still has a previously queued steer, dismissal cannot withdraw it from Pi. The original record stays inspectable.';
           const confirmed = await commandCtx.ui.confirm(retry ? 'Deliver this message again?' : 'Dismiss uncertain message?',
-            `${entry.message.subject} · ${entry.message.id}\n\n${consequence}\n\nThis choice will be saved with your Pi session.`, { signal });
+            `${entry.message.subject} · ${entry.message.id}\n\n${consequence}\n\n${admissionDecisionStorageNotice(records?.info().state)}`, { signal });
           if (signal.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
           if (!confirmed) return;
           // A queued steer could have reached native Pi while the human read
           // the warning. Reconcile again before changing the saved intake.
           observeSaved();
-          current.resolveUncertainFromOwner(choice.id!, retry ? 'retry' : 'dismiss');
+          const outcome = current.resolveUncertainFromOwner(choice.id!, retry ? 'retry' : 'dismiss');
+          persisted = outcome.record.state;
           resolved = true;
         });
         if (!resolved || runtime !== current || stopped) return;
         status();
-        commandCtx.ui.notify(retry
+        const storageNote = persisted === 'saved'
+          ? 'Choice saved in your Pi session.'
+          : 'Choice is live-only until Pi saves this session; it may be lost on restart.';
+        commandCtx.ui.notify((retry
           ? 'You approved another admission attempt. Original ID retained; duplicate action was possible. Normal Pause, user input and contact approval still govern delivery.'
-          : 'Uncertain message dismissed from pi-comms intake. Its history remains inspectable. A pre-existing native Pi steer cannot be recalled.', 'info');
+          : 'Uncertain message dismissed from pi-comms intake. Its history remains inspectable. A pre-existing native Pi steer cannot be recalled.') + ' ' + storageNote, 'info');
         if (retry) pump();
       } catch (error) {
         commandCtx.ui.notify(`${String(error)}. No uncertain message was automatically replayed.`, 'warning');
