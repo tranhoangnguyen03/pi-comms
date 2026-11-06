@@ -13,7 +13,7 @@ const FactSchema = Type.Object({
   kind: Type.Union([Type.Literal('accepted'), Type.Literal('queued'), Type.Literal('posted'), Type.Literal('handed-off'), Type.Literal('saved'), Type.Literal('summarized'), Type.Literal('rejected')]),
   at: Type.String(), source: Type.String(), evidenceRef: Type.Optional(Type.String()),
 }, { additionalProperties: false });
-const IntakeSchema = Type.Union([Type.Literal('waiting'), Type.Literal('offered'), Type.Literal('posted'), Type.Literal('handed-off'), Type.Literal('summarized')]);
+const IntakeSchema = Type.Union([Type.Literal('waiting'), Type.Literal('offered'), Type.Literal('posted'), Type.Literal('handed-off'), Type.Literal('summarized'), Type.Literal('dismissed')]);
 const StateSchema = Type.Union([Type.Literal('accepted'), Type.Literal('rejected'), Type.Literal('unknown')]);
 const StoredMessageSchema = Type.Object({ ...EnvelopeSchema.properties, from: Id, to: Id }, { additionalProperties: false });
 const StoredEntrySchema = Type.Object({
