@@ -3,7 +3,7 @@ import type { ExtensionAPI, Theme } from '@earendil-works/pi-coding-agent';
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@earendil-works/pi-tui';
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@earendil-works/pi-tui';
 
-export type CardMessage = { id: string; from: string; to: string; subject: string; text: string; workRef?: string; recipientLabel?: string; handoverFrom?: string; report?: { request: string; state: string }; structured?: object; reportLinkage?: 'context-lost'; exchange: string; replyTo?: string | null; corrects?: string | null; at: string; fact: 'queued' | 'posted' | 'saved' | 'unknown' };
+export type CardMessage = { id: string; from: string; to: string; subject: string; text: string; workRef?: string; recipientLabel?: string; handoverFrom?: string; report?: { request: string; state: string }; structured?: object; reportLinkage?: 'context-lost'; exchange: string; replyTo?: string | null; corrects?: string | null; at: string; fact: 'queued' | 'posted' | 'handed-off' | 'saved' | 'unknown' };
 
 // Adapted from intercom's MIT InlineMessageComponent; notice in THIRD-PARTY-NOTICES.md.
 export class InlineCard implements Component {
