@@ -173,7 +173,7 @@ The default wait is **60 seconds**, configurable per call from **0.1 to 600 seco
 
 Matched replies can enter the ask result while this session is busy with that ask, but not ahead of pending human input/drafts, Pause or contact approval/revocation. Stop/human interruption, Pause, revoke, disconnect and runtime replacement end affected local waits. Replies not yet handed off remain queued for eligible intake; late replies follow ordinary intake. No claim is made that a remote task continues running.
 
-Direct native ask replies stay claimed until model-context admission: they are not also posted as unsolicited batches. If interrupted before admission, the old tool result is projected without the withheld answer and the answer remains queued. Nested tool calls hand structured results to their calling tool instead; that caller owns any subsequent transformation or omission. This handoff is not evidence of a saved child transcript entry or cognitive receipt. Full underlying messages remain inspectable in existing runtime records. Saved evidence is recorded only when a native session entry is observed. A local busy label means **this session is working; incoming messages are buffered**, not that a peer is doing the requested task.
+Direct native ask replies stay claimed until model-context admission: they are not also posted as unsolicited batches. A reply handed to a nested caller is a completed handoff, not a native post or a waiting message after restart. If interrupted before admission, the old tool result is projected without the withheld answer and the answer remains queued. Nested tool calls hand structured results to their calling tool instead; that caller owns any subsequent transformation or omission. This handoff is not evidence of a saved child transcript entry or cognitive receipt. Full underlying messages remain inspectable in existing runtime records. Saved evidence is recorded only when a native session entry is observed. A local busy label means **this session is working; incoming messages are buffered**, not that a peer is doing the requested task.
 
 ### Recovery
 
@@ -185,8 +185,10 @@ Same-ID reconnect refresh is internal: after a definite stale-epoch rejection, r
 
 - **Accepted:** broker/socket transport accepted it. Not proof the recipient model saw it.
 - **Queued:** receiver memory holds it.
-- **Posted:** handed to native Pi, admitted as a direct ask result, or handed to a nested caller; the fact's source distinguishes these boundaries.
-- **Saved:** a native session entry was actually observed locally.
+- **Offered:** pi-comms asked Pi to handle the batch; a busy-session steer can still be cleared before admission. Its status remains **uncertain** until native evidence arrives, with no automatic replay.
+- **Posted:** the matching message appears in Pi's native session history, or a direct ask result was admitted to context; evidence is scoped to the actual host boundary, not proof the model did useful work.
+- **Handed off:** a nested ask reply reached its calling tool. This is complete for that handoff, but does not prove model consumption or a saved child transcript; recovery must not queue it again.
+- **Saved:** a native session entry was actually observed on disk, distinct from an in-memory native entry.
 - **Response:** a linked peer message exists. None of these means work completed.
 
 F10 restores saved-session message/outbox records, authorized historical visibility, reply handles, Pause and explicit negative controls after reload or restart. Positive contact approvals still reset; a new send may require the existing approval flow. Fresh unused or in-memory sessions remain live-only until Pi saves them; an interrupted native write does not establish durability. Local ask waiters never resume automatically. Inspect unknown outgoing results before attempting new work. The broker's inherited mailbox remains memory-only; the public exact-send path still rejects unavailable peers until F12.
