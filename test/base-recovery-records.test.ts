@@ -406,3 +406,76 @@ test('F10: native in-memory admission is not mislabeled as saved on disk', t => 
   assert.equal(observed.record.state, 'volatile');
   assert.equal(f.runtime.waiting.length, 0);
 });
+
+test('F10: owner may explicitly retry uncertain native admission using the original record', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b);
+  const message = envelope({ text: 'MANUAL_UNCERTAIN_RETRY' });
+  f.runtime.receive(b.id, message);
+  f.runtime.offered([message.id]);
+  const loaded = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.deepEqual(loaded.runtime.pendingCounts(), { waiting: 0, uncertain: 1 });
+  assert.equal((loaded.runtime.inspect({}) as any).waiting, 0);
+  assert.equal((loaded.runtime.inspect({}) as any).uncertain, 1);
+  assert.equal(loaded.runtime.uncertainIncoming()[0].message.id, message.id);
+  assert.deepEqual(loaded.runtime.eligible(), [], 'no automatic replay after restart');
+  assert.throws(() => loaded.runtime.resolveUncertainFromOwner(message.id, 'retry'), /CONTACT_NOT_APPROVED/);
+  assert.deepEqual(loaded.runtime.pendingCounts(), { waiting: 0, uncertain: 1 });
+  loaded.runtime.approveFromOwner(b);
+  const originalHandle = (loaded.runtime.inspect({ message: message.id }) as any).returnHandle;
+  const retried = loaded.runtime.resolveUncertainFromOwner(message.id, 'retry');
+  assert.equal(retried.message.id, message.id);
+  assert.equal(retried.returnHandle, originalHandle);
+  assert.equal(retried.intake, 'waiting');
+  assert.deepEqual(loaded.runtime.pendingCounts(), { waiting: 1, uncertain: 0 });
+  assert.deepEqual(loaded.runtime.eligible(), [message.id]);
+  const recovered = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal((recovered.runtime.inspect({ message: message.id }) as any).intake, 'waiting');
+  assert.deepEqual(recovered.runtime.pendingCounts(), { waiting: 1, uncertain: 0 });
+  assert.deepEqual(recovered.runtime.eligible(), [], 'positive consent still ends with runtime reset');
+  recovered.runtime.approveFromOwner(b);
+  recovered.runtime.offered([message.id]);
+  const actual = f.manager.appendCustomMessageEntry('comms_batch', message.text, true,
+    { owner: f.manager.getSessionId(), ids: [message.id] });
+  recovered.runtime.observedNative([message.id], actual);
+  assert.deepEqual(recovered.runtime.pendingCounts(), { waiting: 0, uncertain: 0 });
+  assert.equal((recovered.runtime.inspect({ message: message.id }) as any).intake, 'posted');
+});
+
+test('F10: owner may dismiss uncertain admission; dismissal persists without erasing evidence', t => {
+  const f = fixture(t), b = peer();
+  const message = envelope({ text: 'DISMISSED_WITHOUT_REPLAY' });
+  f.runtime.receive(b.id, message);
+  f.runtime.offered([message.id]);
+  f.runtime.resolveUncertainFromOwner(message.id, 'dismiss');
+  assert.deepEqual(f.runtime.pendingCounts(), { waiting: 0, uncertain: 0 });
+  const retained = f.runtime.inspect({ message: message.id }, 'human') as any;
+  assert.equal(retained.message.text, message.text);
+  assert.equal(retained.intake, 'dismissed');
+  assert.equal(retained.facts.some((fact: any) => fact.kind === 'posted'), false);
+  assert.throws(() => f.runtime.resolveUncertainFromOwner(message.id, 'retry'), /INVALID_INPUT/);
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal((reopened.runtime.inspect({ message: message.id }, 'human') as any).intake, 'dismissed');
+  assert.deepEqual(reopened.runtime.pendingCounts(), { waiting: 0, uncertain: 0 });
+  assert.deepEqual(reopened.runtime.eligible(), []);
+  // If an old host steer lands later, the observed native proof wins.
+  const appended = f.manager.appendCustomMessageEntry('comms_batch', message.text, true,
+    { owner: f.manager.getSessionId(), ids: [message.id] });
+  reopened.runtime.observedNative([message.id], appended);
+  assert.equal((reopened.runtime.inspect({ message: message.id }, 'human') as any).intake, 'posted');
+});
+
+test('F10: explicit outgoing No is a durable peer refusal, distinct from a cancelled send', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.revokeFromOwner(b.id);
+  f.runtime.approveFromTransport(b);
+  assert.equal(f.runtime.isApproved(b.id), false);
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isRevoked(b.id), true);
+  reopened.runtime.approveFromTransport(b);
+  assert.equal(reopened.runtime.isApproved(b.id), false, 'transport assertion cannot clear owner No');
+  reopened.runtime.approveFromOwner(b);
+  const reapproved = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reapproved.runtime.isRevoked(b.id), false);
+  assert.equal(reapproved.runtime.isApproved(b.id), false, 'F10 grants remain runtime-only after restart');
+});
