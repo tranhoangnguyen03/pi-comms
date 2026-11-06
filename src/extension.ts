@@ -383,15 +383,73 @@ export default function comms(pi: ExtensionAPI) {
       return;
     }
     if (action === 'requests') {
-      if (!commandCtx.hasUI) return commandCtx.ui.notify('Contact requests require a human confirmation UI; messages remain held.', 'warning');
+      if (!commandCtx.hasUI) return commandCtx.ui.notify('Pending contact and admission decisions require a human confirmation UI; messages remain held.', 'warning');
+      const current = runtime;
+      observeSaved();
       const requests = contactRequests();
-      if (!requests.length) return commandCtx.ui.notify('No contact requests waiting.', 'info');
-      const labels = requests.map(([peer, request]) => `${request.name} · ${request.subject} · ${peer}`);
-      const choice = requests.length === 1 ? labels[0] : await commandCtx.ui.select('Contact requests — choose a colleague', labels);
-      const request = requests.find(([peer]) => choice?.endsWith(peer)); if (!request) return;
-      const [peer, details] = request;
-      try { await approveContact(peer, details.name, details.subject, details.text, 'receive', undefined, true); }
-      catch (error) { commandCtx.ui.notify(`${String(error)}. Messages remain held; no agent work started.`, 'info'); }
+      const uncertain = current.uncertainIncoming();
+      const choices = [
+        ...requests.map(([peer, request]) => ({ kind: 'contact' as const, peer, label: `Contact · ${request.name} · ${request.subject} · ${peer}` })),
+        ...uncertain.map(entry => ({ kind: 'uncertain' as const, id: entry.message.id, peer: entry.message.from,
+          label: `Uncertain admission · ${name(entry.message.from)} · ${entry.message.subject} · ${entry.message.id}` })),
+      ];
+      if (!choices.length) return commandCtx.ui.notify('No contact or uncertain-admission decisions waiting.', 'info');
+      try {
+        const selected = choices.length === 1 ? choices[0].label :
+          await commandCtx.ui.select('Pending communication decisions', choices.map(choice => choice.label));
+        if (!selected || runtime !== current || stopped) return;
+        const choice = choices.find(item => item.label === selected);
+        if (!choice) return;
+        if (choice.kind === 'contact') {
+          const request = requests.find(([peer]) => peer === choice.peer);
+          if (!request) return;
+          const [peer, details] = request;
+          await approveContact(peer, details.name, details.subject, details.text, 'receive', undefined, true);
+          return;
+        }
+        const entry = current.entry(choice.id!);
+        if (!entry || !current.uncertainIncoming().some(item => item.message.id === choice.id)) {
+          return commandCtx.ui.notify('Native admission has since been reconciled. Inspect the message before acting.', 'info');
+        }
+        const deliver = 'Deliver again (may make the agent act twice)';
+        const dismiss = 'Dismiss (stop pi-comms redelivery)';
+        const actionChoice = await commandCtx.ui.select(`Uncertain admission from ${name(entry.message.from)} · ${entry.message.subject}`,
+          [deliver, dismiss, 'Keep unresolved']);
+        if (!actionChoice || actionChoice === 'Keep unresolved' || runtime !== current || stopped) return;
+        const retry = actionChoice === deliver;
+        if (retry && !current.isApproved(entry.message.from)) {
+          // Reuse the existing human contact flow; resolving delivery is not
+          // a backdoor around a prior refusal or expired approval.
+          await approveContact(entry.message.from, name(entry.message.from), entry.message.subject,
+            entry.message.text, 'receive', undefined, true);
+        }
+        let resolved = false;
+        await withDialog(async signal => {
+          if (runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
+          observeSaved();
+          if (!current.uncertainIncoming().some(item => item.message.id === choice.id)) {
+            throw new Error('CONTEXT_LOST: native admission has changed; inspect again before deciding');
+          }
+          const consequence = retry
+            ? 'Pi may have already received this message. Delivering it again with the SAME message ID and return handle may make the agent act twice. This is not an outgoing resend.'
+            : 'pi-comms will stop offering this message. If Pi still has a previously queued steer, dismissal cannot withdraw it from Pi. The original record stays inspectable.';
+          const confirmed = await commandCtx.ui.confirm(retry ? 'Deliver this message again?' : 'Dismiss uncertain message?',
+            `${entry.message.subject} · ${entry.message.id}\n\n${consequence}\n\nThis choice will be saved with your Pi session.`, { signal });
+          if (signal.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
+          if (!confirmed) return;
+          current.resolveUncertainFromOwner(choice.id!, retry ? 'retry' : 'dismiss');
+          resolved = true;
+        });
+        if (!resolved || runtime !== current || stopped) return;
+        status();
+        commandCtx.ui.notify(retry
+          ? 'You approved another admission attempt. Original ID retained; duplicate action was possible. Normal Pause, user input and contact approval still govern delivery.'
+          : 'Uncertain message dismissed from pi-comms intake. Its history remains inspectable. A pre-existing native Pi steer cannot be recalled.', 'info');
+        if (retry) pump();
+      } catch (error) {
+        commandCtx.ui.notify(`${String(error)}. No uncertain message was automatically replayed.`, 'warning');
+        status();
+      }
       return;
     }
     if (action === 'approve' || action === 'revoke') {
