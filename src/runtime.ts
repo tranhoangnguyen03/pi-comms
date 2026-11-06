@@ -4,7 +4,7 @@ import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, I
 import type { Attempt } from './session-send.ts';
 import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState } from './session-records.ts';
 
-export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
+export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
 type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized';
 export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
@@ -310,7 +310,7 @@ export class Runtime {
       const entry = this.required(id);
       entry.intake = 'handed-off'; entry.intakeSource = NESTED_HANDOFF;
       this.uncertainAdmission.delete(id);
-      this.addFact(entry, { kind: 'posted', at: new Date().toISOString(), source: NESTED_HANDOFF });
+      this.addFact(entry, { kind: 'handed-off', at: new Date().toISOString(), source: NESTED_HANDOFF });
     });
   }
   summarized(ids: string[]) {
