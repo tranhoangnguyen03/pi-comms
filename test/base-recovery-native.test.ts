@@ -28,8 +28,13 @@ async function participant(label: string, manager?: SessionManager) {
   const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false });
   models.registerNativeProvider(faux.provider);
   const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [];
-  let draft = '', confirm = true;
-  faux.setResponses(Array.from({ length: 100 }, () => async context => { observed.push(structuredClone(context.messages)); return fauxAssistantMessage('fixture response'); }));
+  let draft = '', confirm = true, hold = false;
+  const releases: (() => void)[] = [];
+  faux.setResponses(Array.from({ length: 100 }, () => async context => {
+    observed.push(structuredClone(context.messages));
+    if (hold) await new Promise<void>(resolve => releases.push(resolve));
+    return fauxAssistantMessage('fixture response');
+  }));
   const factory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }: any) => {
     const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime: models,
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
@@ -50,11 +55,12 @@ async function participant(label: string, manager?: SessionManager) {
     file: () => runtime.session.sessionManager.getSessionFile(),
     command: (value: string) => runtime.session.prompt(`/comms ${value}`),
     confirm: (value: boolean) => { confirm = value; }, draft: (value: string) => { draft = value; },
+    hold: (value: boolean) => { hold = value; }, release: () => { releases.shift()?.(); },
     tool: async (name: string, input: unknown) => {
       const runner = runtime.session.extensionRunner!, call = randomUUID();
       return data(await runner.getToolDefinition(name)!.execute(call, input, undefined, undefined, runner.createToolContext(call)));
     },
-    close: async () => { await runtime.session.abort(); await runtime.dispose(); },
+    close: async () => { hold = false; releases.splice(0).forEach(resolve => resolve()); await runtime.session.abort(); await runtime.dispose(); },
   };
 }
 function batchCount(p: Awaited<ReturnType<typeof participant>>, id: string) {
@@ -189,4 +195,50 @@ test('F10 native: saved intent failure prevents dispatch without changing normal
     assert.doesNotMatch(JSON.stringify((await b.tool('comms_inspect', {})).data), /F10_MUST_NOT_DISPATCH/);
     assert.equal((await a.tool('comms_inspect', { message: first.data.message.id })).ok, true, 'known prior evidence stays inspectable');
   } finally { await b.close(); await a.close(); }
+});
+
+test('F10 native: cleared busy-boundary steer remains offered, not falsely posted', async () => {
+  const a = await participant('cleared-steer-lead'); let b = await participant('cleared-steer-reviewer');
+  let releaseSubscription: (() => void) | undefined;
+  try {
+    await b.runtime.session.prompt('Saved reviewer context');
+    b.observed.length = 0;
+    b.hold(true);
+    let clearedAtBoundary = false;
+    releaseSubscription = b.runtime.session.subscribe(event => {
+      // Native session listeners run after extension turn_end handlers.
+      // pi-comms has offered the steer, but Pi has not consumed it yet.
+      if (event.type === 'turn_end' && !clearedAtBoundary) {
+        b.runtime.session.clearQueue();
+        clearedAtBoundary = true;
+      }
+    });
+    const busy = b.runtime.session.prompt('Continue this busy review turn.');
+    await waitFor(() => b.observed.length === 1);
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Queued during busy work', text: 'NEVER_ADMITTED_STEER' });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    const id = sent.data.message.id;
+    await waitFor(async () => (await b.tool('comms_inspect', { message: id })).ok === true);
+    b.release(); await busy;
+    releaseSubscription(); releaseSubscription = undefined;
+    assert.equal(clearedAtBoundary, true, 'a real turn boundary cleared Pi steering before native admission');
+    const held = await b.tool('comms_inspect', { message: id });
+    assert.equal(held.ok, true, JSON.stringify(held));
+    assert.equal(held.data.intake, 'offered');
+    assert.equal(held.data.admission, 'uncertain');
+    assert.equal(held.data.facts.some((fact: any) => fact.kind === 'posted' || fact.kind === 'saved'), false);
+    assert.equal(batchCount(b, id), 0, 'a cleared steer never appeared in native saved history');
+    assert.equal(b.observed.length, 1, 'the peer message did not wake a second model turn');
+
+    const file = b.file()!; await b.close(); b = await participant('cleared-steer-reviewer', SessionManager.open(file));
+    const restored = await b.tool('comms_inspect', { message: id });
+    assert.equal(restored.ok, true, JSON.stringify(restored));
+    assert.equal(restored.data.intake, 'offered');
+    assert.equal(restored.data.admission, 'uncertain');
+    assert.equal(batchCount(b, id), 0);
+    assert.equal(b.observed.length, 0);
+  } finally {
+    releaseSubscription?.();
+    await b.close(); await a.close();
+  }
 });
