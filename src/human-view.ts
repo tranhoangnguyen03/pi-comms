@@ -14,6 +14,13 @@ export function approvalPrompt(id: string, colleague: string, work: string, text
   };
 }
 
+/** Explain the actual Pi storage boundary before an owner resolves uncertain intake. */
+export function admissionDecisionStorageNotice(state: 'saved' | 'volatile' | 'blocked' | undefined): string {
+  if (state === 'saved') return 'If this write succeeds, the choice will be saved in your Pi session for restart.';
+  if (state === 'blocked') return 'Session storage is blocked; repair it before attempting to save this choice.';
+  return 'This session is live-only. The choice will take effect now, but can be lost on restart until Pi saves the session.';
+}
+
 export function inspectionText(data: Inspection, labels: Labels, technical = false) {
   const entries = 'items' in data ? data.items : [data];
   if (!entries.length) return 'No messages waiting.\n\nInspection does not approve contacts, consume messages or start agent work.';
