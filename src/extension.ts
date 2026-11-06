@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
-import { Runtime, type Entry } from './runtime.ts';
+import { Runtime, NESTED_HANDOFF, type Entry } from './runtime.ts';
 import { NativeSessionRecords, RECORD_TYPE, isRecoveryEvent, type NativeEntry } from './session-records.ts';
 import { Asks, type AskItem } from './ask.ts';
 import { modelView } from './model-view.ts';
@@ -202,7 +202,10 @@ export default function comms(pi: ExtensionAPI) {
       pi.sendMessage({ customType: 'comms_batch', display: true, content,
         details: { owner: current.self, messages: entries.map(e => ({ ...card(e, current.reportNote(e)), fact: 'posted' })), ids: deliveredIds } },
         busyBoundary ? { deliverAs: 'steer' } : { triggerTurn: true });
-      current.posted(deliveredIds); current.summarized(plan.summarized);
+      // pi.sendMessage() can only queue a steer. It does NOT confirm that Pi
+      // admitted this batch: queued items can be interrupted or cleared.
+      // Keep the offer uncertain until a matching native Pi entry appears.
+      current.summarized(plan.summarized);
     } catch (error) { wakeReserved = false; ctx.ui.notify(`pi-comms could not confirm batch admission: ${String(error)}. Inspect before repeating work.`, 'error'); }
     status();
   }
@@ -249,10 +252,13 @@ export default function comms(pi: ExtensionAPI) {
   }
   function observeSaved(owner = runtime, log = records, entries?: NativeEntry[]) {
     if (!owner || !log) return;
-    // getEntries() also contains uncommitted/buffered entries. Only actual file
-    // contents establish saved native admission.
+    // Only the real native file proves a disk save. Pi's in-memory session
+    // entries can prove a live host append, but not restart durability.
     const native = entries ?? log.nativeEntries();
-    if (log.info().state === 'blocked') owner.holdRecovery(log.info().reason ?? 'Native session recovery failed');
+    if (log.info().state === 'blocked') {
+      owner.holdRecovery(log.info().reason ?? 'Native session recovery failed');
+    }
+    const savedIds = new Set(native.map(entry => entry.id).filter((id): id is string => !!id));
     for (const entry of native) {
       if (entry.type === 'custom' && entry.customType === RECORD_TYPE) {
         const data = entry.data as { version?: number; owner?: string; scope?: string; event?: unknown } | undefined;
@@ -262,13 +268,23 @@ export default function comms(pi: ExtensionAPI) {
         const details = entry.details as { owner?: string; ids?: string[] } | undefined;
         if (details?.owner && details.owner !== owner.self) continue;
         const ids = Array.isArray(details?.ids) ? details.ids.filter(id => typeof id === 'string') : [];
-        if (entry.id) owner.observedNative(ids, entry.id);
+        if (entry.id) owner.observedNative(ids, entry.id, 'batch', true);
       }
       if (entry.type === 'message' && entry.message?.role === 'toolResult' && entry.message.toolName === 'comms_ask') {
         const details = entry.message.details as { data?: { items?: AskItem[] } } | undefined;
         const items = details?.data?.items;
-        if (Array.isArray(items) && entry.id) owner.observedNative(items.flatMap(item => typeof item?.reply === 'string' ? [item.reply] : []), entry.id, 'ask');
+        if (Array.isArray(items) && entry.id) owner.observedNative(items.flatMap(item => typeof item?.reply === 'string' ? [item.reply] : []), entry.id, 'ask', true);
       }
+    }
+    if (log.info().state === 'blocked' || !ctx || ctx.sessionManager.getSessionId() !== owner.self) return;
+    for (const entry of ctx.sessionManager.getEntries() as NativeEntry[]) {
+      // An actually appended host entry may still be live-only in a fresh or
+      // ephemeral session. Do not label it saved or claim model consumption.
+      if (entry.type !== 'custom_message' || entry.customType !== 'comms_batch' || !entry.id || savedIds.has(entry.id)) continue;
+      const details = entry.details as { owner?: string; ids?: string[] } | undefined;
+      if (details?.owner && details.owner !== owner.self) continue;
+      const ids = Array.isArray(details?.ids) ? details.ids.filter(id => typeof id === 'string') : [];
+      owner.observedNative(ids, entry.id, 'batch', false);
     }
   }
   async function stopRuntime() {
@@ -517,11 +533,14 @@ export default function comms(pi: ExtensionAPI) {
     if (context.signal?.aborted || approvalDialog) asks.end('interrupted', event.toolCallId);
     admitAsks();
     try {
-      if (event.parentToolCallId) asks.present(event.toolCallId, 'ask result handed to nested caller');
+      if (event.parentToolCallId) asks.present(event.toolCallId, NESTED_HANDOFF);
       return result(asks.project(event.toolCallId, Number(event.input.timeoutSeconds ?? 60)));
     } catch (error) { return admissionFailure(error); }
   });
   pi.on('context', (event, context) => {
+    // A queued steer becomes real only after the host appends its native
+    // message. Reconcile before the model uses this context.
+    observeSaved();
     if (!asks) return;
     if (context.signal?.aborted || approvalDialog) endAsks('interrupted');
     admitAsks();
