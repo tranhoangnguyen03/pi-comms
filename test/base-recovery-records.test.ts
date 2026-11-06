@@ -388,3 +388,19 @@ test('F10: premature posted receipts from earlier F10 drafts become offered/unce
   assert.equal(recovered.runtime.waiting.includes(incoming.id), true);
   assert.deepEqual(recovered.runtime.eligible(), [], 'do not automatically replay an uncertain send');
 });
+
+test('F10: native in-memory admission is not mislabeled as saved on disk', t => {
+  const f = fixture(t, false), b = peer();
+  f.runtime.approveFromOwner(b);
+  const incoming = envelope({ text: 'LIVE_NATIVE_ADMISSION' });
+  f.runtime.receive(b.id, incoming);
+  f.runtime.offered([incoming.id]);
+  f.runtime.observedNative([incoming.id], 'native-memory-entry', 'batch', false);
+  const observed = f.runtime.inspect({ message: incoming.id }) as any;
+  assert.equal(observed.intake, 'posted');
+  assert.equal(observed.admission, undefined);
+  assert.equal(observed.facts.some((fact: any) => fact.kind === 'posted'), true);
+  assert.equal(observed.facts.some((fact: any) => fact.kind === 'saved'), false);
+  assert.equal(observed.record.state, 'volatile');
+  assert.equal(f.runtime.waiting.length, 0);
+});
