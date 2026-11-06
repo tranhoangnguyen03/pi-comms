@@ -367,7 +367,9 @@ test('F10: legacy posted-source nested handoff restores as completed, not awaiti
   const state = recovered.runtime.inspect({ message: reply.id }) as any;
   assert.equal(state.intake, 'handed-off');
   assert.equal(state.admission, undefined);
-  assert.equal(state.facts.some((fact: any) => fact.kind === 'handed-off' && fact.source === NESTED_HANDOFF), true);
+  assert.equal(state.intakeSource, NESTED_HANDOFF);
+  assert.equal(state.facts.some((fact: any) => fact.kind === 'posted'), false,
+    'do not invent a posted receipt or handoff timestamp missing from the old saved record');
   assert.equal(recovered.runtime.waiting.length, 0);
   assert.deepEqual((recovered.runtime.inspect({}) as any).uncertainAdmission, []);
 });
