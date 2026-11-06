@@ -117,6 +117,13 @@ export class Runtime {
           if (fact.kind === 'posted' && fact.source === NESTED_HANDOFF) fact.kind = 'handed-off';
         }
       }
+      if (entry.intake === 'posted' && entry.intakeSource === 'native Pi sendMessage') {
+        // Older F10 drafts marked a queued steer posted immediately. Without
+        // native-history proof, recover only the offer and discard its false
+        // posted receipt; reconciliation can confirm genuine admission later.
+        entry.intake = 'offered';
+        entry.facts = entry.facts.filter(fact => !(fact.kind === 'posted' && fact.source === 'native Pi sendMessage'));
+      }
       if (entry.intake === 'summarized' || entry.intake === 'handed-off') continue;
       this.waiting.push(entry.message.id);
       if (entry.intake !== 'waiting') this.uncertainAdmission.add(entry.message.id);
