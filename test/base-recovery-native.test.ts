@@ -248,6 +248,7 @@ test('F10 native: cleared busy-boundary steer remains offered, not falsely poste
     await b.command('requests');
     assert.ok(b.dialogs.some(dialog => /wants to work with you/.test(dialog)), 'no silent contact reapproval after restart');
     assert.ok(b.dialogs.some(dialog => /may have already received|may make the agent act twice/.test(dialog)), 'duplicate-work risk was disclosed');
+    assert.ok(b.dialogs.some(dialog => /If this write succeeds, the choice will be saved in your Pi session for restart/.test(dialog)), 'saved-session prompt states the conditional commit boundary');
     await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
     const admitted = await b.tool('comms_inspect', { message: id });
     assert.equal(admitted.data.intake, 'posted');
@@ -297,11 +298,59 @@ test('F10 native: owner dismisses a cleared steer through /comms requests, then 
     assert.equal((await b.tool('comms_inspect', {})).data.waiting, 0);
     assert.equal(batchCount(b, id), 0);
     assert.ok(b.dialogs.some(x => /Dismiss uncertain message/.test(x)));
+    assert.ok(b.dialogs.some(x => /If this write succeeds, the choice will be saved in your Pi session for restart/.test(x)), 'saved-session dismissal confirmation names the save boundary');
     const file = b.file()!; await b.close(); b = await participant('dismiss-reviewer', SessionManager.open(file));
     assert.equal((await b.tool('comms_inspect', { message: id })).data.intake, 'dismissed');
     const summary = (await b.tool('comms_inspect', {})).data;
     assert.equal(summary.waiting, 0);
     assert.equal(summary.uncertain, 0);
     assert.equal(b.observed.length, 0, 'no model replay of dismissed message on restart');
+  } finally { unsubscribe?.(); await b.close(); await a.close(); }
+});
+
+test('F10 native: in-memory owner dismissal is live-only, never promised to survive restart', async () => {
+  const a = await participant('volatile-decision-lead');
+  let b = await participant('volatile-decision-reviewer', SessionManager.inMemory(join(root, 'volatile-decision-reviewer')));
+  let unsubscribe: (() => void) | undefined;
+  try {
+    assert.equal(b.file(), undefined, 'the --no-session equivalent has no file to save');
+    b.hold(true);
+    let cleared = false;
+    unsubscribe = b.runtime.session.subscribe(event => {
+      if (event.type === 'turn_end' && !cleared) {
+        b.runtime.session.clearQueue();
+        cleared = true;
+      }
+    });
+    const busy = b.runtime.session.prompt('Live review while busy');
+    await waitFor(() => b.observed.length === 1);
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Live-only decision', text: 'VOLATILE_DISMISSAL' });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    const id = sent.data.message.id;
+    await waitFor(async () => (await b.tool('comms_inspect', { message: id })).ok === true);
+    b.release(); await busy;
+    unsubscribe(); unsubscribe = undefined;
+    assert.equal(cleared, true, 'real native steer was cleared before admission');
+    const offered = await b.tool('comms_inspect', { message: id });
+    assert.equal(offered.data.admission, 'uncertain');
+    assert.equal(offered.data.record.state, 'volatile');
+
+    b.select((_title, options) => options.find(option => option.startsWith('Dismiss')));
+    await b.command('requests');
+    assert.ok(b.dialogs.some(dialog => /This session is live-only/.test(dialog)), 'owner sees the actual volatile storage boundary');
+    assert.ok(b.dialogs.some(dialog => /lost on restart until Pi saves the session/.test(dialog)), 'prompt warns that the choice may not survive');
+    const after = await b.tool('comms_inspect', { message: id });
+    assert.equal(after.data.intake, 'dismissed', 'owner choice takes effect in this runtime');
+    assert.equal(after.data.record.state, 'volatile', 'the native in-memory host cannot certify a saved decision');
+    assert.equal((await b.tool('comms_inspect', {})).data.uncertain, 0);
+    assert.equal(b.file(), undefined);
+    assert.ok(b.notifications.some(note => /Choice is live-only until Pi saves this session/.test(note)), 'success notice repeats actual storage status');
+
+    const oldSession = b.id();
+    await b.close();
+    b = await participant('volatile-decision-reviewer', SessionManager.inMemory(join(root, 'volatile-decision-reviewer-after-restart')));
+    assert.notEqual(b.id(), oldSession, 'a fresh in-memory session cannot resume the previous state');
+    assert.equal((await b.tool('comms_inspect', { message: id })).ok, false,
+      'the ephemeral decision was not claimed to survive a new process');
   } finally { unsubscribe?.(); await b.close(); await a.close(); }
 });
