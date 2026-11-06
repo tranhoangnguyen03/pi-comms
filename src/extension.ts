@@ -277,7 +277,7 @@ export default function comms(pi: ExtensionAPI) {
       }
     }
     if (log.info().state === 'blocked' || !ctx || ctx.sessionManager.getSessionId() !== owner.self) return;
-    for (const entry of ctx.sessionManager.getEntries() as NativeEntry[]) {
+    for (const entry of ctx.sessionManager.getEntries() as unknown as NativeEntry[]) {
       // An actually appended host entry may still be live-only in a fresh or
       // ephemeral session. Do not label it saved or claim model consumption.
       if (entry.type !== 'custom_message' || entry.customType !== 'comms_batch' || !entry.id || savedIds.has(entry.id)) continue;
