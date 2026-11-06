@@ -437,6 +437,9 @@ export default function comms(pi: ExtensionAPI) {
             `${entry.message.subject} · ${entry.message.id}\n\n${consequence}\n\nThis choice will be saved with your Pi session.`, { signal });
           if (signal.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
           if (!confirmed) return;
+          // A queued steer could have reached native Pi while the human read
+          // the warning. Reconcile again before changing the saved intake.
+          observeSaved();
           current.resolveUncertainFromOwner(choice.id!, retry ? 'retry' : 'dismiss');
           resolved = true;
         });
