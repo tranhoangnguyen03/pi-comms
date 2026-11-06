@@ -354,3 +354,20 @@ test('F10: completed nested caller handoff is not resurrected as waiting after r
   assert.equal(restored.facts.some((fact: any) => fact.kind === 'saved'), false);
   assert.equal((new Asks(resumed.runtime)).has('nested-recovery'), false, 'the old ask waiter is not restored');
 });
+
+test('F10: legacy posted-source nested handoff restores as completed, not awaiting native admission', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b);
+  const reply = envelope({ text: 'NESTED_ALREADY_PASSED_TO_CALLER' });
+  f.runtime.receive(b.id, reply);
+  // Earlier F10 draft wrote the generic posted disposition even though the
+  // specific source said this was a nested result handed to its caller.
+  f.runtime.posted([reply.id], NESTED_HANDOFF);
+  const recovered = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  const state = recovered.runtime.inspect({ message: reply.id }) as any;
+  assert.equal(state.intake, 'handed-off');
+  assert.equal(state.admission, undefined);
+  assert.equal(state.facts.some((fact: any) => fact.kind === 'handed-off' && fact.source === NESTED_HANDOFF), true);
+  assert.equal(recovered.runtime.waiting.length, 0);
+  assert.deepEqual((recovered.runtime.inspect({}) as any).uncertainAdmission, []);
+});
