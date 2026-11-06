@@ -6,10 +6,11 @@ import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState 
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
-type Intake = 'waiting' | 'offered' | 'posted' | 'summarized';
+type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized';
 export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
 export type Approval = { id: string; name: string; context: string };
 export const ASK_ADMISSION = 'native ask result context admission';
+export const NESTED_HANDOFF = 'ask result handed to nested caller';
 export class Runtime {
   private approvals = new Map<string, Approval>();
   private revoked = new Set<string>();
@@ -106,7 +107,7 @@ export class Runtime {
       }
     }
     for (const entry of this.records.values()) {
-      if (entry.message.to !== this.self || entry.intake === 'summarized') continue;
+      if (entry.message.to !== this.self || entry.intake === 'summarized' || entry.intake === 'handed-off') continue;
       this.waiting.push(entry.message.id);
       if (entry.intake !== 'waiting') this.uncertainAdmission.add(entry.message.id);
     }
@@ -176,18 +177,22 @@ export class Runtime {
     const entry = this.records.get(id);
     return entry?.intake === 'posted' && entry.intakeSource === ASK_ADMISSION;
   }
-  observedNative(ids: string[], evidenceRef: string, kind: 'batch' | 'ask' = 'batch') {
+  observedNative(ids: string[], evidenceRef: string, kind: 'batch' | 'ask' = 'batch', saved = true) {
     for (const id of ids) {
       const entry = this.records.get(id);
-      if (!entry || entry.message.to !== this.self) continue;
-      // Pi can save a candidate tool result before a human interruption removes
-      // its reply from model context. Raw tool-result storage is not admission.
+      if (!entry || entry.message.to !== this.self || entry.intake === 'handed-off') continue;
+      // A queued steering offer is not admission. Only a matching native Pi
+      // session entry proves that the host actually took the message.
+      // A saved ask candidate alone is not evidence that it reached context.
       if (kind === 'ask' && !this.wasAskAdmitted(id)) continue;
       entry.intake = 'posted'; entry.readable = true;
-      entry.intakeSource = kind === 'ask' ? ASK_ADMISSION : 'native Pi sendMessage';
+      entry.intakeSource = kind === 'ask' ? ASK_ADMISSION : 'native Pi session entry observed';
       this.uncertainAdmission.delete(id);
       this.waiting = this.waiting.filter(waiting => waiting !== id);
-      this.fact(id, 'saved', 'native session entry observed on disk', evidenceRef);
+      this.addFact(entry, { kind: 'posted', at: new Date().toISOString(),
+        source: kind === 'ask' ? ASK_ADMISSION : 'native Pi session entry', evidenceRef });
+      if (saved) this.addFact(entry, { kind: 'saved', at: new Date().toISOString(),
+        source: 'native session entry observed on disk', evidenceRef });
     }
   }
   contactFor(input: MessageInput) {
@@ -293,6 +298,20 @@ export class Runtime {
     const posted = new Set(ids);
     this.waiting = this.waiting.filter(id => !posted.has(id));
     ids.forEach(id => { const entry = this.required(id); entry.intake = 'posted'; entry.intakeSource = source; this.uncertainAdmission.delete(id); this.addFact(entry, { kind: 'posted', at: new Date().toISOString(), source }); });
+  }
+  handedOff(ids: string[]) {
+    if (!ids.length) return;
+    // A nested caller has received this reply. That is a completed handoff,
+    // not a native Pi post or proof that the caller used the reply.
+    this.write({ kind: 'intake', ids, disposition: 'handed-off', source: NESTED_HANDOFF }, ids);
+    const handed = new Set(ids);
+    this.waiting = this.waiting.filter(id => !handed.has(id));
+    ids.forEach(id => {
+      const entry = this.required(id);
+      entry.intake = 'handed-off'; entry.intakeSource = NESTED_HANDOFF;
+      this.uncertainAdmission.delete(id);
+      this.addFact(entry, { kind: 'posted', at: new Date().toISOString(), source: NESTED_HANDOFF });
+    });
   }
   summarized(ids: string[]) {
     if (!ids.length) return;
