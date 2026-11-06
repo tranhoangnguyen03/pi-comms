@@ -1,4 +1,4 @@
-import { ASK_ADMISSION, type Entry, type Runtime } from './runtime.ts';
+import { ASK_ADMISSION, NESTED_HANDOFF, type Entry, type Runtime } from './runtime.ts';
 
 export type AskOutcome = 'replied' | 'timeout' | 'interrupted' | 'paused' | 'revoked' | 'disconnected' | 'context-lost' | 'not-sent' | 'rejected' | 'unknown';
 export type AskItem = { request?: string; peer?: string; subject?: string; workRef?: string; outcome?: AskOutcome; code?: string; reply?: string };
@@ -111,9 +111,11 @@ export class Asks {
     if (!operation || operation.presented) return;
     this.checkAdmission(call);
     const ids = operation.items.flatMap(item => item.reply ? [item.reply] : []);
-    // Runtime records the offer before the host receives this context. A
-    // failure must not mark the call presented or release its retained reply.
-    this.runtime.posted(ids, source);
+    // A nested caller handoff is complete when the caller receives the result,
+    // not when a child ask appears in a native transcript. Keep that disposition
+    // distinct from normal model-context posting across recovery.
+    if (source === NESTED_HANDOFF) this.runtime.handedOff(ids);
+    else this.runtime.posted(ids, source);
     operation.presented = true;
     ids.forEach(id => this.claims.delete(id));
   }
