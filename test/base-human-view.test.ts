@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { KeybindingsManager, TUI_KEYBINDINGS, TuiAltScreen, TuiMainScreen, Text, visibleWidth } from '@earendil-works/pi-tui';
 import { Runtime } from '../src/runtime.ts';
-import { approvalPrompt, inspectionText, inspectionState, inspectionScreen, showInspection } from '../src/human-view.ts';
+import { approvalPrompt, admissionDecisionStorageNotice, inspectionText, inspectionState, inspectionScreen, showInspection } from '../src/human-view.ts';
 
 const self = randomUUID(), peer = randomUUID();
 const labels = { self, name: (id: string) => id === self ? 'Coordinator' : 'Reviewer', approved: () => false };
@@ -33,6 +33,24 @@ test('approval copy puts colleague, work and consequences before technical ident
     if (direction === 'send') assert.match(prompt.message, /send this request now/);
     else assert.match(prompt.message, /held for you, not the agent/);
   }
+});
+
+test('uncertain admission confirmation distinguishes saved, volatile and blocked Pi session records', () => {
+  const saved = admissionDecisionStorageNotice('saved');
+  assert.match(saved, /if this write succeeds/i);
+  assert.match(saved, /saved in your Pi session for restart/);
+  assert.doesNotMatch(saved, /live-only/);
+
+  for (const state of ['volatile', undefined] as const) {
+    const live = admissionDecisionStorageNotice(state);
+    assert.match(live, /live-only/);
+    assert.match(live, /lost on restart/);
+    assert.doesNotMatch(live, /will be saved with your Pi session/);
+  }
+
+  const blocked = admissionDecisionStorageNotice('blocked');
+  assert.match(blocked, /storage is blocked/);
+  assert.doesNotMatch(blocked, /will be saved|live-only/);
 });
 
 test('human view presents full content/references in plain language; evidence/handles are available on demand', () => {
