@@ -8,7 +8,7 @@
 - Preserve existing four agent tools, human-first intake, corrections and M3 organizer API. F11 remembered positive approvals and F12 broker-crash-durable offline mail are **not** included.
 - Cover saved-session restart, Pause/revocation, read versus admission, withheld mail, forks/branches, corruption, storage failure and installed-package recovery paths. See the M4 contract for remaining host and acceptance limits.
 - Keep a busy-boundary batch **offered/uncertain** until native Pi history proves admission; a cleared steering queue cannot manufacture a posted receipt. Keep a completed nested-ask **handed-off** result out of the recovery waiting queue, without claiming a saved child transcript or model consumption.
-- Add human resolution of uncertain intake via existing `/comms requests`: owner-confirmed same-ID redelivery (possible duplicate work, current contact approval required) or dismissal, both saved in Pi's session record. Separate uncertain from normal waiting counts; no automatic resend or new agent tool.
+- Add human resolution of uncertain intake via existing `/comms requests`: owner-confirmed same-ID redelivery (possible duplicate work, current contact approval required) or dismissal, persisted when Pi confirms a saved session entry, otherwise marked live-only until the host saves them; confirmation and outcome text reflect this limit. Separate uncertain from normal waiting counts; no automatic resend or new agent tool.
 - Treat a completed **No/Esc** on both incoming and outgoing first-contact prompts as a persisted refusal; explicit owner reapproval is required to clear it. Stop/abort only cancels the attempt and never saves a refusal. Tests cover transport assertion and same-session restart.
 
 ## [0.1.8] - 2026-11-02
