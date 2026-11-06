@@ -69,6 +69,8 @@ For a recovery-capable saved session, record outgoing ID and intent before dispa
 
 Before offering a waiting message to Pi, record that an admission attempt is starting; later native saved-history evidence confirms posting. This distinguishes three cases after restart: definitely never offered (eligible for normal intake), already posted (do not post again), and uncertain admission (inspect/hold, do not guess). Merely saving an incoming message is neither posting it nor accepting its work.
 
+**Resolve uncertainty without false certainty:** Count offered/uncertain arrivals separately from normal waiting intake. Keep `/comms inspect` read-only and expose explicit **Deliver again** (with current contact consent and a clear possible-duplicate warning) or **Dismiss** in the existing human `/comms requests` flow. Save the human choice under the original message ID before resuming normal intake; never synthesize a new request or retry automatically. Dismissal stops pi-comms admission attempts but cannot revoke a Pi steer already queued in the host. If native evidence later proves admission, report it honestly. Normal contact/Pause/human-input controls still apply.
+
 A write failure must stop the affected operation and report that persistence failed. Apply a user's Pause/revoke immediately in the live runtime, but never falsely confirm it survived restart. An entry still visible in memory after an exception is not proof of a committed write. Validate the actual saved data when reconciling an ambiguous commit; do not silently fall back to a separate sidecar or erase the evidence.
 
 ### Native host limits and compatibility
@@ -85,6 +87,8 @@ A write failure must stop the affected operation and report that persistence fai
 Runtime-only approval remains the default. Add the optional remembered exact-pair choice inside the **existing contact confirmation**, with no second routine dialog, permission mode for the agent or new settings service. Earlier grants are never upgraded automatically.
 
 Use the same session-record writer for owner grant, revoke and Pause. **Negative controls survive from the first slice that restores incoming records**; do not postpone revocation durability while enabling replay. F11 adds optional remembered positive consent and the complete provenance behavior.
+
+**First-contact refusal has one meaning:** A completed human **No/Esc** during a new contact prompt, whether the user initiated an outgoing send or reviewed an incoming request, persists the same exact-peer refusal. Peer-carried approval cannot undo it. A genuinely interrupted or aborted dialog is **not** an owner refusal and must not write a durable deny. New consent requires a subsequent explicit owner approval. F10 already applies these negative-control rules; F11 extends only positive consent lifetime.
 
 Keep owner-issued and transport-derived decisions distinct. A's remembered choice is A's decision about exact B; it is not B's owner's permanent grant. A fresh valid sender assertion can support the existing receiver-runtime/bidirectional contact flow, subject to local refusal. Restoring an old assertion or reading old mail cannot create persistent receiver consent. A queued stale assertion alone is not proof of current authority; use a valid local grant or fresh supported confirmation, otherwise the ordinary human review path holds the arrival.
 
