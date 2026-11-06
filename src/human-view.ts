@@ -10,7 +10,7 @@ export function approvalPrompt(id: string, colleague: string, work: string, text
   const preview = text.replace(/\s+/g, ' ');
   return {
     title: direction === 'send' ? `Work with ${colleague}?` : `${colleague} wants to work with you`,
-    message: `Work: ${work}\n\n${direction === 'send' ? 'Yes: send this request now.' : 'Yes: admit held messages when reception is ready.'}\n${direction === 'send' ? 'No/Esc: send nothing.' : 'No/Esc: keep messages held for you, not the agent.'}\nApproves this exact session as a contact for future requests, clarifications and replies via comms_message or comms_ask, in both directions. The work above is context, not a per-task limit. Either side may revoke; runtime reset ends approval.\n${direction === 'send' ? 'The receiver accepts this contact without another prompt; its Pause/revoke still apply.' : 'Only your explicit approval restores a refused or revoked contact.'}\nYour directions and tool permissions still apply.\n\n${direction === 'receive' ? 'Incoming preview (not yet shared with the agent)' : 'Request preview'}: ${preview.slice(0, 160)}${preview.length > 160 ? '…' : ''}\nSession: ${id}\nApproval lasts until reload/restart.`,
+    message: `Work: ${work}\n\n${direction === 'send' ? 'Yes: send this request now.' : 'Yes: admit held messages when reception is ready.'}\n${direction === 'send' ? 'No/Esc: refuse this exact contact; nothing is sent. Only your later approval can reopen it.' : 'No/Esc: refuse this exact contact and keep messages held. Only your later approval can reopen it.'}\nApproves this exact session as a contact for future requests, clarifications and replies via comms_message or comms_ask, in both directions. The work above is context, not a per-task limit. Either side may revoke; runtime reset ends approval.\n${direction === 'send' ? 'The receiver accepts this contact without another prompt; its Pause/revoke still apply.' : 'Only your explicit approval restores a refused or revoked contact.'}\nYour directions and tool permissions still apply.\n\n${direction === 'receive' ? 'Incoming preview (not yet shared with the agent)' : 'Request preview'}: ${preview.slice(0, 160)}${preview.length > 160 ? '…' : ''}\nSession: ${id}\nApproval lasts until reload/restart.`,
   };
 }
 
@@ -29,8 +29,10 @@ export function inspectionText(data: Inspection, labels: Labels, technical = fal
     if (m.replyTo) lines.push('Reply to an earlier message.');
     if (m.corrects) lines.push('Correction to an earlier message.');
     if (entry.linkage) lines.push('Context lost: the referenced request is unavailable.');
+    if (entry.admission === 'uncertain') lines.push('Pi may or may not have admitted this message. To deliver again (possible duplicate) or dismiss it, use /comms requests. Inspection remains read-only.');
     lines.push('', m.text);
     if (m.refs.length) lines.push('', 'References', ...m.refs.map(ref => `${ref.label}: ${ref.uri}`));
+    if (entry.intake === 'dismissed') lines.push('Owner dismissed this uncertain arrival; no automatic redelivery will occur.');
     if (technical) {
       lines.push('', 'Technical evidence', `Message: ${m.id}`, `Exchange: ${m.exchange}`, `From session: ${m.from}`, `To session: ${m.to}`, `Created: ${m.createdAt}`, `Send/receive state: ${entry.state}`, `Evidence: ${entry.evidence}`);
       if (m.replyTo) lines.push(`Reply to: ${m.replyTo}`);
