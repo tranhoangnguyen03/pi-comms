@@ -10,7 +10,7 @@ import { EnvelopeSchema, Id, checkSize } from './schema.ts';
 export const RECORD_TYPE = 'pi-comms:state';
 export type SaveState = 'saved' | 'volatile';
 const FactSchema = Type.Object({
-  kind: Type.Union([Type.Literal('accepted'), Type.Literal('queued'), Type.Literal('posted'), Type.Literal('saved'), Type.Literal('summarized'), Type.Literal('rejected')]),
+  kind: Type.Union([Type.Literal('accepted'), Type.Literal('queued'), Type.Literal('posted'), Type.Literal('handed-off'), Type.Literal('saved'), Type.Literal('summarized'), Type.Literal('rejected')]),
   at: Type.String(), source: Type.String(), evidenceRef: Type.Optional(Type.String()),
 }, { additionalProperties: false });
 const IntakeSchema = Type.Union([Type.Literal('waiting'), Type.Literal('offered'), Type.Literal('posted'), Type.Literal('handed-off'), Type.Literal('summarized')]);
