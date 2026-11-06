@@ -143,7 +143,7 @@ Unapproved content remains fully human-visible in `/comms inspect`; model inspec
 ## Everyday commands
 
 - `/comms` or `/comms status`: current approval, waiting count, recovery/storage state and broker location.
-- `/comms requests`: review held incoming contact requests **and uncertain native admission**. For an uncertain message, choose **Deliver again** (warns of possible duplicate model work; requires current consent; retains its ID) or **Dismiss** (no further pi-comms intake). The choice is saved with the session.
+- `/comms requests`: review held incoming contact requests **and uncertain native admission**. For an uncertain message, choose **Deliver again** (warns of possible duplicate model work; requires current consent; retains its ID) or **Dismiss** (no further pi-comms intake). In a saved Pi session, the choice is stored for restart once the write succeeds. Fresh and `--no-session` choices are live-only until Pi actually saves the session; the confirmation and result notice state which applies.
 - `/comms approve [exact-session-id]`: optional explicit contact setup/change through human selection/context/confirmation.
 - `/comms revoke [exact-session-id]`: remove contact approval after confirmation; queued traffic remains held.
 - `/comms pause`: keep buffering arrivals without peer admission/wakes.
