@@ -1239,7 +1239,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     assert.ok(leaf);
     await b.runtime.fork(leaf.id); assert.notEqual(b.id(), bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    assert.match(b.notifications.join('\n'), /Contact approval still ends on reload\/switch\/restart/);
+    assert.match(b.notifications.join('\n'), /Contact approval ends on reload unless you explicitly chose Remember/);
     assert.equal(data(await a.tool('comms_inspect', { message: held.data.message.id })).ok, true);
   } finally {
     await b?.close(); await a?.close();
