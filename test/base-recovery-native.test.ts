@@ -51,9 +51,10 @@ async function participant(label: string, manager?: SessionManager) {
     input: async () => 'Review continuity', select: async (title: string, choices: string[]) => {
       if (choices.includes('Approve for this session only (default)')) {
         dialogs.push(title); consentChoices.push([...choices]);
+        if (choices.includes('Cancel — leave contact approval unchanged') && selectChoice) return selectChoice(title, choices);
         return confirm ? (rememberNext ? choices[1] : choices[0]) : choices[2];
       }
-      return selectChoice?.(title, choices) ?? choices[0];
+      return selectChoice ? selectChoice(title, choices) : choices[0];
     },
   } });
   await bind(runtime.session); runtime.setRebindSession(bind);
