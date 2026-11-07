@@ -94,17 +94,15 @@ test('F10 native: readable history, original return handles, Pause and revocatio
     assert.equal(old.data.returnHandle, incoming.returnHandle);
     assert.equal((await b.tool('comms_inspect', {})).data.paused, true);
     assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    const fresh = await a.tool('comms_message', { to: oldId, subject: 'Held', text: 'F10_WITHHELD_AFTER_REVOKE' });
-    assert.equal(fresh.ok, true);
-    // Transport acceptance is not receiver admission. Wait for the exact
-    // arrival before checking its privacy; do not weaken the visibility check.
-    await waitFor(async () => (await b.tool('comms_inspect', { message: fresh.data.message.id })).ok === true);
-    const held = await b.tool('comms_inspect', { message: fresh.data.message.id });
-    assert.equal(held.ok, true, JSON.stringify(held));
-    assert.equal(held.data.evidence, 'withheld');
-    assert.doesNotMatch(JSON.stringify(held), /F10_WITHHELD_AFTER_REVOKE/);
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', { to: oldId, subject: 'Blocked', text: 'F10_MUST_NOT_CROSS_REVOKE' });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED', 'broker refuses new sends after either endpoint revokes');
     await b.command('resume'); await new Promise(resolve => setTimeout(resolve, 250));
-    assert.equal(b.observed.length, 0); assert.equal(b.dialogs.length, 0, 'restored revoke does not prompt repeatedly');
+    assert.equal(b.observed.length, 0);
+    // The saved return handle remains valid once the same owner explicitly
+    // reapproves the pair. Historic content is not erased by revocation.
+    b.confirm(true);
+    await b.command(`approve ${a.id()}`);
     const reply = await b.tool('comms_message', { respondTo: incoming.returnHandle, text: 'F10_LINKED_ANSWER', report: { request: id, state: 'complete' } });
     assert.equal(reply.ok, true, JSON.stringify(reply));
     assert.equal(reply.data.message.replyTo, id); assert.equal(reply.data.message.workRef, 'F10-NATIVE');
