@@ -885,7 +885,7 @@ test('explicit outbound No survives transport assertion and same-session restart
     await a.runtime.session.prompt('Saved contact choice'); const initialTurns = a.observed.length;
     const denied = data(await a.tool('comms_message', { to: b.id(), subject: 'Outbound', text: 'NO_TO_CONTACT' }));
     assert.equal(denied.error.code, 'CONTACT_NOT_APPROVED'); assert.equal(a.dialogs.length, 1);
-    assert.match(a.dialogs[0].message, /No\/Esc: refuse this exact contact/);
+    assert.match(a.dialogs[0].message, /Allows messages between these sessions, not approval of the work/);
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
     b.confirm(true);
     const later = data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'NEW_INCOMING_AFTER_NO' }));
@@ -1104,7 +1104,7 @@ test('revoked paused contact is recoverable through the same requests command ad
     assert.equal(b.dialogs.length, dialogsBefore, 'ordinary resend neither reapproves nor reopens receiver decision');
     await b.command('requests');
     assert.equal(b.dialogs.length, dialogsBefore + 1, 'advertised recovery opens the actual held request');
-    assert.match(b.dialogs.at(-1)!.title, /wants to work with you/);
+    assert.match(b.dialogs.at(-1)!.title, /to contact you/);
     assert.match(b.dialogs.at(-1)!.message, /REVOKED_QUEUE_CONTENT/);
     assert.equal(b.observed.length, 1, 'reapproval does not bypass Pause');
     await b.command('resume');
@@ -1244,7 +1244,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     assert.ok(leaf);
     await b.runtime.fork(leaf.id); assert.notEqual(b.id(), bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    assert.match(b.notifications.join('\n'), /Contact approval ends on reload unless you explicitly chose Remember/);
+    assert.match(b.notifications.join('\n'), /One approval covers both directions of an exact session pair/);
     assert.equal(data(await a.tool('comms_inspect', { message: held.data.message.id })).ok, true);
   } finally {
     await b?.close(); await a?.close();
