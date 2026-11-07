@@ -11,7 +11,7 @@ import { connect } from './transport/start.ts';
 import { IntercomClient } from './transport/broker/client.ts';
 import type { SessionInfo, ContactApproval, Message as WireMessage } from './transport/types.ts';
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
-import { approvalPrompt, contactDecisionTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CHOICES, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
+import { approvalPrompt, contactDecisionTitle, explicitApprovalTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CHOICES, CONTACT_GRANT_CHOICES, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
 import { getAgentDirPath, getBrokerConnectTarget } from './transport/broker/paths.ts';
 import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
@@ -492,13 +492,12 @@ export default function comms(pi: ExtensionAPI) {
           const peer = available.find(p => p.id === selected);
           if (!peer || selected === current.self) throw new Error('TARGET_UNAVAILABLE');
           const collaboration = await commandCtx.ui.input('What work is this colleague approved for?'); if (!collaboration?.trim()) return;
-          const prompt = approvalPrompt(selected, peer.name, collaboration.trim(), '', 'send');
-          const choice = await commandCtx.ui.select(contactDecisionTitle(prompt.title, prompt.message), CONTACT_CHOICES, { signal });
-          if (signal.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
-          if (choice !== CONTACT_SESSION && choice !== CONTACT_REMEMBER) {
-            current.revokeFromOwner(selected); declined.add(selected); status();
-            return;
-          }
+          // /comms approve only grants or edits consent. Unlike a first-contact
+          // No, Cancel/Esc here never revokes an existing peer or ends its asks.
+          const choice = await commandCtx.ui.select(
+            explicitApprovalTitle(selected, peer.name, collaboration.trim()), CONTACT_GRANT_CHOICES, { signal });
+          if (signal.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
+          if (choice !== CONTACT_SESSION && choice !== CONTACT_REMEMBER) return;
           const state = current.approveFromOwner({ id: selected, name: peer.name, context: collaboration.trim() }, choice === CONTACT_REMEMBER);
           declined.delete(selected);
           commandCtx.ui.notify(choice === CONTACT_REMEMBER
