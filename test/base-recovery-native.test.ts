@@ -371,7 +371,7 @@ test('F11 native: owner-remembered first contact resumes without a second approv
     assert.equal(first.ok, true, JSON.stringify(first));
     assert.equal(a.dialogs.length, 1, 'one owner decision screen including the Remember option');
     assert.ok(a.consentChoices[0].some(choice => /Allow & remember/.test(choice)));
-    assert.ok(a.notifications.some(s => /Remembered for this exact saved session pair/.test(s)));
+    assert.ok(a.notifications.some(s => /allowed and remembered for this pair/.test(s)));
     await a.command('status');
     assert.match(a.notifications.at(-1)!, /remembered until revoked/, 'human status shows the saved choice');
     await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
@@ -401,23 +401,29 @@ test('F11 native: owner-remembered first contact resumes without a second approv
   } finally { await a.close(); await b.close(); }
 });
 
-test('F11 native: transported consent does not persist for receiver owner on restart', async () => {
-  const a = await participant('f11-provenance-lead'); let b = await participant('f11-provenance-reviewer');
+test('F11 native: one remembered A-B pair lets B send first after both original sessions restart', async () => {
+  let a = await participant('f11-bilateral-lead'), b = await participant('f11-bilateral-reviewer');
   try {
-    await a.runtime.session.prompt('Saved lead'); await b.runtime.session.prompt('Saved receiver');
+    await a.runtime.session.prompt('Saved lead'); await b.runtime.session.prompt('Saved reviewer');
     a.remember(true); a.confirm(true);
-    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Owner provenance', text: 'F11_A_REMEMBERS_B' });
-    assert.equal(sent.ok, true);
-    await waitFor(() => b.observed.some(messages => text(messages).includes('F11_A_REMEMBERS_B')) && b.runtime.session.isIdle);
-    assert.equal(b.dialogs.length, 0, 'fresh sender assertion continues the normal receiver path');
-    const file = b.file()!;
-    await b.close(); b = await participant('f11-provenance-reviewer', SessionManager.open(file));
-    const known = await b.tool('comms_peers', { view: 'known' });
-    assert.equal(known.data.items.some((p: any) => p.id === a.id()), false, 'A owner choice did not become B remembered approval');
-    b.confirm(false);
-    const attempt = await b.tool('comms_message', { to: a.id(), subject: 'B must approve', text: 'F11_PROVENANCE_CHECK' });
-    assert.equal(attempt.error.code, 'CONTACT_NOT_APPROVED');
-    assert.equal(b.dialogs.length, 1, 'B receives its own contact decision, never inherits A choice');
+    const initial = await a.tool('comms_message', { to: b.id(), subject: 'Remember bilateral pair', text: 'F11_SHARED_PAIR' });
+    assert.equal(initial.ok, true, JSON.stringify(initial));
+    await waitFor(async () => (await b.tool('comms_inspect', { message: initial.data.message.id })).ok === true);
+
+    const aFile = a.file()!, bFile = b.file()!;
+    const aId = a.id(), bId = b.id();
+    await a.close(); await b.close();
+    a = await participant('f11-bilateral-lead', SessionManager.open(aFile));
+    b = await participant('f11-bilateral-reviewer', SessionManager.open(bFile));
+    assert.equal(a.id(), aId); assert.equal(b.id(), bId);
+    a.confirm(false); b.confirm(false);
+    const reverse = await b.tool('comms_message', { to: a.id(), subject: 'B first after restart', text: 'F11_B_FIRST' });
+    assert.equal(reverse.ok, true, JSON.stringify(reverse));
+    assert.equal(b.dialogs.length, 0, 'the one remembered pair authorizes B first without another dialog');
+    await waitFor(async () => (await a.tool('comms_inspect', { message: reverse.data.message.id })).ok === true);
+    const forward = await a.tool('comms_message', { to: b.id(), subject: 'A second', text: 'F11_A_SECOND' });
+    assert.equal(forward.ok, true, JSON.stringify(forward));
+    assert.equal(a.dialogs.length, 0, 'A also reuses the same pair consent');
   } finally { await b.close(); await a.close(); }
 });
 
