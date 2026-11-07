@@ -49,6 +49,7 @@ export default function comms(pi: ExtensionAPI) {
   let nextReconnect = 0;
   let reconnectDelay = 1000;
   const declined = new Set<string>();
+  const localPairDecisions = new Set<string>();
   const peerNames = new Map<string, string>();
   const prompted = new Set<string>();
   let dialogTail: Promise<unknown> = Promise.resolve();
@@ -107,7 +108,7 @@ export default function comms(pi: ExtensionAPI) {
       // The broker commits one unordered A-B decision before either side
       // claims approval. A peer message can never create a stored grant.
       await ensureConnection();
-      const state = await client!.decidePair(id, mode, mode === 'revoked' ? '' : work.trim().slice(0, 300));
+      const state = await submitPairDecision(id, mode, mode === 'revoked' ? '' : work.trim().slice(0, 300));
       current.syncPairStatus(state, label);
       if (mode === 'revoked') {
         declined.add(id);
@@ -117,6 +118,12 @@ export default function comms(pi: ExtensionAPI) {
       declined.delete(id);
       context.ui.notify(`Contact with ${label} allowed${mode === 'remembered' ? ' and remembered for this pair' : ' for this session'}.`, 'info');
     }, signal ? AbortSignal.any([signal, stop.signal]) : stop.signal);
+  }
+  async function submitPairDecision(peer: string, mode: 'session' | 'remembered' | 'revoked', work: string) {
+    await ensureConnection();
+    localPairDecisions.add(peer);
+    try { return await client!.decidePair(peer, mode, work); }
+    finally { localPairDecisions.delete(peer); }
   }
   function cancelContact(id: string) { contactStops.get(id)?.abort(); contactStops.set(id, new AbortController()); }
   async function withDialog<T>(work: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -238,7 +245,7 @@ export default function comms(pi: ExtensionAPI) {
         catch (error) { context.ui.notify(`Pair contact state could not be applied: ${String(error)}`, 'warning'); return; }
         if (state.mode === 'revoked' || (wasApproved && state.mode === 'none')) {
           endAsks('revoked', state.peer);
-          cancelContact(state.peer);
+          if (!localPairDecisions.has(state.peer)) cancelContact(state.peer);
           declined.add(state.peer);
           prompted.add(state.peer);
         }
@@ -320,7 +327,7 @@ export default function comms(pi: ExtensionAPI) {
     if (timer) clearInterval(timer); timer = undefined;
     const old = client; client = undefined; runtime = undefined; records = undefined; asks = undefined; ctx = undefined; connecting = undefined;
     active = false; wakeReserved = false; approvalDialog = false; lastPresenceSentAt = 0;
-    askStops.clear(); contactStops.clear(); declined.clear(); prompted.clear(); peerNames.clear(); dialogTail = Promise.resolve();
+    askStops.clear(); contactStops.clear(); declined.clear(); localPairDecisions.clear(); prompted.clear(); peerNames.clear(); dialogTail = Promise.resolve();
     lastWidget = null; lastStatus = undefined; connectionError = undefined; nextReconnect = 0; reconnectDelay = 1000;
     await old?.disconnect();
   }
@@ -501,7 +508,7 @@ export default function comms(pi: ExtensionAPI) {
             if (await commandCtx.ui.confirm('End this contact?', 'Stops both sessions from sending new messages to each other. Past messages remain readable.', { signal })) {
               if (signal.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
               await ensureConnection();
-              const pair = await client!.decidePair(selected, 'revoked', '');
+              const pair = await submitPairDecision(selected, 'revoked', '');
               current.syncPairStatus(pair, name(selected));
               endAsks('revoked', selected); cancelContact(selected);
               declined.add(selected); prompted.add(selected); status();
@@ -519,7 +526,7 @@ export default function comms(pi: ExtensionAPI) {
           if (signal.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
           if (choice !== CONTACT_SESSION && choice !== CONTACT_REMEMBER) return;
           await ensureConnection();
-          const pair = await client!.decidePair(selected, choice === CONTACT_REMEMBER ? 'remembered' : 'session', collaboration.trim().slice(0, 300));
+          const pair = await submitPairDecision(selected, choice === CONTACT_REMEMBER ? 'remembered' : 'session', collaboration.trim().slice(0, 300));
           current.syncPairStatus(pair, peer.name);
           declined.delete(selected);
           commandCtx.ui.notify(choice === CONTACT_REMEMBER ? 'Contact allowed and remembered for both sessions.' : 'Contact allowed for this session.', 'info');
