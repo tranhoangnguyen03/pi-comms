@@ -103,20 +103,19 @@ export default function comms(pi: ExtensionAPI) {
       const prompt = approvalPrompt(id, label, work, text, direction);
       const choice = await context.ui.select(contactDecisionTitle(prompt.title, prompt.message), CONTACT_CHOICES, { signal: abort });
       if (abort.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
-      if (choice !== CONTACT_SESSION && choice !== CONTACT_REMEMBER) {
-        // No/Esc is a local owner refusal. A genuine signal-abort above
-        // remains a cancellation, never a durable revocation.
-        current.revokeFromOwner(id);
+      const mode = choice === CONTACT_REMEMBER ? 'remembered' : choice === CONTACT_SESSION ? 'session' : 'revoked';
+      // The broker commits one unordered A-B decision before either side
+      // claims approval. A peer message can never create a stored grant.
+      await ensureConnection();
+      const state = await client!.decidePair(id, mode, mode === 'revoked' ? '' : work.trim().slice(0, 300));
+      current.syncPairStatus(state, label);
+      if (mode === 'revoked') {
         declined.add(id);
+        endAsks('revoked', id);
         throw new Error('CONTACT_NOT_APPROVED');
       }
-      const remember = choice === CONTACT_REMEMBER;
-      const state = current.approveFromOwner({ id, name: label, context: direction === 'receive' ? `User accepted incoming request: ${work} (peer-supplied title; user directives remain controlling)` : work }, remember);
       declined.delete(id);
-      const lifetime = remember
-        ? state === 'saved' ? 'Remembered for this exact saved session pair until revoked.' : 'Remember requested, but the record is live-only until Pi saves this session.'
-        : 'Approved for this runtime only.';
-      context.ui.notify(`Contact with ${label} approved (initial work context: ${work}). ${lifetime} ${direction === 'send' ? 'Continuing the send.' : 'Held messages will enter at the next eligible boundary.'}`, 'info');
+      context.ui.notify(`Contact with ${label} allowed${mode === 'remembered' ? ' and remembered for this pair' : ' for this session'}.`, 'info');
     }, signal ? AbortSignal.any([signal, stop.signal]) : stop.signal);
   }
   function cancelContact(id: string) { contactStops.get(id)?.abort(); contactStops.set(id, new AbortController()); }
