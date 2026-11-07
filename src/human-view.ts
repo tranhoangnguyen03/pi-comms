@@ -15,20 +15,27 @@ export const CONTACT_CANCEL = 'Cancel';
 export const CONTACT_CHOICES = [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE];
 export const CONTACT_GRANT_CHOICES = [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CANCEL];
 
+function contactLabel(colleague: string): string {
+  // An unnamed native session may be shown as its entire UUID. The approval
+  // prompt needs an identifiable compact label, not a technical address.
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(colleague)
+    ? `Session ${colleague.slice(0, 8)}` : colleague;
+}
+
 export function contactDecisionTitle(title: string, message: string): string {
   return `${title}\n\n${message}\n\nRemember keeps this contact across restarts. Either session can revoke it.`;
 }
 
 /** Explicit /comms approve edits a grant; it never sends or refuses. */
 export function explicitApprovalTitle(_id: string, colleague: string, work: string): string {
-  return `Allow contact with ${colleague}?\n\nTopic: ${work.trim().slice(0, 120)}\n\nAllows messages between these sessions, not approval of the work.\nThis command sends nothing. Cancel leaves existing approval unchanged.`;
+  return `Allow contact with ${contactLabel(colleague)}?\n\nTopic: ${work.trim().slice(0, 120)}\n\nAllows messages between these sessions, not approval of the work.\nThis command sends nothing. Cancel leaves existing approval unchanged.`;
 }
 
 export function approvalPrompt(_id: string, colleague: string, work: string, text: string, direction: 'send' | 'receive') {
   const preview = text.replace(/\s+/g, ' ').trim().slice(0, 140);
   const topic = work.replace(/\s+/g, ' ').trim().slice(0, 120);
   return {
-    title: direction === 'send' ? `Allow contact with ${colleague}?` : `Allow ${colleague} to contact you?`,
+    title: direction === 'send' ? `Allow contact with ${contactLabel(colleague)}?` : `Allow ${contactLabel(colleague)} to contact you?`,
     message: `Topic: ${topic}${preview ? `\n\n“${preview}${text.replace(/\s+/g, ' ').trim().length > 140 ? '…' : ''}”` : ''}\n\nAllows messages between these sessions, not approval of the work.`,
   };
 }
