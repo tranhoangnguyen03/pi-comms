@@ -397,6 +397,10 @@ class IntercomBroker {
           this.rememberDisconnectedSession(existing);
           this.sessions.delete(sessionKey);
           this.clearMessageReceiptRoutesForSession(sessionKey);
+          if (!this.pairApprovals.holdReason()) {
+            for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id))
+              this.publishPair(existing.scopeId, existing.info.id, peer);
+          }
           this.broadcast({ type: "session_left", sessionId: existing.info.id }, sessionKey, existing.scopeId);
           this.recomputeNamespaceOwners();
           this.scheduleShutdownCheck();
@@ -456,6 +460,21 @@ class IntercomBroker {
       console.log("No sessions connected, shutting down");
       this.shutdown();
     }, delayMs);
+  }
+
+  private pairEpoch(scope: string | undefined, id: string): string | undefined {
+    return this.sessions.get(scopedSessionKey(scope, id))?.info.endpointEpoch;
+  }
+
+  // A committed pair decision is pushed to both live endpoints. Local Pi
+  // records never override these broker-owned contact statuses.
+  private publishPair(scope: string | undefined, a: string, b: string): void {
+    for (const [id, peer] of [[a, b], [b, a]]) {
+      const session = this.sessions.get(scopedSessionKey(scope, id));
+      if (!session?.info.pairConsentV1) continue;
+      const status = this.pairApprovals.state(scope, id, peer, current => this.pairEpoch(scope, current));
+      writeMessage(session.socket, { type: "pair_update", status });
+    }
   }
 
   private handleMessage(
@@ -1061,6 +1080,53 @@ class IntercomBroker {
             session.lastPresenceBroadcastAt = now;
             this.broadcast({ type: "presence_update", session: session.info }, currentKey, session.scopeId);
           }
+        }
+        break;
+      }
+
+      case "pair_list": {
+        const session = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
+          throw Error("Invalid pair list request");
+        }
+        try {
+          const items = this.pairApprovals.list(session.scopeId, session.info.id,
+            id => this.pairEpoch(session.scopeId, id));
+          writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, items });
+        } catch (error) {
+          writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, error: String(error) });
+        }
+        break;
+      }
+
+      case "pair_decide": {
+        const session = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
+          throw Error("Invalid pair decision request");
+        }
+        const peerId = clientMessage.peerId;
+        const mode = clientMessage.mode;
+        const context = clientMessage.context;
+        if (typeof peerId !== "string" || !isSessionId(peerId) || peerId === session.info.id ||
+            (mode !== "session" && mode !== "remembered" && mode !== "revoked") ||
+            typeof context !== "string" || context.length > 300 || (mode !== "revoked" && !context.trim())) {
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PAIR_INVALID_DECISION" });
+          break;
+        }
+        if (mode !== "revoked") {
+          const peer = this.sessions.get(scopedSessionKey(session.scopeId, peerId));
+          if (!peer?.info.pairConsentV1) {
+            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PAIR_PEER_UNAVAILABLE_OR_UNSUPPORTED" });
+            break;
+          }
+        }
+        try {
+          const status = this.pairApprovals.decide(session.scopeId, session.info.id, peerId, mode, context,
+            id => this.pairEpoch(session.scopeId, id));
+          this.publishPair(session.scopeId, session.info.id, peerId);
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, status });
+        } catch (error) {
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: String(error) });
         }
         break;
       }
