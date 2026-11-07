@@ -1,6 +1,6 @@
 # Local organizer integration (M3-A, v1)
 
-An organizing **Pi extension** (team manager, room manager, consultant launcher) can use pi-comms' existing communication from its own running Pi session. No new agent-facing tool, roster, transport, approval store or broker protocol is installed.
+An organizing **Pi extension** (team manager, room manager, consultant launcher) can use pi-comms' existing communication from its own running Pi session. No new agent-facing tool, roster or independent API is installed. F11 uses the existing broker with a scoped pair-decision protocol.
 
 This is a **local in-process interface**, not an HTTP/MCP endpoint and not a way to message another Pi process by itself. The ordinary pi-comms broker still transports outgoing messages between existing Pi sessions.
 
@@ -71,14 +71,14 @@ if (report) {
 
 This code does not wait on a new completion mode: Pi's normal incoming path delivers questions and actionable reports automatically. Progress-only records remain inspectable. The organizing package still decides what the work means and whether to accept or reassign it.
 
-For first-contact handling, a caller with no native human approval UI receives `CONTACT_APPROVAL_REQUIRED` rather than gaining access. The owner chooses session-only approval (default), remembered exact saved-session approval, or refusal in one human screen. Either tool or the organizer API uses the same runtime authority; neither can supply a flag to remember contact. B↔C needs separate consent. Only a local owner-remembered choice survives the same saved session's restart; a sender's transported assertion never persists the recipient owner's grant. `/comms approve` only grants/edits local permission, with Cancel/Esc leaving prior consent unchanged; `/comms revoke` handles revocation.
+For first contact, a caller with no native human approval UI gets `CONTACT_APPROVAL_REQUIRED`. One short owner choice grants the **unordered A–B pair** for the current runtime, remembers that pair across restart, or declines. Either A or B can initiate first; a B–C pair needs its own choice. The broker holds the single shared decision and enforces it at send time; organizer tools cannot select or forge owner consent. `/comms approve` edits/grants only, with Cancel/Esc unchanged, while `/comms revoke` ends approval for both endpoints and affected asks.
 
 ## Trust and lifecycle
 
 - **Trust boundary:** This interface is available to extensions installed in the same Pi runtime. It is **not** a safe boundary against malicious local extensions. Load only extensions you trust. The channel's event data cannot grant contact approval, transfer owner identity or override native tool permissions.
 - **Human priority:** The same contact approvals, explicit revocations, Pause, editor drafts and ordinary session lifetime checks apply. A send may be rejected or have an uncertain result. Approval metadata is carried separately from peer-authored message fields.
 - **Privacy:** `inspect` uses the same agent-facing per-message visibility as the native tool: previously authorized saved history remains readable, but new or previously withheld content stays hidden until valid consent. A connected organizer has no privileged human-only inspection method.
-- **Session scope:** Organizer API handles belong to the current running Pi session; discover a new handle after reload, replacement, switch, restart or shutdown. F10 restores saved-session communication records, links and return handles before reconnect. F11 restores **only local owner-remembered** positive approval for that same saved session and exact peer; runtime-only approval and local `comms_ask` waiters do not survive. A fork/new session inherits no operational permission. No automatic resend or work replay occurs.
+- **Session scope:** Organizer API handles belong to the current running Pi session; discover a new handle after reload, replacement, switch, restart or shutdown. F10 restores saved-session communication records, links and return handles before reconnect. F11 restores **one shared remembered A–B approval from the broker**, valid for both directions and the exact original session IDs. Runtime-only grants expire when either participant disconnects; local `comms_ask` waiters do not survive. A fork/new session inherits no operational permission. No automatic resend or work replay occurs.
 - **No transitive permission:** A↔B consent does not grant B↔C or permit a replacement session to impersonate B. Exact IDs remain binding.
 - **No task system:** The caller owns rosters, work instructions, task completion and acceptance. A peer's `report.state` is the peer's claim, never authoritative acceptance.
 - **F09 (0.1.8+) uses v1:** Authored handovers supply an earlier exchange link through the same `send` method. Recipients are explicitly chosen; no transfer of sessions, identities, approvals or task acceptance occurs.
