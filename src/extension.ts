@@ -520,7 +520,7 @@ export default function comms(pi: ExtensionAPI) {
       catch (error) { commandCtx.ui.notify(String(error), 'info'); }
       return;
     }
-    commandCtx.ui.notify(`${HELP}\n${runtime.pendingCounts().waiting} waiting · ${runtime.pendingCounts().uncertain} uncertain · ${hold() ?? 'ready'}\n${runtime.known().map(p => `${name(p.id)} · ${p.id} · ${p.context}`).join('\n')}\n${RESET}\nRecord storage: ${records?.info().state ?? 'volatile'}${runtime.holdReason() ? ` · ${runtime.holdReason()}` : ''}\nBroker: ${JSON.stringify(getBrokerConnectTarget())}`, 'info');
+    commandCtx.ui.notify(`${HELP}\n${runtime.pendingCounts().waiting} waiting · ${runtime.pendingCounts().uncertain} uncertain · ${hold() ?? 'ready'}\n${runtime.known().map(p => `${name(p.id)} · ${p.id} · ${p.context} · ${runtime.isRemembered(p.id) ? records?.info().state === 'saved' ? 'remembered until revoked' : 'remember requested (live-only)' : 'this runtime only'}`).join('\n')}\n${RESET}\nRecord storage: ${records?.info().state ?? 'volatile'}${runtime.holdReason() ? ` · ${runtime.holdReason()}` : ''}\nBroker: ${JSON.stringify(getBrokerConnectTarget())}`, 'info');
   } });
   const result = (data: unknown, error?: { code: string; message: string; nextAction: string }) => {
     const body = { ok: !error, ...(error ? { error, ...(data ? { data } : {}) } : { data }), observedAt: new Date().toISOString() };
