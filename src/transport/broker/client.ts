@@ -679,6 +679,36 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
+  private requestPair<T>(
+    command: (requestId: string) => ClientMessage,
+    pending: Map<string, { resolve: (item: T) => void; reject: (error: Error) => void }>,
+  ): Promise<T> {
+    if (!this.supportsFeature(PAIR_APPROVAL_FEATURE)) return Promise.reject(Error("PAIR_UNSUPPORTED_BROKER"));
+    let socket: net.Socket;
+    try { socket = this.requireActiveSocket(); }
+    catch (error) { return Promise.reject(toError(error)); }
+    return new Promise((resolve, reject) => {
+      const id = randomUUID();
+      const timeout = setTimeout(() => {
+        if (pending.delete(id)) reject(Error("PAIR_DECISION_TIMEOUT"));
+      }, 5000);
+      pending.set(id, {
+        resolve: value => { clearTimeout(timeout); resolve(value); },
+        reject: error => { clearTimeout(timeout); reject(error); },
+      });
+      try { writeMessage(socket, command(id)); }
+      catch (error) { pending.delete(id); clearTimeout(timeout); reject(toError(error)); }
+    });
+  }
+
+  listPairs(): Promise<PairStatus[]> {
+    return this.requestPair(id => ({ type: "pair_list", requestId: id }), this.pendingPairLists);
+  }
+
+  decidePair(peerId: string, mode: PairDecision, context: string): Promise<PairStatus> {
+    return this.requestPair(id => ({ type: "pair_decide", requestId: id, peerId, mode, context }), this.pendingPairDecisions);
+  }
+
   async sendExact(to: string, epoch: string, options: SendOptions, contactApproval?: ContactApproval): Promise<SendResult> {
     if (contactApproval && !this.supportsFeature(CONTACT_APPROVAL_FEATURE)) throw new Error('UNSUPPORTED_CAPABILITY');
     let socket: net.Socket;
