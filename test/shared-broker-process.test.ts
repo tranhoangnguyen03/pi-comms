@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fork, type ChildProcess } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -53,6 +54,16 @@ if (process.env.PI_COMMS_CROSS_HOME_CHILD === "1") {
   } catch (error) {
     process.send?.({ type: "failure", error: String(error) });
     process.exitCode = 1;
+  }
+} else if (process.env.PI_COMMS_CROSS_HOME_CHILD === "probe") {
+  const { spawnBrokerIfNeeded } = await import("../src/transport/broker/spawn.ts");
+  const brokerPath = process.env.PI_COMMS_TEST_BROKER
+    ?? fileURLToPath(new URL("../dist/transport/broker/broker.js", import.meta.url));
+  try {
+    await spawnBrokerIfNeeded(pathToFileURL(brokerPath));
+    process.send?.({ type: "probe", unexpectedSuccess: true });
+  } catch (error) {
+    process.send?.({ type: "probe", error: String(error) });
   }
 } else {
   type Worker = {
@@ -126,8 +137,9 @@ if (process.env.PI_COMMS_CROSS_HOME_CHILD === "1") {
     try { pid = brokerPid(dir); } catch { return; }
     try { process.kill(pid, "SIGTERM"); } catch {}
     await eventually(() => {
-      try { process.kill(pid, 0); return false; } catch { return true; }
-    }, "broker process exit").catch(() => undefined);
+      try { return !readFileSync(join(dir, "broker.pid"), "utf8").trim(); }
+      catch { return true; }
+    }, "broker PID cleanup").catch(() => undefined);
   };
   const sendTo = async (sender: Worker, target: Worker, text: string, approval?: string) => {
     const live = (await sender.call("list")).find((p: any) => p.id === target.id);
@@ -174,7 +186,8 @@ if (process.env.PI_COMMS_CROSS_HOME_CHILD === "1") {
       assert.equal(a.incoming[1].text, "Finding: a write retry could duplicate side effects");
       assert.equal(c.incoming.length, 0);
       await b.stop(); clients.splice(clients.indexOf(b), 1);
-      assert.equal((await a.call("list")).some((p: any) => p.id === b.id), false);
+      await eventually(async () =>
+        !(await a.call("list")).some((p: any) => p.id === b.id), "old endpoint removal");
       const replacement = await worker(homes[1], shared, "Specialist", randomUUID(), "model-b"); clients.push(replacement);
       assert.notEqual(replacement.id, b.id);
       assert.equal((await a.call("list")).some((p: any) => p.id === b.id), false,
@@ -184,6 +197,59 @@ if (process.env.PI_COMMS_CROSS_HOME_CHILD === "1") {
       await stopBroker(shared); rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("incompatible live Unix socket is not unlinked even when no PID file exists", {
+    skip: process.platform === "win32" ? "This case uses a Unix socket" : undefined,
+  }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "pc-incompatible-broker-"));
+    const shared = join(root, "broker"), sock = join(shared, "broker.sock");
+    mkdirSync(shared, { recursive: true });
+    const { writeMessage } = await import("../src/transport/broker/framing.ts");
+    const server = net.createServer(socket => {
+      socket.on("error", () => undefined);
+      socket.on("data", () =>
+        writeMessage(socket, { type: "health_ok", requestId: "wrong-id", protocol: "pi-comms", version: 0 }));
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(sock, resolve);
+      });
+      const child = fork(fileURLToPath(import.meta.url), [], {
+        execArgv: ["--import", "tsx"],
+        env: { ...process.env, PI_COMMS_CROSS_HOME_CHILD: "probe",
+          PI_CODING_AGENT_DIR: join(root, "private"), PI_COMMS_BROKER_DIR: shared },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      });
+      try {
+        const result: any = await new Promise((resolve, reject) => {
+          child.once("exit", code => reject(new Error("Probe exited without result: " + code)));
+          child.on("message", (message: any) => {
+            if (message.type === "probe") resolve(message);
+          });
+        });
+        assert.match(result.error ?? "", /existing process is listening.*pi-comms broker endpoint/);
+        assert.match(result.error ?? "", /existing socket was not removed/);
+        assert.equal(brokerPidSafe(shared), null, "must not launch a new broker or seize its PID");
+        const socket = net.connect(sock);
+        await new Promise<void>((resolve, reject) => {
+          socket.once("connect", resolve);
+          socket.once("error", reject);
+        });
+        socket.destroy();
+        assert.equal(server.listening, true, "foreign live server must keep its socket");
+      } finally {
+        child.kill("SIGTERM");
+      }
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const brokerPidSafe = (dir: string): number | null => {
+    try { return brokerPid(dir); } catch { return null; }
+  };
 
   test("no override retains per-home broker isolation", async () => {
     const root = mkdtempSync(join(tmpdir(), "pc-default-procs-"));
