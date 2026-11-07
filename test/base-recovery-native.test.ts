@@ -27,7 +27,7 @@ async function participant(label: string, manager?: SessionManager) {
   const faux = fauxProvider({ provider: `f10-${label}-${randomUUID()}` });
   const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false });
   models.registerNativeProvider(faux.provider);
-  const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [];
+  const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [], consentChoices: string[][] = [];
   let draft = '', confirm = true, hold = false, rememberNext = false;
   let selectChoice: ((title: string, options: string[]) => string | undefined) | undefined;
   const releases: (() => void)[] = [];
@@ -50,14 +50,14 @@ async function participant(label: string, manager?: SessionManager) {
     confirm: async (title: string, message: string) => { dialogs.push(`${title}\n${message}`); return confirm; },
     input: async () => 'Review continuity', select: async (title: string, choices: string[]) => {
       if (choices.includes('Approve for this session only (default)')) {
-        dialogs.push(title);
+        dialogs.push(title); consentChoices.push([...choices]);
         return confirm ? (rememberNext ? choices[1] : choices[0]) : choices[2];
       }
       return selectChoice?.(title, choices) ?? choices[0];
     },
   } });
   await bind(runtime.session); runtime.setRebindSession(bind);
-  return { runtime, manager, observed, notifications, dialogs,
+  return { runtime, manager, observed, notifications, dialogs, consentChoices,
     id: () => runtime.session.sessionId,
     file: () => runtime.session.sessionManager.getSessionFile(),
     command: (value: string) => runtime.session.prompt(`/comms ${value}`),
@@ -369,7 +369,7 @@ test('F11 native: owner-remembered first contact resumes without a second approv
     const first = await a.tool('comms_message', { to: b.id(), subject: 'Remembered contact', text: 'F11_FIRST_REVIEW' });
     assert.equal(first.ok, true, JSON.stringify(first));
     assert.equal(a.dialogs.length, 1, 'one owner decision screen including the Remember option');
-    assert.match(a.dialogs[0], /Approve and remember this exact session pair/);
+    assert.ok(a.consentChoices[0].some(choice => /Approve and remember this exact session pair/.test(choice)));
     assert.ok(a.notifications.some(s => /Remembered for this exact saved session pair/.test(s)));
     await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
 
@@ -423,7 +423,7 @@ test('F11 native: explicit /comms approve can remember without sending or adding
     a.remember(true); a.confirm(true);
     await a.command(`approve ${b.id()}`);
     assert.equal(a.dialogs.length, 1, 'explicit setup uses one consent screen, not a second permission dialog');
-    assert.match(a.dialogs[0], /Approve and remember this exact session pair/);
+    assert.ok(a.consentChoices[0].some(choice => /Approve and remember this exact session pair/.test(choice)));
     assert.equal((await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0, 'approval does not send work');
     const file = a.file()!;
     await a.close(); a = await participant('f11-command-lead', SessionManager.open(file));
