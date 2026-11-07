@@ -868,33 +868,35 @@ test('pair revoke blocks automatic contact, explicit reapproval and Stop stay hu
   } finally { await headless?.close(); await b?.close(); await a?.close(); }
 });
 
-test('explicit outbound No survives transport assertion and same-session restart until owner reapproves', async () => {
+test('F11: B-side owner approval replaces an A-side refusal for one shared pair', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('direction-a'); b = await participant('direction-b');
     await a.runtime.session.prompt('Saved contact choice'); const initialTurns = a.observed.length;
     const denied = data(await a.tool('comms_message', { to: b.id(), subject: 'Outbound', text: 'NO_TO_CONTACT' }));
-    assert.equal(denied.error.code, 'CONTACT_NOT_APPROVED'); assert.equal(a.dialogs.length, 1);
+    assert.equal(denied.error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(a.dialogs.length, 1);
     assert.match(a.dialogs[0].message, /Allows messages between these sessions, not approval of the work/);
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
-    b.confirm(true);
+
+    // One fresh owner decision from B grants the SAME pair in both directions.
+    b.confirm(true); b.remember(true);
     const later = data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'NEW_INCOMING_AFTER_NO' }));
     assert.equal(later.ok, true);
-    await waitFor(async () => data(await a!.tool('comms_inspect', { queue: 'self' })).data.items.length === 1);
-    const held = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
-    assert.equal(held.evidence, 'withheld', 'transport assertion cannot override explicit owner No');
-    assert.equal(a.dialogs.length, 1, 'incoming contact does not prompt or reapprove after refusal');
-    assert.equal(a.observed.length, initialTurns);
+    await waitFor(() => a!.observed.some(messages => text(messages).includes('NEW_INCOMING_AFTER_NO')) && a!.runtime.session.isIdle);
+    assert.equal(a.dialogs.length, 1, 'no repeat A approval after owner explicitly approved the pair from B');
+    assert.ok(a.observed.length > initialTurns);
+    assert.equal(data(await a.tool('comms_inspect', { message: later.data.message.id })).data.evidence, 'available');
 
     const originalPath = a.runtime.session.sessionFile!;
     await a.runtime.switchSession(originalPath);
     const restored = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
-    assert.equal(restored.evidence, 'withheld', 'refusal survives same-session reload');
-    assert.equal(a.observed.length, initialTurns);
-    a.confirm(true); await a.command('requests');
-    await waitFor(() => a!.observed.length > initialTurns && a!.runtime.session.isIdle);
-    assert.match(text(a.observed.at(-1)!), /NEW_INCOMING_AFTER_NO/);
-    assert.equal(data(await a.tool('comms_inspect', { message: later.data.message.id })).data.evidence, 'available');
+    assert.equal(restored.evidence, 'available');
+    assert.ok(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === b!.id()),
+      'remembered pair is shared; A recovers it despite B making the choice');
+    const reply = data(await a.tool('comms_message', { to: b.id(), subject: 'A continues', text: 'BILATERAL_RESTART' }));
+    assert.equal(reply.ok, true);
+    assert.equal(a.dialogs.length, 1);
   } finally { await b?.close(); await a?.close(); }
 });
 
