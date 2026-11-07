@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.9] - 2026-11-04
+
+- M4-A / F10: restore communication messages, work/report/correction/handover links, return handles, known outcomes and historical agent readability for the **same saved Pi session**, using Pi's native extension-state entries instead of another transcript database.
+- Restore records, Pause and explicit negative contact decisions before broker registration; new outgoing/incoming communication still requires current approval. Old authorized history remains readable after approval expires or the peer is revoked; previously withheld content stays withheld.
+- Keep native Pi's real persistence limits visible: fresh/ephemeral sessions can be live-only; failed writes, malformed records and uncertain native admission are not silently reported as saved or replayed. Restore without reviving local `comms_ask` waits or automatically resending unknown operations.
+- Preserve existing four agent tools, human-first intake, corrections and M3 organizer API. F11 remembered positive approvals and F12 broker-crash-durable offline mail are **not** included.
+- Cover saved-session restart, Pause/revocation, read versus admission, withheld mail, forks/branches, corruption, storage failure and installed-package recovery paths. See the M4 contract for remaining host and acceptance limits.
+- Keep a busy-boundary batch **offered/uncertain** until native Pi history proves admission; a cleared steering queue cannot manufacture a posted receipt. Keep a completed nested-ask **handed-off** result out of the recovery waiting queue, without claiming a saved child transcript or model consumption.
+- Add human resolution of uncertain intake via existing `/comms requests`: owner-confirmed same-ID redelivery (possible duplicate work, current contact approval required) or dismissal, persisted when Pi confirms a saved session entry, otherwise marked live-only until the host saves them; confirmation and outcome text reflect this limit. Separate uncertain from normal waiting counts; no automatic resend or new agent tool.
+- Treat a completed **No/Esc** on both incoming and outgoing first-contact prompts as a persisted refusal; explicit owner reapproval is required to clear it. Stop/abort only cancels the attempt and never saves a refusal. Tests cover transport assertion and same-session restart.
+
 ## [0.1.8] - 2026-11-02
 
 - M3-B/F09: optional `handoverFrom` on a new `comms_message` or `comms_ask` request links a visible earlier exchange to an explicitly addressed successor.

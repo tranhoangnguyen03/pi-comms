@@ -865,17 +865,33 @@ test('contact cancellation, no UI, incoming hold/reconsideration and Stop never 
   } finally { await headless?.close(); await b?.close(); await a?.close(); }
 });
 
-test('cancelled outbound send stays unsent while a later requester-approved incoming contact is accepted', async () => {
+test('explicit outbound No survives transport assertion and same-session restart until owner reapproves', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('direction-a'); b = await participant('direction-b');
-    const denied = data(await a.tool('comms_message', { to: b.id(), subject: 'Outbound', text: 'cancel this send' }));
+    await a.runtime.session.prompt('Saved contact choice'); const initialTurns = a.observed.length;
+    const denied = data(await a.tool('comms_message', { to: b.id(), subject: 'Outbound', text: 'NO_TO_CONTACT' }));
     assert.equal(denied.error.code, 'CONTACT_NOT_APPROVED'); assert.equal(a.dialogs.length, 1);
+    assert.match(a.dialogs[0].message, /No\/Esc: refuse this exact contact/);
+    assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
     b.confirm(true);
-    assert.equal(data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'a different incoming request' })).ok, true);
-    await waitFor(() => a!.observed.length === 1 && a!.runtime.session.isIdle);
-    assert.equal(a.dialogs.length, 1, 'B’s independent human approval covers the incoming collaboration');
-    assert.match(text(a.observed[0]), /a different incoming request/);
+    const later = data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'NEW_INCOMING_AFTER_NO' }));
+    assert.equal(later.ok, true);
+    await waitFor(async () => data(await a!.tool('comms_inspect', { queue: 'self' })).data.items.length === 1);
+    const held = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
+    assert.equal(held.evidence, 'withheld', 'transport assertion cannot override explicit owner No');
+    assert.equal(a.dialogs.length, 1, 'incoming contact does not prompt or reapprove after refusal');
+    assert.equal(a.observed.length, initialTurns);
+
+    const originalPath = a.runtime.session.sessionFile!;
+    await a.runtime.switchSession(originalPath);
+    const restored = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
+    assert.equal(restored.evidence, 'withheld', 'refusal survives same-session reload');
+    assert.equal(a.observed.length, initialTurns);
+    a.confirm(true); await a.command('requests');
+    await waitFor(() => a!.observed.length > initialTurns && a!.runtime.session.isIdle);
+    assert.match(text(a.observed.at(-1)!), /NEW_INCOMING_AFTER_NO/);
+    assert.equal(data(await a.tool('comms_inspect', { message: later.data.message.id })).data.evidence, 'available');
   } finally { await b?.close(); await a?.close(); }
 });
 
@@ -1063,13 +1079,14 @@ test('revoked paused contact is recoverable through the same requests command ad
     const sent = data(await a.tool('comms_message', { to: b.id(), subject: 'Held review', text: 'REVOKED_QUEUE_CONTENT' })).data;
     await waitFor(async () => data(await b!.tool('comms_inspect', { queue: 'self' })).data.items.some((e: any) => e.message.id === sent.message.id));
     await b.command(`revoke ${a.id()}`);
-    assert.doesNotMatch(JSON.stringify(data(await b.tool('comms_inspect', { queue: 'self' }))), /REVOKED_QUEUE_CONTENT/);
+    assert.match(JSON.stringify(data(await b.tool('comms_inspect', { message: sent.message.id }))), /REVOKED_QUEUE_CONTENT/, 'revocation must not hide already-authorized history');
     assert.ok(b.widgetUpdates.some(widget => JSON.stringify(widget)?.includes('/comms requests')));
     const dialogsBefore = b.dialogs.length;
     await a.tool('comms_message', { to: b.id(), subject: 'Resend cannot reapprove', text: 'REVOKED_RESEND_CONTENT' });
     await new Promise(r => setTimeout(r, 200));
     for (const input of [{}, { peer: a.id() }, { queue: 'self' }, { exchange: sent.message.exchange }]) {
-      assert.doesNotMatch(JSON.stringify(data(await b.tool('comms_inspect', input))), /REVOKED_/);
+      const inspected = JSON.stringify(data(await b.tool('comms_inspect', input)));
+      assert.doesNotMatch(inspected, /REVOKED_RESEND_CONTENT/, 'new messages remain withheld after revocation');
     }
     assert.equal(b.dialogs.length, dialogsBefore, 'ordinary resend neither reapproves nor reopens receiver decision');
     await b.command('requests');
@@ -1101,7 +1118,7 @@ test('human inspection distinguishes queue, malformed ID and unavailable runtime
     await b.command('inspect 00000000-0000-0000-0000-000000000000');
     assert.equal(b.inspectedByHuman.length, views);
     assert.match(b.notifications.at(-1)!, /not available|unavailable/i);
-    assert.match(b.notifications.at(-1)!, /reload.*switch.*restart/i);
+    assert.match(b.notifications.at(-1)!, /saved session|memory-only/i);
     await b.command('inspect'); assert.equal(b.inspectedByHuman.length, views + 1);
     assert.match(b.inspectedByHuman.at(-1)!, /UNCHANGED_HELD_MESSAGE/);
     await b.command(`inspect ${sent.message.id}`); assert.equal(b.inspectedByHuman.length, views + 2);
@@ -1121,7 +1138,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
   try {
     a = await participant('coordinator'); b = await participant('reviewer');
     const aid = a.id(), bid = b.id();
-    assert.match(a.notifications.join('\n'), /memory-only/);
+    assert.match(a.notifications.join('\n'), /Saved Pi sessions retain communication records/);
     const all = data(await a.tool('comms_peers', {})).data.items;
     assert.ok(all.some((p: any) => p.id === bid && !p.approved));
     let denied = data(await a.tool('comms_message', { to: bid, subject: 'review', text: 'read only' }));
@@ -1196,7 +1213,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     const afterRestart = data(await a.tool('comms_message', { to: bid, subject: 'After broker restart', text: 'receiver rejoined without a user tool call' }));
     assert.equal(afterRestart.ok, true);
     await waitFor(() => b!.runtime.session.isIdle && b!.observed.some(m => text(m).includes('receiver rejoined')));
-    // Native runtime switch/new/resume retains saved identity, but clears volatile approval/linkage.
+    // Native switch/new/resume preserves saved history and handles, but not current contact approval.
     const originalPath = b.runtime.session.sessionFile!;
     await b.runtime.newSession(); const newid = b.id(); assert.notEqual(newid, bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
@@ -1204,7 +1221,8 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     assert.equal(offline.ok, false);
     await b.runtime.switchSession(originalPath); assert.equal(b.id(), bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    assert.equal(data(await b.tool('comms_message', { respondTo: handle, text: 'lost linkage' })).error.code, 'CONTEXT_LOST');
+    assert.equal(data(await b.tool('comms_inspect', { message: sent.data.message.id })).data.returnHandle, handle, 'reopened saved session retains original reply handle');
+    assert.equal(data(await b.tool('comms_message', { respondTo: handle, text: 'Not yet approved' })).error.code, 'CONTACT_NOT_APPROVED', 'history is not new send permission');
     b.confirm(true); await b.command(`approve ${aid}`);
     const refreshed = data(await a.tool('comms_message', { to: bid, subject: 'Same saved session', text: 'fresh live connection, same public address' }));
     assert.equal(refreshed.ok, true);
@@ -1213,7 +1231,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     assert.ok(leaf);
     await b.runtime.fork(leaf.id); assert.notEqual(b.id(), bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    assert.match(b.notifications.join('\n'), /reset on reload\/switch\/restart/);
+    assert.match(b.notifications.join('\n'), /Contact approval still ends on reload\/switch\/restart/);
     assert.equal(data(await a.tool('comms_inspect', { message: held.data.message.id })).ok, true);
   } finally {
     await b?.close(); await a?.close();
@@ -1242,9 +1260,18 @@ test('nested ask hands structured output to its caller without banning compositi
     const reply = nested.result.structuredContent.data.items[0].reply;
     const evidence = data(await a.tool('comms_inspect', { message: reply })).data;
     assert.equal(evidence.message.text, 'NESTED_REPLY');
-    assert.ok(evidence.facts.some((f: any) => f.kind === 'posted' && f.source === 'ask result handed to nested caller'));
+    assert.ok(evidence.facts.some((f: any) => f.kind === 'handed-off' && f.source === 'ask result handed to nested caller'));
     assert.ok(!evidence.facts.some((f: any) => f.kind === 'saved'), 'nested handoff is not a native saved child result');
     assert.equal(a.runtime.session.sessionManager.getEntries().filter(e => e.type === 'custom_message' && e.customType === 'comms_batch').length, 0);
+    const savedPath = a.runtime.session.sessionFile!;
+    await a.runtime.switchSession(savedPath);
+    const resumed = data(await a.tool('comms_inspect', { message: reply })).data;
+    assert.equal(resumed.intake, 'handed-off', 'nested result stays completed across native session reload');
+    assert.equal(resumed.intakeSource, 'ask result handed to nested caller');
+    assert.equal(resumed.admission, undefined, 'nested handoff is not a missing native admission');
+    const overview = data(await a.tool('comms_inspect', {})).data;
+    assert.equal(overview.waiting, 0);
+    assert.deepEqual(overview.uncertainAdmission, [], 'no phantom pending result after restart');
   } finally { await b.close(); await a.close(); }
 });
 

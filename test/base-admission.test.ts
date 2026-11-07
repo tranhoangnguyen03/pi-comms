@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Runtime } from '../src/runtime.ts';
 
-test('all agent inspection views withhold unapproved incoming payload and handles; human view retains evidence', () => {
+test('inspection preserves authorized history but withholds new revoked content and handles', () => {
   const self = randomUUID(), peer = randomUUID();
   const runtime = new Runtime(self, async () => ({ outcome: 'accepted' }));
   const envelope = { id: randomUUID(), exchange: randomUUID(), subject: 'PRIVATE_SUBJECT', text: 'PRIVATE_BODY', refs: [{ uri: 'file:///PRIVATE_URI', label: 'PRIVATE_LABEL' }], replyTo: null, corrects: null, createdAt: new Date().toISOString() };
@@ -22,5 +22,21 @@ test('all agent inspection views withhold unapproved incoming payload and handle
   runtime.revokeFromOwner(peer);
   runtime.approveFromTransport({ id: peer, name: 'Reviewer', context: 'attempted resend' });
   assert.equal(runtime.isApproved(peer), false, 'transport cannot undo explicit receiver revocation');
-  for (const input of [{ exchange: envelope.exchange }, {}, { peer }]) assert.doesNotMatch(JSON.stringify(runtime.inspect(input)), /PRIVATE_/);
+  for (const input of [{ message: envelope.id }, { exchange: envelope.exchange }, {}, { peer }]) {
+    assert.match(JSON.stringify(runtime.inspect(input)), /PRIVATE_BODY/, 'revocation does not erase already authorized history');
+  }
+  assert.deepEqual(runtime.eligible(), [], 'historical readability does not authorize a new model admission');
+
+  const fresh = { ...envelope, id: randomUUID(), exchange: randomUUID(), subject: 'NEW_WITHHELD_SUBJECT', text: 'NEW_WITHHELD_BODY', refs: [] };
+  runtime.receive(peer, fresh);
+  runtime.approveFromTransport({ id: peer, name: 'Reviewer', context: 'stale assertion' });
+  const freshHandle = runtime.entry(fresh.id)!.returnHandle!;
+  for (const input of [{ message: fresh.id }, { exchange: fresh.exchange }, { queue: 'self' as const }, {}, { peer }]) {
+    const hidden = JSON.stringify(runtime.inspect(input));
+    assert.doesNotMatch(hidden, /NEW_WITHHELD/);
+    assert.ok(!hidden.includes(freshHandle));
+    assert.match(JSON.stringify(runtime.inspect(input, 'human')), /NEW_WITHHELD_BODY/);
+  }
+  assert.equal(runtime.isApproved(peer), false);
+  assert.deepEqual(runtime.eligible(), []);
 });
