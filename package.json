@@ -36,7 +36,8 @@
     "LICENSE",
     "THIRD-PARTY-NOTICES.md",
     "docs/BASE-3.md",
-    "docs/INTEGRATION.md"
+    "docs/INTEGRATION.md",
+    "docs/PIG-CROSS-HOME-QUALIFICATION.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
