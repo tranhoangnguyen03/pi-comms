@@ -1,6 +1,6 @@
 # M4 — native-session recovery and a small durable mailbox
 
-**Status: design contract; F10 is merged, F11 is in implementation, F12 remains proposed.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
+**Status: design contract; F10 is merged, F11's unordered-pair rule is approved but not yet implemented, F12 remains proposed.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
 
 ## Decision
 
