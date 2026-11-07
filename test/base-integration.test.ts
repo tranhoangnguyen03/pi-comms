@@ -45,8 +45,8 @@ async function participant(label: string, interactive = true, extraTools: any[] 
   };
   const runtime = await createAgentSessionRuntime(factory, { cwd: dir, agentDir: root, sessionManager: manager });
   const bind = async (session: any) => session.bindExtensions(interactive ? { mode: 'tui', uiContext: { ...session.extensionRunner.getUIContext(), getEditorText: () => draft, notify: (message: string) => notifications.push(message), setWidget: (_key: string, content: unknown) => { widgetUpdates.push(content); }, confirm: async (title: string, message: string, opts?: { signal?: AbortSignal }) => { dialogs.push({ title, message }); return typeof confirm === 'function' ? confirm(opts) : confirm; }, input: async () => 'Base integration review', select: async (title: string, choices: string[], opts?: { signal?: AbortSignal }) => {
-      if (choices.includes('Approve for this session only (default)')) {
-        if (choices.includes('Cancel — leave contact approval unchanged') && selectGrant) {
+      if (choices.includes('Allow this session')) {
+        if (choices.includes('Cancel') && selectGrant) {
           selections.push({ title, choices }); return selectGrant(title, choices);
         }
         const [promptTitle, ...parts] = title.split('\n\n');
@@ -802,7 +802,7 @@ test('first-contact approval continues the actual model/tool review without prea
     assert.equal(b.observed.length, 0, 'nothing reaches recipient before sender human approval');
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
     assert.match(a.dialogs[0].message, /Read-only code review/);
-    assert.match(a.dialogs[0].message, /Yes: send this request now/);
+    assert.match(a.dialogs[0].message, /Allows messages between these sessions/);
     allowSend!(true); await work;
     await waitFor(() => a!.observed.some(m => text(m).includes('NATURAL_REVIEW_FINDINGS')) && a!.runtime.session.isIdle && b!.runtime.session.isIdle);
     assert.equal(a.dialogs.length, 1); assert.equal(b.dialogs.length, 0);
@@ -1445,8 +1445,8 @@ test('F11: /comms approve Cancel or Esc does not revoke a peer or end an outstan
       const beforeDialogs = a.dialogs.length;
       await a.command(`approve ${b.id()}`);
       assert.equal(a.dialogs.length, beforeDialogs, 'grant editing opens no send-approval/refusal dialog');
-      assert.ok(a.selections.some(selection => /This command does not send a message/.test(selection.title)));
-      assert.ok(a.selections.some(selection => /does not save the colleague's approval/.test(selection.title)));
+      assert.ok(a.selections.some(selection => /This command sends nothing/.test(selection.title)));
+      assert.ok(a.selections.some(selection => /Cancel leaves existing approval unchanged/.test(selection.title)));
       assert.ok(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()),
         'Cancel/Esc must leave existing approval unchanged');
       await new Promise(resolve => setTimeout(resolve, 30));
