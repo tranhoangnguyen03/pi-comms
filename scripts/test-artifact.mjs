@@ -13,6 +13,7 @@ try {
   assert.ok(pack.files.some(f => f.path === 'THIRD-PARTY-NOTICES.md'));
   assert.ok(pack.files.some(f => f.path === 'skills/pi-comms/SKILL.md'), 'on-demand collaboration skill must be included');
   assert.ok(pack.files.some(f => f.path === 'docs/INTEGRATION.md'), 'supported organizer integration contract must be packed');
+  assert.ok(pack.files.some(f => f.path === 'docs/PIG-CROSS-HOME-QUALIFICATION.md'), 'hands-on cross-home qualification recipe must be packed');
   assert.ok(!pack.files.some(f => /^(prototype|test|src|\.scratch|node_modules)\//.test(f.path)));
   const prefix = join(root, 'install'); mkdirSync(prefix);
   writeFileSync(join(prefix, 'package.json'), '{"private":true,"type":"module"}');
@@ -52,6 +53,6 @@ assert.match(readFileSync(matches[0].filePath, 'utf8'), /# Communicate with Pi c
 console.log('Installed package advertises pi-comms skill through Pi resource loader');`;
   const file = join(root, 'probe.mjs'); writeFileSync(file, probe);
   execFileSync(process.execPath, [file], { env: { ...process.env, PI_CODING_AGENT_DIR: join(root, 'agent') }, stdio: 'inherit' });
-  execFileSync(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=1', 'test/base-integration.test.ts', 'test/base-shutdown.test.ts', 'test/base-recovery-native.test.ts', 'test/base-recovery-records.test.ts'], { env: { ...process.env, PI_COMMS_TEST_EXTENSION: join(installed, 'dist/extension.js') }, stdio: 'inherit' });
+  execFileSync(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=1', 'test/base-integration.test.ts', 'test/base-shutdown.test.ts', 'test/base-recovery-native.test.ts', 'test/base-recovery-records.test.ts', 'test/shared-broker-process.test.ts'], { env: { ...process.env, PI_COMMS_TEST_EXTENSION: join(installed, 'dist/extension.js'), PI_COMMS_TEST_BROKER: join(installed, 'dist/transport/broker/broker.js') }, stdio: 'inherit' });
   console.log(`Verified ${pack.filename}: ${pack.size} packed bytes; ${pack.unpackedSize} unpacked bytes`);
 } finally { rmSync(root, { recursive: true, force: true }); }

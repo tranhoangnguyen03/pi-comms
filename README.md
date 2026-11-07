@@ -6,6 +6,8 @@ Read the [product and development principles](https://github.com/tranhoangnguyen
 
 Communication between existing Pi sessions: user-approved contacts, exact native session addresses, replies across turns/tools, and human-first batches. It does not launch agents or own their work.
 
+**Independent Pi and PiG agent homes (0.2.0):** Set the same absolute `PI_COMMS_BROKER_DIR` in each participating process, while keeping each `PI_CODING_AGENT_DIR` private. By default, the original agent-home-scoped broker is unchanged. Version 0.2.0 includes F10's same-saved-session recovery (0.1.9), but runtime-only positive approvals still reset; see the [cross-home acceptance recipe](docs/PIG-CROSS-HOME-QUALIFICATION.md). No live PiG model/approval result is claimed by automated broker tests.
+
 User-approved communication for Pi. Install the published package with `pi install npm:pi-comms`. Release availability is shown on [npm](https://www.npmjs.com/package/pi-comms) and [GitHub Releases](https://github.com/tranhoangnguyen03/pi-comms/releases). Tested with Pi 1.4.0; CI verifies Node 22.19.0/24 on Linux and Node 24 on macOS. Other Pi versions are not claimed. [Base integration evidence and limits](docs/BASE-3.md). Historical [spike delivery](docs/GATE-C-DELIVERY.md) and [Gate A/B report](docs/SPIKE-2-REPORT.md) remain unchanged.
 
 ## Common calls

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0] - 2026-11-07
+
+- Add the opt-in absolute `PI_COMMS_BROKER_DIR` to let independently installed Pi/PiG agents use one local broker while retaining private agent directories, credentials, chats and settings. With no override, the original per-agent broker remains unchanged.
+- Keep exact native session addressing and human first-contact permission unchanged. Do not add a name resolver, privilege grant, auto-launch, new protocol or separate permission store.
+- Refuse to unlink a live incompatible shared socket even if its PID file is missing; give an actionable stop/restart/update error instead.
+- Verify three separate OS processes with one broker, exact routing despite duplicate display names/different model labels, round-trip messaging, stale-ID isolation, default split brokers and incompatible socket rejection. Run the process tests against the installed package broker too.
+- Include a manual native Pi ↔ PiG ↔ PiG journey covering real consent, reports, first-reply waits, lifecycle and recovery. Actual interactive model acceptance remains an explicitly separate gate.
+- This release is stacked on unreleased **0.1.9 F10** recovery. Its native saved-session history and negative-contact/paused state recovery remain part of 0.2.0; positive approval and disconnected broker mail are still not durable.
+
 ## [0.1.9] - 2026-11-04
 
 - M4-A / F10: restore communication messages, work/report/correction/handover links, return handles, known outcomes and historical agent readability for the **same saved Pi session**, using Pi's native extension-state entries instead of another transcript database.

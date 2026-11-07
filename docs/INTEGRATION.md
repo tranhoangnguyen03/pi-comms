@@ -84,3 +84,36 @@ For first-contact handling, a caller with no native human confirmation UI receiv
 - **F09 (0.1.8+) uses v1:** Authored handovers supply an earlier exchange link through the same `send` method. Recipients are explicitly chosen; no transfer of sessions, identities, approvals or task acceptance occurs.
 
 The test suite includes a **separate organizing extension** loaded beside pi-comms in a real Pi 1.4.0 fixture. It requests the v1 interface, asks for first-contact consent on its first send, reuses approval on later sends, and reads a request-linked work report through both the integration and native inspection paths. That establishes the in-process contract; it is not a claim that another production organizing package has adopted the API.
+
+## Independently installed agents sharing one broker (0.2.0+)
+
+An independent PiG/Pi application can keep its private credentials, settings and
+sessions in its own agent directory while joining the same-user local pi-comms
+broker as other installed agents. Set **`PI_COMMS_BROKER_DIR`** to the same
+absolute private directory in each participating launch environment. For example:
+
+```sh
+export PI_CODING_AGENT_DIR="$HOME/.pig-agent/reviewer/.pi"
+export PI_COMMS_BROKER_DIR="$HOME/.pig-agent/shared-comms"
+```
+
+Another agent uses its **own** `PI_CODING_AGENT_DIR` but the **same**
+`PI_COMMS_BROKER_DIR`. When the override is absent, the broker stays in
+`<agent-dir>/comms` as before. This option chooses **transport location only**.
+It does not share agent credentials, conversations, settings or memory.
+Normal exact-session identities, contact approval, Pause and revocation still apply.
+Use this only among processes belonging to the same trusted OS user; the
+broker is not a remote or cross-user trust boundary.
+
+The override does not launch agents or grant consent. Every agent must be
+running, or an external controller must start/resume its **exact saved
+session** to become reachable. F10 (0.1.9) restores same-saved-session
+communication records, historical readability, negative decisions and Pause
+before reconnect. It does **not** restore positive contact approval or a
+pending local `comms_ask` waiter. Fresh sessions have distinct native IDs;
+unsaved/ephemeral history may be volatile. F12 durable broker-offline mail
+remains pending. Never retarget stale IDs to same-named new sessions.
+
+Use [the exact-pin Pi ↔ PiG ↔ PiG manual recipe](PIG-CROSS-HOME-QUALIFICATION.md).
+Path, broker and simulated native tests are not substitutes for real owner
+approval and model dialogue.

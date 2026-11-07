@@ -140,20 +140,40 @@ export async function spawnBrokerIfNeeded(brokerURL: URL): Promise<void> {
   }
 }
 
+/**
+ * A reachable socket is not necessarily a compatible pi-comms broker. Do not
+ * replace its path just because the health protocol differs: the other process
+ * may be running with a missing or stale PID file.
+ */
+type BrokerProbe = "healthy" | "occupied" | "unreachable";
+
 async function isBrokerRunning(): Promise<boolean> {
-  if (await checkSocketConnectable()) {
-    return true;
+  const result = await probeBroker();
+  if (result === "healthy") return true;
+  if (result === "occupied") {
+    throw new Error(
+      `An existing process is listening at the pi-comms broker endpoint in ${INTERCOM_DIR}, ` +
+      "but it does not answer the supported health protocol. Stop that process, " +
+      "then restart the participating Pi sessions with the same compatible pi-comms build. " +
+      "The existing socket was not removed.",
+    );
   }
 
   if (!existsSync(BROKER_PID)) return false;
-
   try {
-    const pid = parseInt(readFileSync(BROKER_PID, "utf-8").trim(), 10);
-    if (!Number.isFinite(pid)) return false;
+    const pid = Number.parseInt(readFileSync(BROKER_PID, "utf-8").trim(), 10);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
     process.kill(pid, 0);
-    return checkSocketConnectable();
-  } catch {
-    // Missing or unreadable PID state means there is no live broker to reuse.
+    throw new Error(
+      `pi-comms broker process ${pid} is still running but its endpoint in ${INTERCOM_DIR} ` +
+      "does not respond. Stop/restart this broker before connecting; refusing to replace it.",
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    if (error instanceof Error && error.message.includes("refusing to replace")) throw error;
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      throw new Error("Cannot replace a broker owned by another process/user; stop it first.");
+    }
     return false;
   }
 }
@@ -164,13 +184,13 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
     : net.connect({ host: target.host, port: target.port });
 }
 
-function checkSocketConnectable(): Promise<boolean> {
+function probeBroker(): Promise<BrokerProbe> {
   return new Promise((resolve) => {
     let target: BrokerConnectTarget;
     try {
       target = getBrokerConnectTarget();
     } catch {
-      resolve(false);
+      resolve("unreachable");
       return;
     }
 
@@ -178,19 +198,19 @@ function checkSocketConnectable(): Promise<boolean> {
     const requestId = randomUUID();
     const expectedStateId = typeof target === "string" ? undefined : target.stateId;
     let settled = false;
-    const finish = (isConnected: boolean) => {
-      if (settled) {
-        return;
-      }
+    let connected = false;
+    const finish = (state: BrokerProbe) => {
+      if (settled) return;
       settled = true;
       clearTimeout(timeout);
       socket.off("connect", onConnect);
       socket.off("error", onError);
       socket.off("data", reader);
       socket.destroy();
-      resolve(isConnected);
+      resolve(state);
     };
     const onConnect = () => {
+      connected = true;
       try {
         writeMessage(socket, {
           type: "health",
@@ -198,17 +218,17 @@ function checkSocketConnectable(): Promise<boolean> {
           ...(expectedStateId ? { stateId: expectedStateId } : {}),
         });
       } catch {
-        finish(false);
+        finish("occupied");
       }
     };
-    const onError = () => finish(false);
+    const onError = () => finish(connected ? "occupied" : "unreachable");
     const reader = createMessageReader((message) => {
-      finish(isBrokerHealthOkMessage(message, requestId));
-    }, () => finish(false));
+      finish(isBrokerHealthOkMessage(message, requestId) ? "healthy" : "occupied");
+    }, () => finish("occupied"));
     socket.on("connect", onConnect);
     socket.on("error", onError);
     socket.on("data", reader);
-    const timeout = setTimeout(() => finish(false), 1000);
+    const timeout = setTimeout(() => finish(connected ? "occupied" : "unreachable"), 1000);
   });
 }
 
@@ -278,7 +298,7 @@ function releaseSpawnLock(): void {
 async function waitForBroker(timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (await checkSocketConnectable()) {
+    if (await isBrokerRunning()) {
       return;
     }
     await sleep(100);
