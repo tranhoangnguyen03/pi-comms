@@ -3,7 +3,7 @@
 ## [0.1.10] - 2026-11-07
 
 - M4-B / F11: add an **optional owner-remembered contact approval** for one exact saved Pi session and peer, lasting across restarts until the owner revokes it. Runtime-only consent stays the default.
-- Use one human first-contact choice screen: approve this session, approve and remember, or refuse. The same choice is available in `/comms approve`. No extra routine dialog, model-facing permission option, broker protocol or permission database.
+- Use one human first-contact choice screen: approve this session, approve and remember, or refuse. The grant-only `/comms approve` command offers session-only, remember or Cancel/Esc; it does not send a message or revoke on cancellation. `/comms revoke` remains the sole explicit revocation command. No extra routine dialog, model-facing permission option, broker protocol or permission database.
 - Persist remembered owner consent using the existing versioned Pi contact entry, alongside historical visibility and revocation. Restore only local owner-remembered approvals; never upgrade old F10 grants, transport assertions or saved peer messages into remembered consent. Forks/new session IDs and other agent-directory scopes inherit no grant.
 - A completed No/revocation overrides remembered consent. Explicit session-only reapproval clears an earlier remembered grant. Fresh unsaved and `--no-session` sessions report live-only storage until the host saves their records. F12 durable offline delivery remains out of scope.
 - Cover real-session restart and exact-ID use, peer-side provenance, refusal/reapproval, branch/fork, fresh/ephemeral storage, and the unchanged agent/organizer interfaces with native Pi fixtures.
