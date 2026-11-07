@@ -1105,9 +1105,9 @@ test('human inspection distinguishes queue, malformed ID and unavailable runtime
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('inspect-id-sender'); b = await participant('inspect-id-receiver');
-    a.confirm(true); b.confirm(true); await b.command(`revoke ${a.id()}`); await b.command('pause');
+    a.confirm(true); b.confirm(true); await b.command('pause');
     const sent = data(await a.tool('comms_message', { to: b.id(), subject: 'Inspect safely', text: 'UNCHANGED_HELD_MESSAGE' })).data;
-    await waitFor(() => b!.notifications.some(n => /Contact request from/.test(n)));
+    await waitFor(async () => data(await b!.tool('comms_inspect', { message: sent.message.id })).ok === true);
     const before = data(await b.tool('comms_inspect', { queue: 'self' })).data.items.map((e: any) => e.message.id);
     const views = b.inspectedByHuman.length;
     await b.command('inspect not-a-message-id');
