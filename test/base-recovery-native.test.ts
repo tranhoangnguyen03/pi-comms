@@ -485,3 +485,54 @@ test('F11 native: editing an existing remembered grant can be cancelled or Esc w
     assert.equal(a.dialogs.length, 0, 'restart uses the preserved grant without another owner prompt');
   } finally { await a.close(); await b.close(); }
 });
+
+
+test('F11 native: revoking from B ends one shared pair for both sides and survives restart', async () => {
+  let a = await participant('f11-revoke-b-a'), b = await participant('f11-revoke-b-b');
+  try {
+    await a.runtime.session.prompt('Saved A'); await b.runtime.session.prompt('Saved B');
+    a.remember(true); a.confirm(true);
+    const first = await a.tool('comms_message', { to: b.id(), subject: 'Shared contact', text: 'PAIR_BEFORE_B_REVOKE' });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
+    assert.ok((await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === a.id()));
+
+    b.confirm(true); await b.command(`revoke ${a.id()}`);
+    await waitFor(async () => !(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()));
+    assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === a.id()), false);
+    const afile = a.file()!, bfile = b.file()!;
+    await a.close(); await b.close();
+    a = await participant('f11-revoke-b-a', SessionManager.open(afile));
+    b = await participant('f11-revoke-b-b', SessionManager.open(bfile));
+    assert.equal((await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()), false);
+    assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === a.id()), false);
+    a.confirm(false); b.confirm(false);
+    const blocked = await a.tool('comms_message', { to: b.id(), subject: 'Blocked after B revoked', text: 'MUST_NOT_CROSS_REVOKE' });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+    a.confirm(true);
+    const regrant = await a.tool('comms_message', { to: b.id(), subject: 'Fresh owner reapproval', text: 'PAIR_RESTORED' });
+    assert.equal(regrant.ok, true, JSON.stringify(regrant));
+    await waitFor(async () => (await b.tool('comms_inspect', { message: regrant.data.message.id })).ok === true);
+  } finally { await a.close(); await b.close(); }
+});
+
+test('F11 native: forking B never grants new A-B_new pair', async () => {
+  const a = await participant('f11-fork-a'), b = await participant('f11-fork-b');
+  let bNew: Awaited<ReturnType<typeof participant>> | undefined;
+  try {
+    await a.runtime.session.prompt('Saved A'); await b.runtime.session.prompt('Saved B');
+    a.remember(true); a.confirm(true);
+    const first = await a.tool('comms_message', { to: b.id(), subject: 'Old pair', text: 'OLD_PAIR_WORK' });
+    assert.equal(first.ok, true);
+    await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
+    const fork = SessionManager.forkFrom(b.file()!, join(root, 'f11-fork-b-new'), join(root, 'f11-fork-sessions'));
+    bNew = await participant('f11-fork-b-new', fork);
+    assert.notEqual(b.id(), bNew.id());
+    assert.equal((await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === bNew!.id()), false);
+    a.confirm(false); bNew.confirm(false);
+    assert.equal((await a.tool('comms_message', { to: bNew.id(), subject: 'No fork inheritance', text: 'UNAUTHORIZED_FORK' })).error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal((await bNew.tool('comms_message', { to: a.id(), subject: 'No reverse inheritance', text: 'UNAUTHORIZED_REVERSE_FORK' })).error.code, 'CONTACT_NOT_APPROVED');
+    const original = await a.tool('comms_message', { to: b.id(), subject: 'Original pair continues', text: 'STILL_OLD_PAIR' });
+    assert.equal(original.ok, true, JSON.stringify(original));
+  } finally { await bNew?.close(); await b.close(); await a.close(); }
+});
