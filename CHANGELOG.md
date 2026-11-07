@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.10] - 2026-11-07
+
+- M4-B / F11: add an **optional owner-remembered contact approval** for one exact saved Pi session and peer, lasting across restarts until the owner revokes it. Runtime-only consent stays the default.
+- Use one human first-contact choice screen: approve this session, approve and remember, or refuse. The same choice is available in `/comms approve`. No extra routine dialog, model-facing permission option, broker protocol or permission database.
+- Persist remembered owner consent using the existing versioned Pi contact entry, alongside historical visibility and revocation. Restore only local owner-remembered approvals; never upgrade old F10 grants, transport assertions or saved peer messages into remembered consent. Forks/new session IDs and other agent-directory scopes inherit no grant.
+- A completed No/revocation overrides remembered consent. Explicit session-only reapproval clears an earlier remembered grant. Fresh unsaved and `--no-session` sessions report live-only storage until the host saves their records. F12 durable offline delivery remains out of scope.
+- Cover real-session restart and exact-ID use, peer-side provenance, refusal/reapproval, branch/fork, fresh/ephemeral storage, and the unchanged agent/organizer interfaces with native Pi fixtures.
+
 ## [0.1.9] - 2026-11-04
 
 - M4-A / F10: restore communication messages, work/report/correction/handover links, return handles, known outcomes and historical agent readability for the **same saved Pi session**, using Pi's native extension-state entries instead of another transcript database.
