@@ -479,3 +479,109 @@ test('F10: explicit outgoing No is a durable peer refusal, distinct from a cance
   assert.equal(reapproved.runtime.isRevoked(b.id), false);
   assert.equal(reapproved.runtime.isApproved(b.id), false, 'F10 grants remain runtime-only after restart');
 });
+
+test('F11: owner-remembered exact-peer approval survives same saved session restart', async t => {
+  const f = fixture(t), b = peer(), stranger = peer();
+  const state = f.runtime.approveFromOwner(b, true);
+  assert.equal(state, 'saved');
+  assert.equal(f.runtime.isRemembered(b.id), true);
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isApproved(b.id), true);
+  assert.equal(reopened.runtime.isRemembered(b.id), true);
+  assert.equal(reopened.runtime.approval(b.id)?.context, b.context);
+  assert.equal(reopened.runtime.isApproved(stranger.id), false);
+  const sent = await reopened.runtime.send({ to: b.id, subject: 'Continue', text: 'Work after restart' });
+  assert.equal(sent.state, 'accepted');
+  assert.equal(reopened.sends(), 1, 'same exact peer sends without renewed contact confirmation');
+  await assert.rejects(reopened.runtime.send({ to: stranger.id, subject: 'No grant', text: 'no' }), /CONTACT_NOT_APPROVED/);
+});
+
+test('F11: earlier F10 owner grants and transport-derived approvals remain runtime-only', t => {
+  const f = fixture(t), b = peer(), c = peer();
+  f.runtime.approveFromOwner(b);
+  f.runtime.approveFromTransport(c);
+  assert.equal(f.runtime.isApproved(b.id), true);
+  assert.equal(f.runtime.isApproved(c.id), true);
+  assert.equal(f.runtime.isRemembered(b.id), false);
+  assert.equal(f.runtime.isRemembered(c.id), false);
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isApproved(b.id), false, 'F10 grants never silently upgrade');
+  assert.equal(reopened.runtime.isApproved(c.id), false, 'transport assertion cannot create remembered consent');
+});
+
+test('F11: revocation overrides a remembered grant; later session-only reapproval removes remembrance', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b, true);
+  f.runtime.revokeFromOwner(b.id);
+  const afterRevoke = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(afterRevoke.runtime.isRevoked(b.id), true);
+  assert.equal(afterRevoke.runtime.isApproved(b.id), false);
+  assert.equal(afterRevoke.runtime.isRemembered(b.id), false);
+  afterRevoke.runtime.approveFromTransport(b);
+  assert.equal(afterRevoke.runtime.isApproved(b.id), false);
+  const saved = afterRevoke.runtime.approveFromOwner(b, false);
+  assert.equal(saved, 'saved');
+  assert.equal(afterRevoke.runtime.isApproved(b.id), true);
+  assert.equal(afterRevoke.runtime.isRemembered(b.id), false);
+  const again = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(again.runtime.isRevoked(b.id), false);
+  assert.equal(again.runtime.isApproved(b.id), false, 'only current runtime received session-only grant');
+  assert.equal(again.runtime.isRemembered(b.id), false);
+});
+
+test('F11: a later owner session-only choice clears earlier remembered consent', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.approveFromOwner(b, true);
+  f.runtime.approveFromOwner(b, false);
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isApproved(b.id), false);
+  assert.equal(reopened.runtime.isRemembered(b.id), false);
+});
+
+test('F11: one owner remembering a pair does not grant the other owner persistent consent', t => {
+  const f = fixture(t);
+  const other = SessionManager.create(f.root, join(f.root, 'other-sessions'));
+  other.appendMessage({ role: 'user', content: 'Other owner session', timestamp: Date.now() });
+  const b = attach(other, f.root);
+  const fromA = { id: f.manager.getSessionId(), name: 'Lead', context: 'Review' };
+  const fromB = { id: other.getSessionId(), name: 'Reviewer', context: 'Review' };
+  f.runtime.approveFromOwner(fromB, true);
+  b.runtime.approveFromTransport(fromA);
+  assert.equal(b.runtime.isApproved(fromA.id), true, 'fresh valid transport can authorize this runtime');
+  const both = [attach(SessionManager.open(f.manager.getSessionFile()!), f.root),
+    attach(SessionManager.open(other.getSessionFile()!), f.root)];
+  assert.equal(both[0].runtime.isApproved(fromB.id), true, 'A remembers its own exact peer');
+  assert.equal(both[1].runtime.isApproved(fromA.id), false, 'B transport grant was not B owner remembrance');
+});
+
+test('F11: remembered permissions never transfer to a native fork or unrelated scope', t => {
+  const f = fixture(t), b = peer();
+  const firstLeaf = f.manager.getLeafId()!;
+  f.runtime.approveFromOwner(b, true);
+  f.manager.branch(firstLeaf);
+  f.manager.appendMessage({ role: 'user', content: 'Other branch', timestamp: Date.now() });
+  const same = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(same.runtime.isApproved(b.id), true, 'tree change does not undo owner's durable choice');
+  const fork = SessionManager.forkFrom(f.manager.getSessionFile()!, join(f.root, 'fork-f11'), join(f.root, 'fork-sessions'));
+  assert.notEqual(fork.getSessionId(), f.manager.getSessionId());
+  const child = attach(fork, f.root);
+  assert.equal(child.runtime.isApproved(b.id), false);
+  assert.equal(child.runtime.isRemembered(b.id), false);
+  const outside = attach(SessionManager.open(f.manager.getSessionFile()!), join(f.root, 'another-scope'));
+  assert.equal(outside.runtime.isApproved(b.id), false, 'scope-bounded records cannot grant another agent directory');
+});
+
+test('F11: a fresh remembered choice remains volatile until Pi saves a real turn', t => {
+  const f = fixture(t, false), b = peer();
+  assert.equal(f.runtime.approveFromOwner(b, true), 'volatile');
+  assert.equal(existsSync(f.manager.getSessionFile()!), false);
+  assert.equal(f.runtime.isApproved(b.id), true, 'local consent applies in the live runtime');
+  f.manager.appendMessage({ role: 'user', content: 'Actual first turn', timestamp: Date.now() });
+  const resumed = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(resumed.runtime.isApproved(b.id), true, 'native host flush made the remembered choice durable');
+  const ephemeral = attach(SessionManager.inMemory(f.root), f.root);
+  assert.equal(ephemeral.runtime.approveFromOwner(b, true), 'volatile');
+  assert.equal(ephemeral.runtime.isApproved(b.id), true);
+  assert.equal(ephemeral.log.info().state, 'volatile');
+});
+
