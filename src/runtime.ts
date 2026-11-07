@@ -152,20 +152,19 @@ export class Runtime {
     ids.forEach(message => { this.records.get(message)!.readable = true; });
   }
   // Passed only to the human command handler, never registered as an agent tool.
-  approveFromOwner(peer: Approval, remember = false): SaveState {
+  approveFromOwner(peer: Approval): SaveState {
     validate(Id, peer.id); this.assertOperational();
-    // Reapproval and newly readable history are one owner-issued record.
-    // Remember is opt-in per exact peer; no old positive grant is upgraded.
+    // F10's compatibility operation remains runtime-only. F11 pair approval
+    // can ONLY be committed by the registered broker socket, never this
+    // participant's native Pi session.
     const visible = [...this.records.values()].filter(entry => entry.message.from === peer.id && !entry.readable);
     const ids = visible.map(entry => entry.message.id);
     const state = this.write({ kind: 'contact', peer: peer.id, revoked: false,
       ...(ids.length ? { readableIds: ids } : {}),
-      ...(remember ? { remembered: { name: peer.name, context: peer.context } } : {}),
     }, ids);
     visible.forEach(entry => { entry.readable = true; });
     this.revoked.delete(peer.id);
-    if (remember) this.rememberedApprovals.set(peer.id, { ...peer });
-    else this.rememberedApprovals.delete(peer.id);
+    this.rememberedApprovals.delete(peer.id);
     this.approvals.set(peer.id, { ...peer });
     return state;
   }
