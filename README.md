@@ -106,7 +106,7 @@ A saved Pi session retains communication records, original request/reply/report/
 
 ## Remember contact approval (M4-B / F11 — 0.1.10)
 
-The **default is approval for this runtime only**. To avoid another prompt when the same saved Pi session restarts, select **Approve and remember this exact session pair** on the *existing* first-contact choice screen or in `/comms approve`. No extra routine dialog or agent tool is needed.
+The **default is approval for this runtime only**. To avoid another prompt when the same saved Pi session restarts, select **Approve and remember this exact session pair** on the existing first-contact choice screen or in the grant-only `/comms approve` command. No extra routine dialog or agent tool is needed. **Remember saves this session's approval, not the colleague's approval.**
 
 - This is **your local choice**: the exact peer ID, your native session ID and the existing comms scope. A sender's transported approval is valid only for the receiving runtime and **cannot create remembered permission for the receiver's owner**.
 - Only owner-selected remembered approval is restored. Previous F10 approvals are not silently upgraded. Revoking a contact immediately blocks further sends/intake and removes the remembered grant from the native record. A fresh owner session-only reapproval does **not** recreate remembered permission.
@@ -155,7 +155,7 @@ Unapproved content remains fully human-visible in `/comms inspect`; model inspec
 
 - `/comms` or `/comms status`: current approval, waiting count, recovery/storage state and broker location.
 - `/comms requests`: review held incoming contact requests **and uncertain native admission**. For an uncertain message, choose **Deliver again** (warns of possible duplicate model work; requires current consent; retains its ID) or **Dismiss** (no further pi-comms intake). In a saved Pi session, the choice is stored for restart once the write succeeds. Fresh and `--no-session` choices are live-only until Pi actually saves the session; the confirmation and result notice state which applies.
-- `/comms approve [exact-session-id]`: optional explicit contact setup/change through human selection/context/confirmation.
+- `/comms approve [exact-session-id]`: grant-only setup or lifetime change. Choose session-only or remembered approval; **Cancel/Esc leaves any existing grant and active asks unchanged**. This command does not send work or refuse contact; use `/comms revoke` for revocation.
 - `/comms revoke [exact-session-id]`: remove contact approval after confirmation; queued traffic remains held.
 - `/comms pause`: keep buffering arrivals without peer admission/wakes.
 - `/comms resume`: resume eligible intake.
