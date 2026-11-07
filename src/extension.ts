@@ -11,11 +11,11 @@ import { connect } from './transport/start.ts';
 import { IntercomClient } from './transport/broker/client.ts';
 import type { SessionInfo, ContactApproval, Message as WireMessage } from './transport/types.ts';
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
-import { approvalPrompt, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
+import { approvalPrompt, contactDecisionTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CHOICES, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
 import { getAgentDirPath, getBrokerConnectTarget } from './transport/broker/paths.ts';
 import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
-const RESET = 'Saved Pi sessions retain communication records, authorized history, return handles, Pause and revocation. Contact approval still ends on reload/switch/restart; old history does not renew it. Fresh or --no-session sessions remain live-only until Pi saves them. No offline mail or automatic resend.';
+const RESET = 'Saved Pi sessions retain communication records, authorized history, return handles, Pause and revocation. Contact approval ends on reload unless you explicitly chose Remember for this exact saved session pair. Fresh or --no-session sessions remain live-only until Pi saves them. No offline mail or automatic resend.';
 const HELP = 'Stop ends the current run; later peers may wake it. Pause holds peer admission/wakes, not current work or already-posted content. /comms approve | revoke | pause | resume | status | inspect | requests';
 const recovery: Record<string, string> = {
   CONTACT_NOT_APPROVED: 'Contact was not approved. Nothing was sent. Do not retry unless the user asks; /comms approve can change the decision.',
@@ -101,18 +101,22 @@ export default function comms(pi: ExtensionAPI) {
       if (direction === 'send' && declined.has(id) && !explicit) throw new Error('CONTACT_NOT_APPROVED');
       if (direction === 'receive') prompted.add(id);
       const prompt = approvalPrompt(id, label, work, text, direction);
-      const allowed = await context.ui.confirm(prompt.title, prompt.message, { signal: abort });
+      const choice = await context.ui.select(contactDecisionTitle(prompt.title, prompt.message), CONTACT_CHOICES, { signal: abort });
       if (abort.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
-      if (!allowed) {
-        // A completed human No is a durable refusal in either direction.
-        // Abort/Stop throws CONTACT_CANCELLED above and never creates a deny.
+      if (choice !== CONTACT_SESSION && choice !== CONTACT_REMEMBER) {
+        // No/Esc is a local owner refusal. A genuine signal-abort above
+        // remains a cancellation, never a durable revocation.
         current.revokeFromOwner(id);
         declined.add(id);
         throw new Error('CONTACT_NOT_APPROVED');
       }
+      const remember = choice === CONTACT_REMEMBER;
+      const state = current.approveFromOwner({ id, name: label, context: direction === 'receive' ? `User accepted incoming request: ${work} (peer-supplied title; user directives remain controlling)` : work }, remember);
       declined.delete(id);
-      current.approveFromOwner({ id, name: label, context: direction === 'receive' ? `User accepted incoming request: ${work} (peer-supplied title; user directives remain controlling)` : work });
-      context.ui.notify(`Contact with ${label} approved (initial work context: ${work}). ${direction === 'send' ? 'Continuing the send.' : 'Held messages will enter at the next eligible boundary.'}`, 'info');
+      const lifetime = remember
+        ? state === 'saved' ? 'Remembered for this exact saved session pair until revoked.' : 'Remember requested, but the record is live-only until Pi saves this session.'
+        : 'Approved for this runtime only.';
+      context.ui.notify(`Contact with ${label} approved (initial work context: ${work}). ${lifetime} ${direction === 'send' ? 'Continuing the send.' : 'Held messages will enter at the next eligible boundary.'}`, 'info');
     }, signal ? AbortSignal.any([signal, stop.signal]) : stop.signal);
   }
   function cancelContact(id: string) { contactStops.get(id)?.abort(); contactStops.set(id, new AbortController()); }
@@ -488,10 +492,18 @@ export default function comms(pi: ExtensionAPI) {
           const peer = available.find(p => p.id === selected);
           if (!peer || selected === current.self) throw new Error('TARGET_UNAVAILABLE');
           const collaboration = await commandCtx.ui.input('What work is this colleague approved for?'); if (!collaboration?.trim()) return;
-          if (await commandCtx.ui.confirm(`Work with ${peer.name}?`, `Work: ${collaboration}\n\nApproves this exact session as a contact for future comms_message and comms_ask exchanges, not just this work. Either side may revoke; runtime reset ends approval.\nDoes not send a message or change your directions/tool permissions.\n\nSession: ${selected}\nApproval lasts until reload/restart.`, { signal })) {
-            if (signal.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
-            current.approveFromOwner({ id: selected, name: peer.name, context: collaboration.trim() }); declined.delete(selected);
+          const prompt = approvalPrompt(selected, peer.name, collaboration.trim(), '', 'send');
+          const choice = await commandCtx.ui.select(contactDecisionTitle(prompt.title, prompt.message), CONTACT_CHOICES, { signal });
+          if (signal.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
+          if (choice !== CONTACT_SESSION && choice !== CONTACT_REMEMBER) {
+            current.revokeFromOwner(selected); declined.add(selected); status();
+            return;
           }
+          const state = current.approveFromOwner({ id: selected, name: peer.name, context: collaboration.trim() }, choice === CONTACT_REMEMBER);
+          declined.delete(selected);
+          commandCtx.ui.notify(choice === CONTACT_REMEMBER
+            ? state === 'saved' ? 'Exact-session contact remembered until revoked.' : 'Remember requested; approval is live-only until Pi saves this session.'
+            : 'Contact approved for this runtime only.', 'info');
         });
       } catch (error) { commandCtx.ui.notify(String(error), 'error'); status(); }
       return;
