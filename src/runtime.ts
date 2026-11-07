@@ -13,6 +13,9 @@ export const ASK_ADMISSION = 'native ask result context admission';
 export const NESTED_HANDOFF = 'ask result handed to nested caller';
 export class Runtime {
   private approvals = new Map<string, Approval>();
+  // Positive approvals survive restart only when the local owner chose Remember.
+  // Transport assertions never enter this map.
+  private rememberedApprovals = new Map<string, Approval>();
   private revoked = new Set<string>();
   private records = new Map<string, Entry>();
   private returns = new Map<string, Message>();
@@ -47,7 +50,7 @@ export class Runtime {
     }
   }
   // Recovery is a reduction of our own native entries, never a replay of sends.
-  // Approval grants intentionally do not survive this F10 slice.
+  // Only explicit owner-remembered positive grants survive. Older F10 grants do not.
   restore(events: readonly RecoveryEvent[], saved: SaveState = 'saved') {
     if (this.records.size || this.approvals.size) throw new Error('INVALID_INPUT: restore requires a fresh runtime');
     for (const raw of events) {
@@ -88,16 +91,22 @@ export class Runtime {
             break;
           case 'pause': this.pause = event.value; break;
           case 'contact': {
-            if (event.revoked) this.revoked.add(event.peer);
-            else {
-              // Apply a completed owner reapproval as a single saved decision.
-              // Validate all referenced messages before clearing a durable deny.
+            if (event.revoked) {
+              this.revoked.add(event.peer);
+              this.rememberedApprovals.delete(event.peer);
+            } else {
+              // A single owner decision clears the deny, authorizes old
+              // visibility, and may explicitly remember this exact peer.
+              // Transport consent and historical F10 grants do not qualify.
               const visible = (event.readableIds ?? []).map(id => this.required(id));
               if (visible.some(entry => entry.message.to !== this.self || entry.message.from !== event.peer)) {
                 throw new Error('Contact visibility belongs to another peer');
               }
               visible.forEach(entry => { entry.readable = true; });
               this.revoked.delete(event.peer);
+              if (event.remembered) {
+                this.rememberedApprovals.set(event.peer, { id: event.peer, ...event.remembered });
+              } else this.rememberedApprovals.delete(event.peer);
             }
             break;
           }
@@ -106,6 +115,9 @@ export class Runtime {
         this.holdRecovery(`Saved communication is incomplete: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    // At restart, only an explicit local remembered approval is revived.
+    // Recovered transport assertions and runtime-only owner grants do not revive.
+    this.approvals = new Map(this.rememberedApprovals);
     for (const entry of this.records.values()) {
       if (entry.message.to !== this.self) continue;
       // Earlier F10 drafts used 'posted' for a completed nested-caller
@@ -141,15 +153,22 @@ export class Runtime {
     ids.forEach(message => { this.records.get(message)!.readable = true; });
   }
   // Passed only to the human command handler, never registered as an agent tool.
-  approveFromOwner(peer: Approval) {
+  approveFromOwner(peer: Approval, remember = false): SaveState {
     validate(Id, peer.id); this.assertOperational();
-    // Reapproval and newly readable held history are one saved decision.
-    // Failure cannot clear a revocation without its matching visibility.
+    // Reapproval and newly readable history are one owner-issued record.
+    // Remember is opt-in per exact peer; no old positive grant is upgraded.
     const visible = [...this.records.values()].filter(entry => entry.message.from === peer.id && !entry.readable);
     const ids = visible.map(entry => entry.message.id);
-    this.write({ kind: 'contact', peer: peer.id, revoked: false, ...(ids.length ? { readableIds: ids } : {}) }, ids);
+    const state = this.write({ kind: 'contact', peer: peer.id, revoked: false,
+      ...(ids.length ? { readableIds: ids } : {}),
+      ...(remember ? { remembered: { name: peer.name, context: peer.context } } : {}),
+    }, ids);
     visible.forEach(entry => { entry.readable = true; });
-    this.revoked.delete(peer.id); this.approvals.set(peer.id, { ...peer });
+    this.revoked.delete(peer.id);
+    if (remember) this.rememberedApprovals.set(peer.id, { ...peer });
+    else this.rememberedApprovals.delete(peer.id);
+    this.approvals.set(peer.id, { ...peer });
+    return state;
   }
   // Only a fresh transport assertion reaches this path. It can authorize this
   // runtime, not a positive grant in the restored owner's next runtime.
@@ -158,10 +177,11 @@ export class Runtime {
     this.assertOperational(); this.allowHistory(peer.id); this.approvals.set(peer.id, { ...peer });
   }
   revokeFromOwner(id: string) {
-    validate(Id, id); this.revoked.add(id); this.approvals.delete(id);
+    validate(Id, id); this.revoked.add(id); this.approvals.delete(id); this.rememberedApprovals.delete(id);
     this.write({ kind: 'contact', peer: id, revoked: true });
   }
   isRevoked = (id: string) => this.revoked.has(id);
+  isRemembered = (id: string) => this.rememberedApprovals.has(id);
   approval(id: string) { const peer = this.approvals.get(id); return peer ? { ...peer } : undefined; }
   isApproved = (id: string) => this.approvals.has(id);
   known() { return [...this.approvals.values()].map(p => ({ ...p })); }
