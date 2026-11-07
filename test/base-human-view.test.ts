@@ -29,7 +29,7 @@ test('F11: approval prompt shows only who, topic, short preview and decision eff
     assert.ok(visible.length < 450, 'decision text must be readable without a wall of copy');
     assert.doesNotMatch(visible, /Session:|broker|return handle|native session|UUID|technical/);
     assert.doesNotMatch(visible, new RegExp(peer));
-    assert.doesNotMatch(visible, /long request /.test('') ? /never/ : /long request long request long request long request long request long request long request long request long request long request long request long request long request/);
+    assert.ok(!visible.includes('long request '.repeat(13)), 'preview is bounded and does not flood the prompt');
   }
 });
 
