@@ -33,6 +33,16 @@ test('F11: approval prompt shows only who, topic, short preview and decision eff
   }
 });
 
+test('F11: unnamed native session uses short human label rather than full UUID', () => {
+  const preview = approvalPrompt(peer, peer, 'Fix retry', 'Can you review this change?', 'receive');
+  assert.match(preview.title, new RegExp(`Session ${peer.slice(0, 8)}`));
+  assert.doesNotMatch(preview.title, new RegExp(peer));
+  assert.doesNotMatch(contactDecisionTitle(preview.title, preview.message), new RegExp(peer));
+  const edit = explicitApprovalTitle(peer, peer, 'Fix retry');
+  assert.match(edit, new RegExp(`Session ${peer.slice(0, 8)}`));
+  assert.doesNotMatch(edit, new RegExp(peer));
+});
+
 test('F11: first-contact choices are short and grant editing never claims to send', () => {
   assert.deepEqual(CONTACT_CHOICES, [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE]);
   assert.equal(CONTACT_SESSION, 'Allow this session');
