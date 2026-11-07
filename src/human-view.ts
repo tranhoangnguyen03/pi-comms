@@ -6,11 +6,21 @@ import type { Runtime } from './runtime.ts';
 type Inspection = ReturnType<Runtime['inspect']>;
 type Labels = { self: string; name: (id: string) => string; approved: (id: string) => boolean };
 
+export const CONTACT_SESSION = 'Approve for this session only (default)';
+export const CONTACT_REMEMBER = 'Approve and remember this exact session pair';
+export const CONTACT_REFUSE = 'No — refuse this exact contact';
+export const CONTACT_CHOICES = [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE];
+
+export function contactDecisionTitle(title: string, message: string): string {
+  // One human decision surface; no follow-up permission prompt.
+  return `${title}\n\n${message}\n\nChoose one option. Remembered approval is limited to this exact saved session and peer, until you revoke it. A fresh or unsaved session stays live-only until Pi saves it.`;
+}
+
 export function approvalPrompt(id: string, colleague: string, work: string, text: string, direction: 'send' | 'receive') {
   const preview = text.replace(/\s+/g, ' ');
   return {
     title: direction === 'send' ? `Work with ${colleague}?` : `${colleague} wants to work with you`,
-    message: `Work: ${work}\n\n${direction === 'send' ? 'Yes: send this request now.' : 'Yes: admit held messages when reception is ready.'}\n${direction === 'send' ? 'No/Esc: refuse this exact contact; nothing is sent. Only your later approval can reopen it.' : 'No/Esc: refuse this exact contact and keep messages held for you, not the agent. Only your later approval can reopen it.'}\nApproves this exact session as a contact for future requests, clarifications and replies via comms_message or comms_ask, in both directions. The work above is context, not a per-task limit. Either side may revoke; runtime reset ends approval.\n${direction === 'send' ? 'The receiver accepts this contact without another prompt; its Pause/revoke still apply.' : 'Only your explicit approval restores a refused or revoked contact.'}\nYour directions and tool permissions still apply.\n\n${direction === 'receive' ? 'Incoming preview (not yet shared with the agent)' : 'Request preview'}: ${preview.slice(0, 160)}${preview.length > 160 ? '…' : ''}\nSession: ${id}\nApproval lasts until reload/restart.`,
+    message: `Work: ${work}\n\n${direction === 'send' ? 'Yes: send this request now.' : 'Yes: admit held messages when reception is ready.'}\n${direction === 'send' ? 'No/Esc: refuse this exact contact; nothing is sent. Only your later approval can reopen it.' : 'No/Esc: refuse this exact contact and keep messages held for you, not the agent. Only your later approval can reopen it.'}\nApproves this exact session as a contact for future requests, clarifications and replies via comms_message or comms_ask, in both directions. The work above is context, not a per-task limit. Either side may revoke; runtime reset ends approval.\n${direction === 'send' ? 'The receiver accepts this contact without another prompt; its Pause/revoke still apply.' : 'Only your explicit approval restores a refused or revoked contact.'}\nYour directions and tool permissions still apply.\n\n${direction === 'receive' ? 'Incoming preview (not yet shared with the agent)' : 'Request preview'}: ${preview.slice(0, 160)}${preview.length > 160 ? '…' : ''}\nSession: ${id}\nSession-only approval ends on reload/restart. Remembered approval continues for this exact saved session pair until revoked.`,
   };
 }
 
