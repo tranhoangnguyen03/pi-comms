@@ -510,6 +510,7 @@ test('F11 native: revoking from B ends one shared pair for both sides and surviv
     const blocked = await a.tool('comms_message', { to: b.id(), subject: 'Blocked after B revoked', text: 'MUST_NOT_CROSS_REVOKE' });
     assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
     a.confirm(true);
+    await a.command(`approve ${b.id()}`); // Fresh explicit owner action after a completed revoke.
     const regrant = await a.tool('comms_message', { to: b.id(), subject: 'Fresh owner reapproval', text: 'PAIR_RESTORED' });
     assert.equal(regrant.ok, true, JSON.stringify(regrant));
     await waitFor(async () => (await b.tool('comms_inspect', { message: regrant.data.message.id })).ok === true);
