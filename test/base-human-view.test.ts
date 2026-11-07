@@ -17,45 +17,39 @@ function fixture(count = 1, body?: string) {
   return { runtime, messages, load: (cursor?: string) => runtime.inspect({ queue: 'self', ...(cursor ? { cursor } : {}) }, 'human') };
 }
 
-test('approval copy puts colleague, work and consequences before technical identity; preview is explicit', () => {
+test('F11: approval prompt shows only who, topic, short preview and decision effect', () => {
   for (const direction of ['send', 'receive'] as const) {
     const prompt = approvalPrompt(peer, 'Reviewer', 'Read-only review', 'long request '.repeat(100), direction);
+    const visible = contactDecisionTitle(prompt.title, prompt.message);
     assert.match(prompt.title, /Reviewer/);
-    assert.ok(prompt.message.indexOf('Work:') < prompt.message.indexOf('Yes:'));
-    assert.ok(prompt.message.indexOf('Yes:') < prompt.message.indexOf('Session:'));
-    assert.match(prompt.message, /No\/Esc:/); assert.match(prompt.message, /requests, clarifications and replies/);
-    assert.match(prompt.message, /exact session as a contact/);
-    assert.match(prompt.message, /both directions/);
-    assert.match(prompt.message, /not a per-task limit/);
-    assert.match(prompt.message, /Your directions and tool permissions still apply/);
-    assert.match(prompt.message, /Session-only approval ends on reload\/restart/);
-    assert.match(prompt.message, /Remembered approval continues for this exact saved session pair until revoked/);
-    assert.ok(prompt.message.includes(peer)); assert.ok(!prompt.message.includes('long request '.repeat(100)));
-    if (direction === 'send') assert.match(prompt.message, /send this request now/);
-    else assert.match(prompt.message, /held for you, not the agent/);
+    assert.match(prompt.message, /Topic: Read-only review/);
+    assert.match(prompt.message, /long request/);
+    assert.match(prompt.message, /Allows messages between these sessions, not approval of the work/);
+    assert.ok(prompt.message.length <= 310, 'prompt body must remain short even with long source text');
+    assert.ok(visible.length < 450, 'decision text must be readable without a wall of copy');
+    assert.doesNotMatch(visible, /Session:|broker|return handle|native session|UUID|technical/);
+    assert.doesNotMatch(visible, new RegExp(peer));
+    assert.doesNotMatch(visible, /long request /.test('') ? /never/ : /long request long request long request long request long request long request long request long request long request long request long request long request long request/);
   }
 });
 
-test('F11 contact choice is one human screen, with runtime-only as the default', () => {
+test('F11: first-contact choices are short and grant editing never claims to send', () => {
   assert.deepEqual(CONTACT_CHOICES, [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE]);
-  assert.match(CONTACT_SESSION, /default/);
-  assert.match(CONTACT_REMEMBER, /remember this exact session pair/);
+  assert.equal(CONTACT_SESSION, 'Allow this session');
+  assert.equal(CONTACT_REMEMBER, 'Allow & remember');
+  assert.equal(CONTACT_REFUSE, 'Decline');
+  assert.deepEqual(CONTACT_GRANT_CHOICES, [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CANCEL]);
+  assert.equal(CONTACT_CANCEL, 'Cancel');
   const p = approvalPrompt(peer, 'Reviewer', 'Review changes', 'Need a code review', 'send');
   const title = contactDecisionTitle(p.title, p.message);
-  assert.match(title, /Review changes/);
-  assert.match(title, /exact saved session and peer/);
-  assert.match(title, /until you revoke it/);
-  assert.match(title, /unsaved session stays live-only/);
-  assert.match(title, /does not save the colleague's approval/);
-  assert.deepEqual(CONTACT_GRANT_CHOICES, [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CANCEL]);
-  assert.doesNotMatch(CONTACT_GRANT_CHOICES.join(' '), /refuse this exact contact/);
+  assert.match(title, /Remember keeps this contact across restarts/);
+  assert.match(title, /Either session can revoke/);
   const explicit = explicitApprovalTitle(peer, 'Reviewer', 'Review changes');
-  assert.match(explicit, /Approve contact with Reviewer/);
-  assert.match(explicit, /This command does not send a message/);
-  assert.match(explicit, /Cancel or Esc leaves any existing contact approval unchanged/);
-  assert.match(explicit, /use \/comms revoke/);
+  assert.match(explicit, /Allow contact with Reviewer/);
+  assert.match(explicit, /This command sends nothing/);
+  assert.match(explicit, /Cancel leaves existing approval unchanged/);
   assert.doesNotMatch(explicit, /send this request now/);
-  assert.match(explicit, /does not save the colleague's approval/);
+  assert.ok(explicit.length < 320);
 });
 
 test('uncertain admission confirmation distinguishes saved, volatile and blocked Pi session records', () => {
