@@ -821,40 +821,30 @@ test('first-contact approval continues the actual model/tool review without prea
   } finally { await b?.close(); await a?.close(); }
 });
 
-test('contact cancellation, no UI, incoming hold/reconsideration and Stop never self-approve or loop', async () => {
+test('pair revoke blocks automatic contact, explicit reapproval and Stop stay human-controlled', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined, headless: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('approval-sender'); b = await participant('approval-receiver');
     b.confirm(true); await b.command(`revoke ${a.id()}`); b.confirm(false);
     const receiverDialogs = b.dialogs.length;
     const input = { to: b.id(), subject: 'Read-only review', text: 'HELD_APPROVAL_CONTENT' };
-    // Cancelling/refusing does not send, and agent retries do not re-prompt the person.
+    // Shared revoke denies both directions; model retries cannot undo it.
     for (let i = 0; i < 2; i++) assert.equal(data(await a.tool('comms_message', input)).error.code, 'CONTACT_NOT_APPROVED');
-    assert.equal(a.dialogs.length, 1); assert.equal(b.observed.length, 0);
+    assert.equal(a.dialogs.length, 0, 'a remote revoke is not an invitation for an automatic agent prompt');
+    assert.equal(b.observed.length, 0);
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
     assert.equal(data(await a.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    // Extension/model continuation is not a new human instruction and cannot re-prompt.
-    a.responses([call('comms_message', input), fauxAssistantMessage('Still not approved.')]);
-    await a.runtime.session.sendUserMessage('Try again');
-    await a.runtime.session.waitForIdle(); assert.equal(a.dialogs.length, 1);
-    // A real new user instruction can reconsider without a management command.
-    a.confirm(true);
-    a.responses([call('comms_message', input), fauxAssistantMessage('Sent after user approval.')]);
-    await a.runtime.session.prompt('Go ahead with the review; I will allow the contact.');
-    assert.equal(a.dialogs.length, 2);
-    const sent = data(await a.tool('comms_inspect', { outbox: 'self' })).data.items[0];
-    await waitFor(async () => data(await b!.tool('comms_inspect', { queue: 'self' })).data.items.length === 1);
-    await new Promise(r => setTimeout(r, 200));
-    assert.equal(b.observed.length, 0);
-    assert.doesNotMatch(JSON.stringify(data(await b.tool('comms_inspect', { queue: 'self' }))), /HELD_APPROVAL_CONTENT/);
-    await a.tool('comms_message', { ...input, text: 'SECOND_HELD_CONTENT' });
-    await new Promise(r => setTimeout(r, 200)); assert.equal(b.dialogs.length, receiverDialogs, 'later arrivals cannot undo revocation or repeat dialogs');
-    b.confirm(true); await b.command('requests');
-    await waitFor(() => b!.observed.some(m => text(m).includes('HELD_APPROVAL_CONTENT')) && b!.runtime.session.isIdle);
-    assert.match(text(b.observed[0]), /SECOND_HELD_CONTENT/);
-    assert.match(data(await b.tool('comms_peers', {})).data.items[0].context, /peer-supplied title; user directives remain controlling/);
+    // A fresh human approval at A restores the one A-B pair for BOTH directions.
+    a.confirm(true); await a.command(`approve ${b.id()}`);
+    const sent = data(await a.tool('comms_message', input)).data;
+    assert.ok(sent?.message?.id);
+    await waitFor(() => b!.observed.some(messages => text(messages).includes('HELD_APPROVAL_CONTENT')) && b!.runtime.session.isIdle);
+    assert.equal(b.dialogs.length, receiverDialogs, 'no redundant B-side contact approval is required');
+    assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === a!.id()), true);
     const widgetCount = b.widgetUpdates.length;
-    await new Promise(r => setTimeout(r, 340)); assert.equal(b.widgetUpdates.length, widgetCount, 'unchanged state does not rebuild native widgets every timer tick');
+    await new Promise(r => setTimeout(r, 340));
+    assert.equal(b.widgetUpdates.length, widgetCount, 'stable state does not rebuild the native widget');
+
     // Native tool context without a human UI rejects, never guesses consent.
     headless = await participant('approval-headless', false);
     const refused = data(await headless.tool('comms_message', { ...input, to: a.id() }));
