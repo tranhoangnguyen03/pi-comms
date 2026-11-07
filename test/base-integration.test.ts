@@ -1136,7 +1136,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
   try {
     a = await participant('coordinator'); b = await participant('reviewer');
     const aid = a.id(), bid = b.id();
-    assert.match(a.notifications.join('\n'), /Saved Pi sessions retain communication records/);
+    assert.match(a.notifications.join('\n'), /One approval covers both directions of an exact session pair/);
     const all = data(await a.tool('comms_peers', {})).data.items;
     assert.ok(all.some((p: any) => p.id === bid && !p.approved));
     let denied = data(await a.tool('comms_message', { to: bid, subject: 'review', text: 'read only' }));
