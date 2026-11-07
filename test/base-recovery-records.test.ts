@@ -561,7 +561,7 @@ test('F11: remembered permissions never transfer to a native fork or unrelated s
   f.manager.branch(firstLeaf);
   f.manager.appendMessage({ role: 'user', content: 'Other branch', timestamp: Date.now() });
   const same = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
-  assert.equal(same.runtime.isApproved(b.id), true, 'tree change does not undo owner's durable choice');
+  assert.equal(same.runtime.isApproved(b.id), true, "tree change does not undo owner's durable choice");
   const fork = SessionManager.forkFrom(f.manager.getSessionFile()!, join(f.root, 'fork-f11'), join(f.root, 'fork-sessions'));
   assert.notEqual(fork.getSessionId(), f.manager.getSessionId());
   const child = attach(fork, f.root);
