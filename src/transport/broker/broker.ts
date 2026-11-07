@@ -784,6 +784,23 @@ class IntercomBroker {
             break;
           }
           const target = targets[0];
+          if (fromSession.info.pairConsentV1 || target.info.pairConsentV1) {
+            if (!fromSession.info.pairConsentV1 || !target.info.pairConsentV1) {
+              this.writeDeliveryFailure(socket, message.id, "Both sessions must support shared pair consent", "E_PAIR_UNSUPPORTED");
+              break;
+            }
+            try {
+              const pair = this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, target.info.id,
+                id => this.pairEpoch(fromSession.scopeId, id));
+              if (pair.mode !== "remembered" && pair.mode !== "session") {
+                this.writeDeliveryFailure(socket, message.id, "This exact session pair is not approved", "E_PAIR_NOT_APPROVED");
+                break;
+              }
+            } catch (error) {
+              this.writeDeliveryFailure(socket, message.id, String(error), "E_PAIR_STATE_BLOCKED");
+              break;
+            }
+          }
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
