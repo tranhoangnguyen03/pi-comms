@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.10] - 2026-11-07
+
+- M4-B / F11: one owner approval for an **unordered exact A–B pair**, valid for communication in either direction. The default lasts until a participant runtime disconnects; optional **Allow & remember** survives both original sessions and broker restart.
+- Shorten the first-contact decision to **who, topic, request preview and effect**, with concise Allow this session / Allow & remember / Decline choices. Detailed UUIDs and transport rules move to inspection/help.
+- Store **one canonical pair decision** in the existing local broker scope using an independent atomic file, not duplicate native participant grants. Either endpoint can revoke the pair, stopping both directions and affected asks. A newer committed revoke cannot be replaced by an older backup.
+- Broker checks pair status at send admission, handles concurrent decisions in order, and sends status updates to both endpoints. Session-only grants expire on disconnect or broker restart; remembered grants survive. Fork/new native IDs and other scopes inherit nothing.
+- Detect unsupported old broker/peer pair protocol and corrupt saved pair state; reject rather than silently bypass shared revocation. The four agent tools and organizer API remain unchanged. F12 durable offline delivery is not part of F11.
+
 ## [0.1.9] - 2026-11-04
 
 - M4-A / F10: restore communication messages, work/report/correction/handover links, return handles, known outcomes and historical agent readability for the **same saved Pi session**, using Pi's native extension-state entries instead of another transcript database.

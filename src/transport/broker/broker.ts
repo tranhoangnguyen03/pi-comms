@@ -18,9 +18,10 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { CONTACT_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
+import { CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
+import { PairApprovalStore } from "./pair-approvals.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
@@ -256,6 +257,7 @@ class IntercomBroker {
   private namespaceOwners = new Map<string, NamespaceOwner>();
   private nextOwnerOrder = 1;
   private extensionStateManager: ExtensionStateManager;
+  private pairApprovals: PairApprovalStore;
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
@@ -263,6 +265,7 @@ class IntercomBroker {
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
+    this.pairApprovals = new PairApprovalStore(INTERCOM_DIR);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);
@@ -394,6 +397,10 @@ class IntercomBroker {
           this.rememberDisconnectedSession(existing);
           this.sessions.delete(sessionKey);
           this.clearMessageReceiptRoutesForSession(sessionKey);
+          if (!this.pairApprovals.holdReason()) {
+            for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id))
+              this.publishPair(existing.scopeId, existing.info.id, peer);
+          }
           this.broadcast({ type: "session_left", sessionId: existing.info.id }, sessionKey, existing.scopeId);
           this.recomputeNamespaceOwners();
           this.scheduleShutdownCheck();
@@ -453,6 +460,21 @@ class IntercomBroker {
       console.log("No sessions connected, shutting down");
       this.shutdown();
     }, delayMs);
+  }
+
+  private pairEpoch(scope: string | undefined, id: string): string | undefined {
+    return this.sessions.get(scopedSessionKey(scope, id))?.info.endpointEpoch;
+  }
+
+  // A committed pair decision is pushed to both live endpoints. Local Pi
+  // records never override these broker-owned contact statuses.
+  private publishPair(scope: string | undefined, a: string, b: string): void {
+    for (const [id, peer] of [[a, b], [b, a]]) {
+      const session = this.sessions.get(scopedSessionKey(scope, id));
+      if (!session?.info.pairConsentV1) continue;
+      const status = this.pairApprovals.state(scope, id, peer, current => this.pairEpoch(scope, current));
+      writeMessage(session.socket, { type: "pair_update", status });
+    }
   }
 
   private handleMessage(
@@ -565,6 +587,7 @@ class IntercomBroker {
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
           ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
+          ...(session.pairConsentV1 === true ? { pairConsentV1: true } : {}),
         };
 
         const connectedSession: ConnectedSession = {
@@ -594,7 +617,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, CONTACT_APPROVAL_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
@@ -761,6 +784,23 @@ class IntercomBroker {
             break;
           }
           const target = targets[0];
+          if (fromSession.info.pairConsentV1 || target.info.pairConsentV1) {
+            if (!fromSession.info.pairConsentV1 || !target.info.pairConsentV1) {
+              this.writeDeliveryFailure(socket, message.id, "Both sessions must support shared pair consent", "E_PAIR_UNSUPPORTED");
+              break;
+            }
+            try {
+              const pair = this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, target.info.id,
+                id => this.pairEpoch(fromSession.scopeId, id));
+              if (pair.mode !== "remembered" && pair.mode !== "session") {
+                this.writeDeliveryFailure(socket, message.id, "This exact session pair is not approved", "E_PAIR_NOT_APPROVED");
+                break;
+              }
+            } catch (error) {
+              this.writeDeliveryFailure(socket, message.id, String(error), "E_PAIR_STATE_BLOCKED");
+              break;
+            }
+          }
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
@@ -1057,6 +1097,53 @@ class IntercomBroker {
             session.lastPresenceBroadcastAt = now;
             this.broadcast({ type: "presence_update", session: session.info }, currentKey, session.scopeId);
           }
+        }
+        break;
+      }
+
+      case "pair_list": {
+        const session = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
+          throw Error("Invalid pair list request");
+        }
+        try {
+          const items = this.pairApprovals.list(session.scopeId, session.info.id,
+            id => this.pairEpoch(session.scopeId, id));
+          writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, items });
+        } catch (error) {
+          writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, error: String(error) });
+        }
+        break;
+      }
+
+      case "pair_decide": {
+        const session = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
+          throw Error("Invalid pair decision request");
+        }
+        const peerId = clientMessage.peerId;
+        const mode = clientMessage.mode;
+        const context = clientMessage.context;
+        if (typeof peerId !== "string" || !isSessionId(peerId) || peerId === session.info.id ||
+            (mode !== "session" && mode !== "remembered" && mode !== "revoked") ||
+            typeof context !== "string" || context.length > 300 || (mode !== "revoked" && !context.trim())) {
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PAIR_INVALID_DECISION" });
+          break;
+        }
+        if (mode !== "revoked") {
+          const peer = this.sessions.get(scopedSessionKey(session.scopeId, peerId));
+          if (!peer?.info.pairConsentV1) {
+            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PAIR_PEER_UNAVAILABLE_OR_UNSUPPORTED" });
+            break;
+          }
+        }
+        try {
+          const status = this.pairApprovals.decide(session.scopeId, session.info.id, peerId, mode, context,
+            id => this.pairEpoch(session.scopeId, id));
+          this.publishPair(session.scopeId, session.info.id, peerId);
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, status });
+        } catch (error) {
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: String(error) });
         }
         break;
       }

@@ -479,3 +479,97 @@ test('F10: explicit outgoing No is a durable peer refusal, distinct from a cance
   assert.equal(reapproved.runtime.isRevoked(b.id), false);
   assert.equal(reapproved.runtime.isApproved(b.id), false, 'F10 grants remain runtime-only after restart');
 });
+
+
+test('F11: unshipped one-sided remembered session entries are not pair authority', t => {
+  const f = fixture(t), b = peer();
+  // Model the prior F11 draft record without granting it durable authority.
+  f.log.append({ kind: 'contact', peer: b.id, revoked: false, remembered: { name: b.name, context: b.context } });
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isApproved(b.id), false);
+  assert.equal(reopened.runtime.isRemembered(b.id), false);
+  assert.equal((reopened.runtime.inspect({}) as any).waiting, 0);
+  reopened.runtime.syncPairStatus({ peer: b.id, mode: 'remembered', revision: 3, context: b.context }, b.name);
+  assert.equal(reopened.runtime.isApproved(b.id), true, 'only broker-authored shared state grants access');
+  const again = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(again.runtime.isApproved(b.id), false, 'no local positive grant is recovered on its own');
+});
+
+test('F11: prior F10 grants and transport assertions cannot become shared remembered consent', t => {
+  const f = fixture(t), b = peer(), c = peer();
+  f.runtime.approveFromOwner(b);
+  f.runtime.approveFromTransport(c);
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isApproved(b.id), false);
+  assert.equal(reopened.runtime.isApproved(c.id), false);
+  assert.equal(reopened.runtime.isRemembered(b.id), false);
+  assert.equal(reopened.runtime.isRemembered(c.id), false);
+});
+
+test('F11: broker approval overrides historic negative only after a shared decision', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.revokeFromOwner(b.id);
+  const held = envelope({ text: 'HISTORY_HELD_UNTIL_SHARED_GRANT' });
+  f.runtime.receive(b.id, held);
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isRevoked(b.id), true);
+  assert.equal((reopened.runtime.inspect({ message: held.id }) as any).evidence, 'withheld');
+  reopened.runtime.syncPairStatus({ peer: b.id, mode: 'remembered', revision: 9, context: b.context }, b.name);
+  assert.equal(reopened.runtime.isApproved(b.id), true);
+  assert.equal(reopened.runtime.isRemembered(b.id), true);
+  assert.equal(reopened.runtime.isRevoked(b.id), false);
+  assert.equal((reopened.runtime.inspect({ message: held.id }) as any).evidence, 'available');
+  // A newer revoke beats any late status from the previously remembered grant.
+  reopened.runtime.syncPairStatus({ peer: b.id, mode: 'revoked', revision: 10 }, b.name);
+  reopened.runtime.syncPairStatus({ peer: b.id, mode: 'remembered', revision: 9, context: b.context }, b.name);
+  assert.equal(reopened.runtime.isApproved(b.id), false);
+  assert.equal(reopened.runtime.isRevoked(b.id), true);
+  assert.equal(reopened.runtime.isRemembered(b.id), false);
+});
+
+test('F11: native fork and new scope cannot restore a deprecated one-sided grant', t => {
+  const f = fixture(t), b = peer();
+  f.log.append({ kind: 'contact', peer: b.id, revoked: false, remembered: { name: b.name, context: b.context } });
+  const same = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(same.runtime.isApproved(b.id), false);
+  const fork = SessionManager.forkFrom(f.manager.getSessionFile()!, join(f.root, 'fork-f11'), join(f.root, 'fork-sessions'));
+  assert.notEqual(fork.getSessionId(), f.manager.getSessionId());
+  const child = attach(fork, f.root);
+  assert.equal(child.runtime.isApproved(b.id), false);
+  const differentScope = attach(SessionManager.open(f.manager.getSessionFile()!), join(f.root, 'another-scope'));
+  assert.equal(differentScope.runtime.isApproved(b.id), false);
+});
+
+test('F11: a fresh native session cannot persist positive pair authority', t => {
+  const f = fixture(t, false), b = peer();
+  f.runtime.syncPairStatus({ peer: b.id, mode: 'remembered', revision: 1, context: b.context }, b.name);
+  assert.equal(f.runtime.isApproved(b.id), true, 'current broker decision can be cached in memory');
+  assert.equal(existsSync(f.manager.getSessionFile()!), false);
+  f.manager.appendMessage({ role: 'user', content: 'First real turn', timestamp: Date.now() });
+  const reopened = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.equal(reopened.runtime.isApproved(b.id), false, 'broker must send a fresh authoritative snapshot');
+  const ephemeral = attach(SessionManager.inMemory(f.root), f.root);
+  ephemeral.runtime.syncPairStatus({ peer: b.id, mode: 'session', revision: 2, context: b.context }, b.name);
+  assert.equal(ephemeral.runtime.isApproved(b.id), true);
+  assert.equal(ephemeral.log.info().state, 'volatile');
+});
+
+test('F11: failed local visibility write cannot override an older recorded refusal', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.revokeFromOwner(b.id);
+  const held = envelope({ text: 'STILL_WITHHELD_ON_WRITE_FAILURE' });
+  f.runtime.receive(b.id, held);
+  const file = f.manager.getSessionFile()!;
+  const manager = SessionManager.open(file);
+  const broken = attach(manager, f.root, (type, data) => {
+    const event = (data as { event?: { kind?: string } })?.event;
+    if (event?.kind === 'visibility') throw Error('simulated native visibility write failure');
+    manager.appendCustomEntry(type, data);
+  });
+  assert.throws(() => broken.runtime.syncPairStatus({ peer: b.id, mode: 'remembered', revision: 4, context: b.context }), /PERSISTENCE_FAILED/);
+  assert.equal(broken.runtime.isApproved(b.id), false);
+  const reopened = attach(SessionManager.open(file), f.root);
+  assert.equal(reopened.runtime.isRevoked(b.id), true);
+  assert.equal(reopened.runtime.isApproved(b.id), false);
+  assert.equal((reopened.runtime.inspect({ message: held.id }) as any).evidence, 'withheld');
+});

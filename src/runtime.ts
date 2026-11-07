@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, InspectInput } from './schema.ts';
 import type { Attempt } from './session-send.ts';
+import type { PairStatus } from './transport/types.ts';
 import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState } from './session-records.ts';
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
@@ -13,6 +14,9 @@ export const ASK_ADMISSION = 'native ask result context admission';
 export const NESTED_HANDOFF = 'ask result handed to nested caller';
 export class Runtime {
   private approvals = new Map<string, Approval>();
+  // Read-through cache of broker pair decisions; not a second durable grant.
+  private rememberedApprovals = new Map<string, Approval>();
+  private pairVersions = new Map<string, number>();
   private revoked = new Set<string>();
   private records = new Map<string, Entry>();
   private returns = new Map<string, Message>();
@@ -47,7 +51,7 @@ export class Runtime {
     }
   }
   // Recovery is a reduction of our own native entries, never a replay of sends.
-  // Approval grants intentionally do not survive this F10 slice.
+  // Native records restore history and negative F10 evidence, never a positive pair grant.
   restore(events: readonly RecoveryEvent[], saved: SaveState = 'saved') {
     if (this.records.size || this.approvals.size) throw new Error('INVALID_INPUT: restore requires a fresh runtime');
     for (const raw of events) {
@@ -88,16 +92,21 @@ export class Runtime {
             break;
           case 'pause': this.pause = event.value; break;
           case 'contact': {
-            if (event.revoked) this.revoked.add(event.peer);
-            else {
-              // Apply a completed owner reapproval as a single saved decision.
-              // Validate all referenced messages before clearing a durable deny.
+            if (event.revoked) {
+              this.revoked.add(event.peer);
+              this.rememberedApprovals.delete(event.peer);
+            } else {
+              // A single owner decision clears the deny, authorizes old
+              // visibility, and may explicitly remember this exact peer.
+              // Transport consent and historical F10 grants do not qualify.
               const visible = (event.readableIds ?? []).map(id => this.required(id));
               if (visible.some(entry => entry.message.to !== this.self || entry.message.from !== event.peer)) {
                 throw new Error('Contact visibility belongs to another peer');
               }
               visible.forEach(entry => { entry.readable = true; });
               this.revoked.delete(event.peer);
+              // Older, unshipped F11 one-sided grant data are historic records,
+              // not authority after shared pair consent is introduced.
             }
             break;
           }
@@ -106,6 +115,8 @@ export class Runtime {
         this.holdRecovery(`Saved communication is incomplete: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    // Positive contact authority always comes from the broker after reconnect.
+    this.approvals.clear(); this.rememberedApprovals.clear();
     for (const entry of this.records.values()) {
       if (entry.message.to !== this.self) continue;
       // Earlier F10 drafts used 'posted' for a completed nested-caller
@@ -141,15 +152,21 @@ export class Runtime {
     ids.forEach(message => { this.records.get(message)!.readable = true; });
   }
   // Passed only to the human command handler, never registered as an agent tool.
-  approveFromOwner(peer: Approval) {
+  approveFromOwner(peer: Approval): SaveState {
     validate(Id, peer.id); this.assertOperational();
-    // Reapproval and newly readable held history are one saved decision.
-    // Failure cannot clear a revocation without its matching visibility.
+    // F10's compatibility operation remains runtime-only. F11 pair approval
+    // can ONLY be committed by the registered broker socket, never this
+    // participant's native Pi session.
     const visible = [...this.records.values()].filter(entry => entry.message.from === peer.id && !entry.readable);
     const ids = visible.map(entry => entry.message.id);
-    this.write({ kind: 'contact', peer: peer.id, revoked: false, ...(ids.length ? { readableIds: ids } : {}) }, ids);
+    const state = this.write({ kind: 'contact', peer: peer.id, revoked: false,
+      ...(ids.length ? { readableIds: ids } : {}),
+    }, ids);
     visible.forEach(entry => { entry.readable = true; });
-    this.revoked.delete(peer.id); this.approvals.set(peer.id, { ...peer });
+    this.revoked.delete(peer.id);
+    this.rememberedApprovals.delete(peer.id);
+    this.approvals.set(peer.id, { ...peer });
+    return state;
   }
   // Only a fresh transport assertion reaches this path. It can authorize this
   // runtime, not a positive grant in the restored owner's next runtime.
@@ -158,10 +175,38 @@ export class Runtime {
     this.assertOperational(); this.allowHistory(peer.id); this.approvals.set(peer.id, { ...peer });
   }
   revokeFromOwner(id: string) {
-    validate(Id, id); this.revoked.add(id); this.approvals.delete(id);
+    validate(Id, id); this.revoked.add(id); this.approvals.delete(id); this.rememberedApprovals.delete(id);
     this.write({ kind: 'contact', peer: id, revoked: true });
   }
+  // Live and remembered permissions are one unordered broker pair. This
+  // runtime only caches the broker's decision for its own exact peer.
+  syncPairStatus(status: PairStatus, name = status.peer) {
+    validate(Id, status.peer);
+    if (status.revision < (this.pairVersions.get(status.peer) ?? -1)) return;
+    this.pairVersions.set(status.peer, status.revision);
+    if (status.mode === 'remembered' || status.mode === 'session') {
+      // Already authorized history and new held content become readable by
+      // native evidence, without persisting a second positive permission.
+      this.allowHistory(status.peer);
+      const peer = { id: status.peer, name, context: status.context ?? 'Approved pair contact' };
+      this.approvals.set(status.peer, peer);
+      this.revoked.delete(status.peer);
+      if (status.mode === 'remembered') this.rememberedApprovals.set(status.peer, peer);
+      else this.rememberedApprovals.delete(status.peer);
+    } else {
+      this.approvals.delete(status.peer);
+      this.rememberedApprovals.delete(status.peer);
+      if (status.mode === 'revoked') this.revoked.add(status.peer);
+      else this.revoked.delete(status.peer);
+    }
+  }
+  resetPairCache() {
+    this.approvals.clear();
+    this.rememberedApprovals.clear();
+    this.pairVersions.clear();
+  }
   isRevoked = (id: string) => this.revoked.has(id);
+  isRemembered = (id: string) => this.rememberedApprovals.has(id);
   approval(id: string) { const peer = this.approvals.get(id); return peer ? { ...peer } : undefined; }
   isApproved = (id: string) => this.approvals.has(id);
   known() { return [...this.approvals.values()].map(p => ({ ...p })); }

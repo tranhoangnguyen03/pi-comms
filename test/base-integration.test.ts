@@ -29,7 +29,9 @@ async function participant(label: string, interactive = true, extraTools: any[] 
   const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false }); models.registerNativeProvider(faux.provider);
   const observed: any[][] = []; const notifications: string[] = []; const inspectedByHuman: string[] = []; const events: any[] = []; const widgetUpdates: unknown[] = []; const selections: { title: string; choices: string[] }[] = [];
   const dialogs: { title: string; message: string }[] = [];
-  let draft = ''; let confirm: boolean | ((opts?: { signal?: AbortSignal }) => Promise<boolean>) = false; let hold = false; const releases: (() => void)[] = [];
+  let draft = ''; let confirm: boolean | ((opts?: { signal?: AbortSignal }) => Promise<boolean>) = false; let hold = false; let rememberNext = false;
+  let selectGrant: ((title: string, choices: string[]) => string | undefined) | undefined;
+  const releases: (() => void)[] = [];
   faux.setResponses(Array.from({ length: 100 }, () => async context => {
     observed.push(structuredClone(context.messages));
     if (hold) await new Promise<void>(resolve => releases.push(resolve));
@@ -42,7 +44,18 @@ async function participant(label: string, interactive = true, extraTools: any[] 
     return { ...created, services, diagnostics: [] };
   };
   const runtime = await createAgentSessionRuntime(factory, { cwd: dir, agentDir: root, sessionManager: manager });
-  const bind = async (session: any) => session.bindExtensions(interactive ? { mode: 'tui', uiContext: { ...session.extensionRunner.getUIContext(), getEditorText: () => draft, notify: (message: string) => notifications.push(message), setWidget: (_key: string, content: unknown) => { widgetUpdates.push(content); }, confirm: async (title: string, message: string, opts?: { signal?: AbortSignal }) => { dialogs.push({ title, message }); return typeof confirm === 'function' ? confirm(opts) : confirm; }, input: async () => 'Base integration review', select: async (title: string, choices: string[]) => { selections.push({ title, choices }); return choices[0]; }, editor: async () => { assert.fail('Human inspection must not open an editable document'); }, custom: async (factory: any) => {
+  const bind = async (session: any) => session.bindExtensions(interactive ? { mode: 'tui', uiContext: { ...session.extensionRunner.getUIContext(), getEditorText: () => draft, notify: (message: string) => notifications.push(message), setWidget: (_key: string, content: unknown) => { widgetUpdates.push(content); }, confirm: async (title: string, message: string, opts?: { signal?: AbortSignal }) => { dialogs.push({ title, message }); return typeof confirm === 'function' ? confirm(opts) : confirm; }, input: async () => 'Base integration review', select: async (title: string, choices: string[], opts?: { signal?: AbortSignal }) => {
+      if (choices.includes('Allow this session')) {
+        if (choices.includes('Cancel') && selectGrant) {
+          selections.push({ title, choices }); return selectGrant(title, choices);
+        }
+        const [promptTitle, ...parts] = title.split('\n\n');
+        dialogs.push({ title: promptTitle, message: parts.join('\n\n') });
+        const allowed = typeof confirm === 'function' ? await confirm(opts) : confirm;
+        return allowed ? (rememberNext ? choices[1] : choices[0]) : choices[2];
+      }
+      selections.push({ title, choices }); return choices[0];
+    }, editor: async () => { assert.fail('Human inspection must not open an editable document'); }, custom: async (factory: any) => {
       let closed = false;
       const keys = new KeybindingsManager({ ...TUI_KEYBINDINGS, 'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Expand details' } });
       const view = await factory({ terminal: { rows: 24 }, requestRender() {} }, { fg: (_key: string, value: string) => value }, keys, () => { closed = true; });
@@ -62,7 +75,7 @@ async function participant(label: string, interactive = true, extraTools: any[] 
     responses: (responses: any[]) => faux.setResponses(responses.map(response => async (context: any) => { observed.push(structuredClone(context.messages)); return typeof response === 'function' ? response(context) : response; })),
     id: () => runtime.session.sessionId,
     command: (args: string) => runtime.session.prompt(`/comms ${args}`),
-    draft: (value: string) => { draft = value; }, confirm: (value: typeof confirm) => { confirm = value; }, hold: (value: boolean) => { hold = value; },
+    draft: (value: string) => { draft = value; }, confirm: (value: typeof confirm) => { confirm = value; }, remember: (value: boolean) => { rememberNext = value; }, selectGrant: (next: (title: string, choices: string[]) => string | undefined) => { selectGrant = next; }, hold: (value: boolean) => { hold = value; },
     release: () => { releases.shift()?.(); },
     close: async () => { hold = false; releases.splice(0).forEach(r => r()); await runtime.session.abort(); await runtime.dispose(); },
   };
@@ -789,7 +802,7 @@ test('first-contact approval continues the actual model/tool review without prea
     assert.equal(b.observed.length, 0, 'nothing reaches recipient before sender human approval');
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
     assert.match(a.dialogs[0].message, /Read-only code review/);
-    assert.match(a.dialogs[0].message, /Yes: send this request now/);
+    assert.match(a.dialogs[0].message, /Allows messages between these sessions/);
     allowSend!(true); await work;
     await waitFor(() => a!.observed.some(m => text(m).includes('NATURAL_REVIEW_FINDINGS')) && a!.runtime.session.isIdle && b!.runtime.session.isIdle);
     assert.equal(a.dialogs.length, 1); assert.equal(b.dialogs.length, 0);
@@ -808,40 +821,30 @@ test('first-contact approval continues the actual model/tool review without prea
   } finally { await b?.close(); await a?.close(); }
 });
 
-test('contact cancellation, no UI, incoming hold/reconsideration and Stop never self-approve or loop', async () => {
+test('pair revoke blocks automatic contact, explicit reapproval and Stop stay human-controlled', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined, headless: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('approval-sender'); b = await participant('approval-receiver');
     b.confirm(true); await b.command(`revoke ${a.id()}`); b.confirm(false);
     const receiverDialogs = b.dialogs.length;
     const input = { to: b.id(), subject: 'Read-only review', text: 'HELD_APPROVAL_CONTENT' };
-    // Cancelling/refusing does not send, and agent retries do not re-prompt the person.
+    // Shared revoke denies both directions; model retries cannot undo it.
     for (let i = 0; i < 2; i++) assert.equal(data(await a.tool('comms_message', input)).error.code, 'CONTACT_NOT_APPROVED');
-    assert.equal(a.dialogs.length, 1); assert.equal(b.observed.length, 0);
+    assert.equal(a.dialogs.length, 0, 'a remote revoke is not an invitation for an automatic agent prompt');
+    assert.equal(b.observed.length, 0);
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
     assert.equal(data(await a.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    // Extension/model continuation is not a new human instruction and cannot re-prompt.
-    a.responses([call('comms_message', input), fauxAssistantMessage('Still not approved.')]);
-    await a.runtime.session.sendUserMessage('Try again');
-    await a.runtime.session.waitForIdle(); assert.equal(a.dialogs.length, 1);
-    // A real new user instruction can reconsider without a management command.
-    a.confirm(true);
-    a.responses([call('comms_message', input), fauxAssistantMessage('Sent after user approval.')]);
-    await a.runtime.session.prompt('Go ahead with the review; I will allow the contact.');
-    assert.equal(a.dialogs.length, 2);
-    const sent = data(await a.tool('comms_inspect', { outbox: 'self' })).data.items[0];
-    await waitFor(async () => data(await b!.tool('comms_inspect', { queue: 'self' })).data.items.length === 1);
-    await new Promise(r => setTimeout(r, 200));
-    assert.equal(b.observed.length, 0);
-    assert.doesNotMatch(JSON.stringify(data(await b.tool('comms_inspect', { queue: 'self' }))), /HELD_APPROVAL_CONTENT/);
-    await a.tool('comms_message', { ...input, text: 'SECOND_HELD_CONTENT' });
-    await new Promise(r => setTimeout(r, 200)); assert.equal(b.dialogs.length, receiverDialogs, 'later arrivals cannot undo revocation or repeat dialogs');
-    b.confirm(true); await b.command('requests');
-    await waitFor(() => b!.observed.some(m => text(m).includes('HELD_APPROVAL_CONTENT')) && b!.runtime.session.isIdle);
-    assert.match(text(b.observed[0]), /SECOND_HELD_CONTENT/);
-    assert.match(data(await b.tool('comms_peers', {})).data.items[0].context, /peer-supplied title; user directives remain controlling/);
+    // A fresh human approval at A restores the one A-B pair for BOTH directions.
+    a.confirm(true); await a.command(`approve ${b.id()}`);
+    const sent = data(await a.tool('comms_message', input)).data;
+    assert.ok(sent?.message?.id);
+    await waitFor(() => b!.observed.some(messages => text(messages).includes('HELD_APPROVAL_CONTENT')) && b!.runtime.session.isIdle);
+    assert.equal(b.dialogs.length, receiverDialogs, 'no redundant B-side contact approval is required');
+    assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === a!.id()), true);
     const widgetCount = b.widgetUpdates.length;
-    await new Promise(r => setTimeout(r, 340)); assert.equal(b.widgetUpdates.length, widgetCount, 'unchanged state does not rebuild native widgets every timer tick');
+    await new Promise(r => setTimeout(r, 340));
+    assert.equal(b.widgetUpdates.length, widgetCount, 'stable state does not rebuild the native widget');
+
     // Native tool context without a human UI rejects, never guesses consent.
     headless = await participant('approval-headless', false);
     const refused = data(await headless.tool('comms_message', { ...input, to: a.id() }));
@@ -865,33 +868,37 @@ test('contact cancellation, no UI, incoming hold/reconsideration and Stop never 
   } finally { await headless?.close(); await b?.close(); await a?.close(); }
 });
 
-test('explicit outbound No survives transport assertion and same-session restart until owner reapproves', async () => {
+test('F11: B-side owner approval replaces an A-side refusal for one shared pair', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('direction-a'); b = await participant('direction-b');
     await a.runtime.session.prompt('Saved contact choice'); const initialTurns = a.observed.length;
     const denied = data(await a.tool('comms_message', { to: b.id(), subject: 'Outbound', text: 'NO_TO_CONTACT' }));
-    assert.equal(denied.error.code, 'CONTACT_NOT_APPROVED'); assert.equal(a.dialogs.length, 1);
-    assert.match(a.dialogs[0].message, /No\/Esc: refuse this exact contact/);
+    assert.equal(denied.error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(a.dialogs.length, 1);
+    assert.match(a.dialogs[0].message, /Allows messages between these sessions, not approval of the work/);
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
-    b.confirm(true);
+
+    // A completed refusal cannot be reversed by a tool retry. The owner
+    // explicitly reapproves from B; that ONE decision grants both directions.
+    b.confirm(true); b.remember(true);
+    await b.command(`approve ${a.id()}`);
     const later = data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'NEW_INCOMING_AFTER_NO' }));
     assert.equal(later.ok, true);
-    await waitFor(async () => data(await a!.tool('comms_inspect', { queue: 'self' })).data.items.length === 1);
-    const held = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
-    assert.equal(held.evidence, 'withheld', 'transport assertion cannot override explicit owner No');
-    assert.equal(a.dialogs.length, 1, 'incoming contact does not prompt or reapprove after refusal');
-    assert.equal(a.observed.length, initialTurns);
+    await waitFor(() => a!.observed.some(messages => text(messages).includes('NEW_INCOMING_AFTER_NO')) && a!.runtime.session.isIdle);
+    assert.equal(a.dialogs.length, 1, 'no repeat A approval after owner explicitly approved the pair from B');
+    assert.ok(a.observed.length > initialTurns);
+    assert.equal(data(await a.tool('comms_inspect', { message: later.data.message.id })).data.evidence, 'available');
 
     const originalPath = a.runtime.session.sessionFile!;
     await a.runtime.switchSession(originalPath);
     const restored = data(await a.tool('comms_inspect', { message: later.data.message.id })).data;
-    assert.equal(restored.evidence, 'withheld', 'refusal survives same-session reload');
-    assert.equal(a.observed.length, initialTurns);
-    a.confirm(true); await a.command('requests');
-    await waitFor(() => a!.observed.length > initialTurns && a!.runtime.session.isIdle);
-    assert.match(text(a.observed.at(-1)!), /NEW_INCOMING_AFTER_NO/);
-    assert.equal(data(await a.tool('comms_inspect', { message: later.data.message.id })).data.evidence, 'available');
+    assert.equal(restored.evidence, 'available');
+    assert.ok(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === b!.id()),
+      'remembered pair is shared; A recovers it despite B making the choice');
+    const reply = data(await a.tool('comms_message', { to: b.id(), subject: 'A continues', text: 'BILATERAL_RESTART' }));
+    assert.equal(reply.ok, true);
+    assert.equal(a.dialogs.length, 1);
   } finally { await b?.close(); await a?.close(); }
 });
 
@@ -929,33 +936,26 @@ test('requester-approved intake respects drafts/Pause and lifetime replacement c
   } finally { await b?.close(); await a?.close(); }
 });
 
-test('installed Base model tools: private inspection boundary and discover → send → two reads → contextual reply', async () => {
+test('installed Base model tools: Pause holds delivery, human inspection and two-file contextual reply', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('tool-coordinator'); b = await participant('tool-reviewer');
-    b.confirm(true); await b.command(`revoke ${a.id()}`);
-    // Select through the normal human selector, rather than supplying an ID.
+    await b.command('pause');
+    // One owner choice grants A-B; Pause still prevents automatic model intake.
     a.confirm(true); await a.command('approve');
     const privateMessage = data(await a.tool('comms_message', { to: b.id(), subject: 'PRIVATE_SUBJECT', text: 'PRIVATE_BODY', refs: [{ uri: 'file:///PRIVATE_REFERENCE', label: 'PRIVATE_LABEL' }] })).data;
-    await waitFor(() => b!.notifications.some(n => /Contact request from/.test(n)));
+    await waitFor(async () => data(await b!.tool('comms_inspect', { message: privateMessage.message.id })).ok === true);
     assert.equal(b.observed.length, 0);
     await b.command(`inspect ${privateMessage.message.id}`);
     assert.match(b.inspectedByHuman.at(-1)!, /PRIVATE_BODY/);
     const privateHandle = b.inspectedByHuman.at(-1)!.match(/Return handle: ([0-9a-f-]{36})/)![1];
-    b.responses([
-      call('comms_inspect', { queue: 'self' }), call('comms_inspect', { message: privateMessage.message.id }), call('comms_inspect', { exchange: privateMessage.message.exchange }), fauxAssistantMessage('Held for human approval.'),
-    ]);
-    await b.runtime.session.prompt('Inspect waiting metadata only.');
-    for (const request of b.observed) {
-      assert.doesNotMatch(text(request), /PRIVATE_/);
-      assert.ok(!JSON.stringify(request).includes(privateHandle));
-    }
-    assert.match(text(b.observed.at(-1)!), /contact not approved/);
-    // Approve while paused: metadata-only inspection changes to complete evidence, without automatic intake.
-    await b.command('pause'); b.confirm(true); await b.command('approve');
-    assert.match(JSON.stringify(data(await b.tool('comms_inspect', { message: privateMessage.message.id }))), /PRIVATE_BODY/);
+    assert.ok(privateHandle);
+    assert.equal(b.runtime.session.sessionManager.getEntries().filter(e => e.type === 'custom_message' &&
+      (e.details as any)?.ids?.includes(privateMessage.message.id)).length, 0,
+      'Pause stops unsolicited model injection but does not erase human-readable messages');
     b.responses([fauxAssistantMessage('No reply required for the earlier message.')]);
-    await b.command('resume'); await waitFor(() => b!.runtime.session.isIdle && b!.observed.some(m => text(m).includes('PRIVATE_BODY')));
+    await b.command('resume');
+    await waitFor(() => b!.runtime.session.isIdle && b!.observed.some(m => text(m).includes('PRIVATE_BODY')));
     writeFileSync(join(b.dir, 'evidence.txt'), 'Evidence alpha: preserve exact session identity.');
     writeFileSync(join(b.dir, 'detail.txt'), 'Evidence beta: no durable queue required.');
     b.responses([
@@ -999,7 +999,7 @@ test('installed Base model tools: private inspection boundary and discover → s
     const aTools = a.events.filter(e => e.type === 'tool_execution_end').map(e => e.toolName);
     const bTools = b.events.filter(e => e.type === 'tool_execution_end').map(e => e.toolName);
     assert.deepEqual(aTools, ['comms_peers', 'comms_message']);
-    assert.deepEqual(bTools, ['comms_inspect', 'comms_inspect', 'comms_inspect', 'read', 'read', 'comms_message', 'comms_message']);
+    assert.deepEqual(bTools, ['read', 'read', 'comms_message', 'comms_message']);
     assert.equal(b.events.filter(e => e.type === 'tool_execution_end' && e.isError).length, 1);
     assert.equal(data(await b.tool('comms_inspect', { outbox: 'self' })).data.items.length, 1, 'invalid reply created no send record; valid correction sent once');
     const sent = data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.find((e: any) => e.message.subject === 'Model tool review');
@@ -1091,7 +1091,7 @@ test('revoked paused contact is recoverable through the same requests command ad
     assert.equal(b.dialogs.length, dialogsBefore, 'ordinary resend neither reapproves nor reopens receiver decision');
     await b.command('requests');
     assert.equal(b.dialogs.length, dialogsBefore + 1, 'advertised recovery opens the actual held request');
-    assert.match(b.dialogs.at(-1)!.title, /wants to work with you/);
+    assert.match(b.dialogs.at(-1)!.title, /to contact you/);
     assert.match(b.dialogs.at(-1)!.message, /REVOKED_QUEUE_CONTENT/);
     assert.equal(b.observed.length, 1, 'reapproval does not bypass Pause');
     await b.command('resume');
@@ -1107,9 +1107,9 @@ test('human inspection distinguishes queue, malformed ID and unavailable runtime
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('inspect-id-sender'); b = await participant('inspect-id-receiver');
-    a.confirm(true); b.confirm(true); await b.command(`revoke ${a.id()}`); await b.command('pause');
+    a.confirm(true); b.confirm(true); await b.command('pause');
     const sent = data(await a.tool('comms_message', { to: b.id(), subject: 'Inspect safely', text: 'UNCHANGED_HELD_MESSAGE' })).data;
-    await waitFor(() => b!.notifications.some(n => /Contact request from/.test(n)));
+    await waitFor(async () => data(await b!.tool('comms_inspect', { message: sent.message.id })).ok === true);
     const before = data(await b.tool('comms_inspect', { queue: 'self' })).data.items.map((e: any) => e.message.id);
     const views = b.inspectedByHuman.length;
     await b.command('inspect not-a-message-id');
@@ -1138,7 +1138,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
   try {
     a = await participant('coordinator'); b = await participant('reviewer');
     const aid = a.id(), bid = b.id();
-    assert.match(a.notifications.join('\n'), /Saved Pi sessions retain communication records/);
+    assert.match(a.notifications.join('\n'), /One approval covers both directions of an exact session pair/);
     const all = data(await a.tool('comms_peers', {})).data.items;
     assert.ok(all.some((p: any) => p.id === bid && !p.approved));
     let denied = data(await a.tool('comms_message', { to: bid, subject: 'review', text: 'read only' }));
@@ -1231,7 +1231,7 @@ test('packaged extension: first-run approval, exact wire, delayed replies, Stop/
     assert.ok(leaf);
     await b.runtime.fork(leaf.id); assert.notEqual(b.id(), bid);
     assert.equal(data(await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    assert.match(b.notifications.join('\n'), /Contact approval still ends on reload\/switch\/restart/);
+    assert.match(b.notifications.join('\n'), /One approval covers both directions of an exact session pair/);
     assert.equal(data(await a.tool('comms_inspect', { message: held.data.message.id })).ok, true);
   } finally {
     await b?.close(); await a?.close();
@@ -1406,6 +1406,44 @@ test('active ask ends promptly on Pause, peer revoke, stop and native session re
       if (control === 'pause') await a.command('resume');
       if (control === 'revoke') await a.command(`approve ${b.id()}`);
     }
+  } finally { await b.close(); await a.close(); }
+});
+
+test('F11: /comms approve Cancel or Esc does not revoke a peer or end an outstanding ask', async () => {
+  const a = await participant('grant-only-a'), b = await participant('grant-only-b');
+  try {
+    a.confirm(true);
+    await a.command(`approve ${b.id()}`);
+    assert.ok(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()));
+
+    let finished = false;
+    const pending = a.tool('comms_ask', {
+      requests: [{ to: b.id(), subject: 'Waiting for findings', text: 'Question still open' }],
+      timeoutSeconds: 60,
+    }).then(result => { finished = true; return result; });
+    await waitFor(async () => data(await a.tool('comms_inspect', { outbox: 'self' }))
+      .data.items.some((entry: any) => entry.message.subject === 'Waiting for findings'));
+
+    for (const cancellation of [
+      (_title: string, choices: string[]) => choices.find(choice => choice.startsWith('Cancel')),
+      (_title: string, _choices: string[]) => undefined, // Escape in native select
+    ]) {
+      a.selectGrant(cancellation);
+      const beforeDialogs = a.dialogs.length;
+      await a.command(`approve ${b.id()}`);
+      assert.equal(a.dialogs.length, beforeDialogs, 'grant editing opens no send-approval/refusal dialog');
+      assert.ok(a.selections.some(selection => /This command sends nothing/.test(selection.title)));
+      assert.ok(a.selections.some(selection => /Cancel leaves existing approval unchanged/.test(selection.title)));
+      assert.ok(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()),
+        'Cancel/Esc must leave existing approval unchanged');
+      await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(finished, false, 'grant editing must not end the already-running ask');
+    }
+    a.confirm(true);
+    await a.command(`revoke ${b.id()}`);
+    const ended = data(await pending).data.items[0];
+    assert.equal(ended.outcome, 'revoked', 'the actual revoke command ends the outstanding ask');
+    assert.equal(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()), false);
   } finally { await b.close(); await a.close(); }
 });
 
