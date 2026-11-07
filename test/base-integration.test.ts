@@ -29,7 +29,7 @@ async function participant(label: string, interactive = true, extraTools: any[] 
   const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false }); models.registerNativeProvider(faux.provider);
   const observed: any[][] = []; const notifications: string[] = []; const inspectedByHuman: string[] = []; const events: any[] = []; const widgetUpdates: unknown[] = []; const selections: { title: string; choices: string[] }[] = [];
   const dialogs: { title: string; message: string }[] = [];
-  let draft = ''; let confirm: boolean | ((opts?: { signal?: AbortSignal }) => Promise<boolean>) = false; let hold = false; const releases: (() => void)[] = [];
+  let draft = ''; let confirm: boolean | ((opts?: { signal?: AbortSignal }) => Promise<boolean>) = false; let hold = false; let rememberNext = false; const releases: (() => void)[] = [];
   faux.setResponses(Array.from({ length: 100 }, () => async context => {
     observed.push(structuredClone(context.messages));
     if (hold) await new Promise<void>(resolve => releases.push(resolve));
@@ -42,7 +42,15 @@ async function participant(label: string, interactive = true, extraTools: any[] 
     return { ...created, services, diagnostics: [] };
   };
   const runtime = await createAgentSessionRuntime(factory, { cwd: dir, agentDir: root, sessionManager: manager });
-  const bind = async (session: any) => session.bindExtensions(interactive ? { mode: 'tui', uiContext: { ...session.extensionRunner.getUIContext(), getEditorText: () => draft, notify: (message: string) => notifications.push(message), setWidget: (_key: string, content: unknown) => { widgetUpdates.push(content); }, confirm: async (title: string, message: string, opts?: { signal?: AbortSignal }) => { dialogs.push({ title, message }); return typeof confirm === 'function' ? confirm(opts) : confirm; }, input: async () => 'Base integration review', select: async (title: string, choices: string[]) => { selections.push({ title, choices }); return choices[0]; }, editor: async () => { assert.fail('Human inspection must not open an editable document'); }, custom: async (factory: any) => {
+  const bind = async (session: any) => session.bindExtensions(interactive ? { mode: 'tui', uiContext: { ...session.extensionRunner.getUIContext(), getEditorText: () => draft, notify: (message: string) => notifications.push(message), setWidget: (_key: string, content: unknown) => { widgetUpdates.push(content); }, confirm: async (title: string, message: string, opts?: { signal?: AbortSignal }) => { dialogs.push({ title, message }); return typeof confirm === 'function' ? confirm(opts) : confirm; }, input: async () => 'Base integration review', select: async (title: string, choices: string[], opts?: { signal?: AbortSignal }) => {
+      if (choices.includes('Approve for this session only (default)')) {
+        const [promptTitle, ...parts] = title.split('\n\n');
+        dialogs.push({ title: promptTitle, message: parts.join('\n\n') });
+        const allowed = typeof confirm === 'function' ? await confirm(opts) : confirm;
+        return allowed ? (rememberNext ? choices[1] : choices[0]) : choices[2];
+      }
+      selections.push({ title, choices }); return choices[0];
+    }, editor: async () => { assert.fail('Human inspection must not open an editable document'); }, custom: async (factory: any) => {
       let closed = false;
       const keys = new KeybindingsManager({ ...TUI_KEYBINDINGS, 'app.tools.expand': { defaultKeys: 'ctrl+o', description: 'Expand details' } });
       const view = await factory({ terminal: { rows: 24 }, requestRender() {} }, { fg: (_key: string, value: string) => value }, keys, () => { closed = true; });
@@ -62,7 +70,7 @@ async function participant(label: string, interactive = true, extraTools: any[] 
     responses: (responses: any[]) => faux.setResponses(responses.map(response => async (context: any) => { observed.push(structuredClone(context.messages)); return typeof response === 'function' ? response(context) : response; })),
     id: () => runtime.session.sessionId,
     command: (args: string) => runtime.session.prompt(`/comms ${args}`),
-    draft: (value: string) => { draft = value; }, confirm: (value: typeof confirm) => { confirm = value; }, hold: (value: boolean) => { hold = value; },
+    draft: (value: string) => { draft = value; }, confirm: (value: typeof confirm) => { confirm = value; }, remember: (value: boolean) => { rememberNext = value; }, hold: (value: boolean) => { hold = value; },
     release: () => { releases.shift()?.(); },
     close: async () => { hold = false; releases.splice(0).forEach(r => r()); await runtime.session.abort(); await runtime.dispose(); },
   };
