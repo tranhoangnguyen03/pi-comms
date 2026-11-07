@@ -28,7 +28,7 @@ async function participant(label: string, manager?: SessionManager) {
   const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false });
   models.registerNativeProvider(faux.provider);
   const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [];
-  let draft = '', confirm = true, hold = false;
+  let draft = '', confirm = true, hold = false, rememberNext = false;
   let selectChoice: ((title: string, options: string[]) => string | undefined) | undefined;
   const releases: (() => void)[] = [];
   faux.setResponses(Array.from({ length: 100 }, () => async context => {
@@ -48,14 +48,20 @@ async function participant(label: string, manager?: SessionManager) {
     ...session.extensionRunner.getUIContext(), getEditorText: () => draft,
     notify: (message: string) => { notifications.push(message); }, setWidget: () => {}, setStatus: () => {},
     confirm: async (title: string, message: string) => { dialogs.push(`${title}\n${message}`); return confirm; },
-    input: async () => 'Review continuity', select: async (title: string, choices: string[]) => selectChoice?.(title, choices) ?? choices[0],
+    input: async () => 'Review continuity', select: async (title: string, choices: string[]) => {
+      if (choices.includes('Approve for this session only (default)')) {
+        dialogs.push(title);
+        return confirm ? (rememberNext ? choices[1] : choices[0]) : choices[2];
+      }
+      return selectChoice?.(title, choices) ?? choices[0];
+    },
   } });
   await bind(runtime.session); runtime.setRebindSession(bind);
   return { runtime, manager, observed, notifications, dialogs,
     id: () => runtime.session.sessionId,
     file: () => runtime.session.sessionManager.getSessionFile(),
     command: (value: string) => runtime.session.prompt(`/comms ${value}`),
-    confirm: (value: boolean) => { confirm = value; }, draft: (value: string) => { draft = value; },
+    confirm: (value: boolean) => { confirm = value; }, remember: (value: boolean) => { rememberNext = value; }, draft: (value: string) => { draft = value; },
     select: (next: (title: string, options: string[]) => string | undefined) => { selectChoice = next; },
     hold: (value: boolean) => { hold = value; }, release: () => { releases.shift()?.(); },
     tool: async (name: string, input: unknown) => {
