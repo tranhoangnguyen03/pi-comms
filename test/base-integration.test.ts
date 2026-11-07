@@ -1422,6 +1422,44 @@ test('active ask ends promptly on Pause, peer revoke, stop and native session re
   } finally { await b.close(); await a.close(); }
 });
 
+test('F11: /comms approve Cancel or Esc does not revoke a peer or end an outstanding ask', async () => {
+  const a = await participant('grant-only-a'), b = await participant('grant-only-b');
+  try {
+    a.confirm(true);
+    await a.command(`approve ${b.id()}`);
+    assert.ok(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()));
+
+    let finished = false;
+    const pending = a.tool('comms_ask', {
+      requests: [{ to: b.id(), subject: 'Waiting for findings', text: 'Question still open' }],
+      timeoutSeconds: 60,
+    }).then(result => { finished = true; return result; });
+    await waitFor(async () => data(await a.tool('comms_inspect', { outbox: 'self' }))
+      .data.items.some((entry: any) => entry.message.subject === 'Waiting for findings'));
+
+    for (const cancellation of [
+      (_title: string, choices: string[]) => choices.find(choice => choice.startsWith('Cancel')),
+      (_title: string, _choices: string[]) => undefined, // Escape in native select
+    ]) {
+      a.selectGrant(cancellation);
+      const beforeDialogs = a.dialogs.length;
+      await a.command(`approve ${b.id()}`);
+      assert.equal(a.dialogs.length, beforeDialogs, 'grant editing opens no send-approval/refusal dialog');
+      assert.ok(a.selections.some(selection => /This command does not send a message/.test(selection.title)));
+      assert.ok(a.selections.some(selection => /does not save the colleague's approval/.test(selection.title)));
+      assert.ok(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()),
+        'Cancel/Esc must leave existing approval unchanged');
+      await new Promise(resolve => setTimeout(resolve, 30));
+      assert.equal(finished, false, 'grant editing must not end the already-running ask');
+    }
+    a.confirm(true);
+    await a.command(`revoke ${b.id()}`);
+    const ended = data(await pending).data.items[0];
+    assert.equal(ended.outcome, 'revoked', 'the actual revoke command ends the outstanding ask');
+    assert.equal(data(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()), false);
+  } finally { await b.close(); await a.close(); }
+});
+
 test('ask retains unadmitted replies while a human revoke decision is open', async () => {
   const a = await participant('review-hold-a'), b = await participant('review-hold-b');
   let release: (() => void) | undefined;
