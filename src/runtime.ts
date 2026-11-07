@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, InspectInput } from './schema.ts';
 import type { Attempt } from './session-send.ts';
+import type { PairStatus } from './transport/types.ts';
 import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState } from './session-records.ts';
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
@@ -13,8 +14,7 @@ export const ASK_ADMISSION = 'native ask result context admission';
 export const NESTED_HANDOFF = 'ask result handed to nested caller';
 export class Runtime {
   private approvals = new Map<string, Approval>();
-  // Positive approvals survive restart only when the local owner chose Remember.
-  // Transport assertions never enter this map.
+  // Read-through cache of broker pair decisions; not a second durable grant.
   private rememberedApprovals = new Map<string, Approval>();
   private revoked = new Set<string>();
   private records = new Map<string, Entry>();
@@ -50,7 +50,7 @@ export class Runtime {
     }
   }
   // Recovery is a reduction of our own native entries, never a replay of sends.
-  // Only explicit owner-remembered positive grants survive. Older F10 grants do not.
+  // Native records restore history and negative F10 evidence, never a positive pair grant.
   restore(events: readonly RecoveryEvent[], saved: SaveState = 'saved') {
     if (this.records.size || this.approvals.size) throw new Error('INVALID_INPUT: restore requires a fresh runtime');
     for (const raw of events) {
@@ -104,9 +104,8 @@ export class Runtime {
               }
               visible.forEach(entry => { entry.readable = true; });
               this.revoked.delete(event.peer);
-              if (event.remembered) {
-                this.rememberedApprovals.set(event.peer, { id: event.peer, ...event.remembered });
-              } else this.rememberedApprovals.delete(event.peer);
+              // Older, unshipped F11 one-sided grant data are historic records,
+              // not authority after shared pair consent is introduced.
             }
             break;
           }
@@ -115,9 +114,8 @@ export class Runtime {
         this.holdRecovery(`Saved communication is incomplete: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    // At restart, only an explicit local remembered approval is revived.
-    // Recovered transport assertions and runtime-only owner grants do not revive.
-    this.approvals = new Map(this.rememberedApprovals);
+    // Positive contact authority always comes from the broker after reconnect.
+    this.approvals.clear(); this.rememberedApprovals.clear();
     for (const entry of this.records.values()) {
       if (entry.message.to !== this.self) continue;
       // Earlier F10 drafts used 'posted' for a completed nested-caller
@@ -179,6 +177,30 @@ export class Runtime {
   revokeFromOwner(id: string) {
     validate(Id, id); this.revoked.add(id); this.approvals.delete(id); this.rememberedApprovals.delete(id);
     this.write({ kind: 'contact', peer: id, revoked: true });
+  }
+  // Live and remembered permissions are one unordered broker pair. This
+  // runtime only caches the broker's decision for its own exact peer.
+  syncPairStatus(status: PairStatus, name = status.peer) {
+    validate(Id, status.peer);
+    if (status.mode === 'remembered' || status.mode === 'session') {
+      // Already authorized history and new held content become readable by
+      // native evidence, without persisting a second positive permission.
+      this.allowHistory(status.peer);
+      const peer = { id: status.peer, name, context: status.context ?? 'Approved pair contact' };
+      this.approvals.set(status.peer, peer);
+      this.revoked.delete(status.peer);
+      if (status.mode === 'remembered') this.rememberedApprovals.set(status.peer, peer);
+      else this.rememberedApprovals.delete(status.peer);
+    } else {
+      this.approvals.delete(status.peer);
+      this.rememberedApprovals.delete(status.peer);
+      if (status.mode === 'revoked') this.revoked.add(status.peer);
+      else this.revoked.delete(status.peer);
+    }
+  }
+  resetPairCache() {
+    this.approvals.clear();
+    this.rememberedApprovals.clear();
   }
   isRevoked = (id: string) => this.revoked.has(id);
   isRemembered = (id: string) => this.rememberedApprovals.has(id);
