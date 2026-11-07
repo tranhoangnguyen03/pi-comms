@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { KeybindingsManager, TUI_KEYBINDINGS, TuiAltScreen, TuiMainScreen, Text, visibleWidth } from '@earendil-works/pi-tui';
 import { Runtime } from '../src/runtime.ts';
-import { approvalPrompt, contactDecisionTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE, CONTACT_CHOICES, admissionDecisionStorageNotice, inspectionText, inspectionState, inspectionScreen, showInspection } from '../src/human-view.ts';
+import { approvalPrompt, contactDecisionTitle, explicitApprovalTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE, CONTACT_CANCEL, CONTACT_CHOICES, CONTACT_GRANT_CHOICES, admissionDecisionStorageNotice, inspectionText, inspectionState, inspectionScreen, showInspection } from '../src/human-view.ts';
 
 const self = randomUUID(), peer = randomUUID();
 const labels = { self, name: (id: string) => id === self ? 'Coordinator' : 'Reviewer', approved: () => false };
@@ -46,6 +46,16 @@ test('F11 contact choice is one human screen, with runtime-only as the default',
   assert.match(title, /exact saved session and peer/);
   assert.match(title, /until you revoke it/);
   assert.match(title, /unsaved session stays live-only/);
+  assert.match(title, /does not save the colleague's approval/);
+  assert.deepEqual(CONTACT_GRANT_CHOICES, [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CANCEL]);
+  assert.doesNotMatch(CONTACT_GRANT_CHOICES.join(' '), /refuse this exact contact/);
+  const explicit = explicitApprovalTitle(peer, 'Reviewer', 'Review changes');
+  assert.match(explicit, /Approve contact with Reviewer/);
+  assert.match(explicit, /This command does not send a message/);
+  assert.match(explicit, /Cancel or Esc leaves any existing contact approval unchanged/);
+  assert.match(explicit, /use \/comms revoke/);
+  assert.doesNotMatch(explicit, /send this request now/);
+  assert.match(explicit, /does not save the colleague's approval/);
 });
 
 test('uncertain admission confirmation distinguishes saved, volatile and blocked Pi session records', () => {
