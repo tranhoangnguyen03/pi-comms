@@ -415,3 +415,23 @@ test('F11 native: transported consent does not persist for receiver owner on res
     assert.equal(b.dialogs.length, 1, 'B receives its own contact decision, never inherits A choice');
   } finally { await b.close(); await a.close(); }
 });
+
+test('F11 native: explicit /comms approve can remember without sending or adding a second dialog', async () => {
+  let a = await participant('f11-command-lead'); const b = await participant('f11-command-peer');
+  try {
+    await a.runtime.session.prompt('Saved owner session'); await b.runtime.session.prompt('Saved colleague session');
+    a.remember(true); a.confirm(true);
+    await a.command(`approve ${b.id()}`);
+    assert.equal(a.dialogs.length, 1, 'explicit setup uses one consent screen, not a second permission dialog');
+    assert.match(a.dialogs[0], /Approve and remember this exact session pair/);
+    assert.equal((await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0, 'approval does not send work');
+    const file = a.file()!;
+    await a.close(); a = await participant('f11-command-lead', SessionManager.open(file));
+    a.confirm(false);
+    const known = await a.tool('comms_peers', { view: 'known' });
+    assert.ok(known.data.items.some((p: any) => p.id === b.id() && p.approved));
+    const msg = await a.tool('comms_message', { to: b.id(), subject: 'Now review', text: 'F11_COMMAND_REMEMBERED' });
+    assert.equal(msg.ok, true, JSON.stringify(msg));
+    assert.equal(a.dialogs.length, 0, 'remembered explicit owner contact is reused');
+  } finally { await a.close(); await b.close(); }
+});
