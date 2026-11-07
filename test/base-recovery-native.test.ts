@@ -360,3 +360,58 @@ test('F10 native: in-memory owner dismissal is live-only, never promised to surv
       'the ephemeral decision was not claimed to survive a new process');
   } finally { unsubscribe?.(); await b.close(); await a.close(); }
 });
+
+test('F11 native: owner-remembered first contact resumes without a second approval prompt', async () => {
+  let a = await participant('f11-remember-lead'); const b = await participant('f11-remember-reviewer');
+  try {
+    await a.runtime.session.prompt('Saved owner session'); await b.runtime.session.prompt('Saved reviewer session');
+    a.remember(true); a.confirm(true);
+    const first = await a.tool('comms_message', { to: b.id(), subject: 'Remembered contact', text: 'F11_FIRST_REVIEW' });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.equal(a.dialogs.length, 1, 'one owner decision screen including the Remember option');
+    assert.match(a.dialogs[0], /Approve and remember this exact session pair/);
+    assert.ok(a.notifications.some(s => /Remembered for this exact saved session pair/.test(s)));
+    await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
+
+    const file = a.file()!, ownerId = a.id();
+    await a.close(); a = await participant('f11-remember-lead', SessionManager.open(file));
+    assert.equal(a.id(), ownerId);
+    a.confirm(false); // No new first-contact prompt may be needed.
+    const listed = await a.tool('comms_peers', { view: 'known' });
+    assert.ok(listed.data.items.some((p: any) => p.id === b.id() && p.approved), 'only the exact saved pair is remembered');
+    const second = await a.tool('comms_message', { to: b.id(), subject: 'Continue remembered work', text: 'F11_AFTER_RESTART' });
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.equal(a.dialogs.length, 0, 'no repeated owner confirmation after saved-session restart');
+    await waitFor(async () => (await b.tool('comms_inspect', { message: second.data.message.id })).ok === true);
+
+    a.confirm(true); await a.command(`revoke ${b.id()}`);
+    const afterRevoke = a.file()!;
+    await a.close(); a = await participant('f11-remember-lead', SessionManager.open(afterRevoke));
+    assert.equal((await a.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === b.id()), false);
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', { to: b.id(), subject: 'No remembered grant', text: 'F11_MUST_NOT_SEND' });
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(a.dialogs.length, 1, 'revoked contact requires a fresh owner decision');
+  } finally { await a.close(); await b.close(); }
+});
+
+test('F11 native: transported consent does not persist for receiver owner on restart', async () => {
+  const a = await participant('f11-provenance-lead'); let b = await participant('f11-provenance-reviewer');
+  try {
+    await a.runtime.session.prompt('Saved lead'); await b.runtime.session.prompt('Saved receiver');
+    a.remember(true); a.confirm(true);
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Owner provenance', text: 'F11_A_REMEMBERS_B' });
+    assert.equal(sent.ok, true);
+    await waitFor(() => b.observed.some(messages => text(messages).includes('F11_A_REMEMBERS_B')) && b.runtime.session.isIdle);
+    assert.equal(b.dialogs.length, 0, 'fresh sender assertion continues the normal receiver path');
+    const file = b.file()!;
+    await b.close(); b = await participant('f11-provenance-reviewer', SessionManager.open(file));
+    const known = await b.tool('comms_peers', { view: 'known' });
+    assert.equal(known.data.items.some((p: any) => p.id === a.id()), false, 'A owner choice did not become B remembered approval');
+    b.confirm(false);
+    const attempt = await b.tool('comms_message', { to: a.id(), subject: 'B must approve', text: 'F11_PROVENANCE_CHECK' });
+    assert.equal(attempt.error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(b.dialogs.length, 1, 'B receives its own contact decision, never inherits A choice');
+  } finally { await b.close(); await a.close(); }
+});
