@@ -18,9 +18,10 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { CONTACT_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
+import { CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
+import { PairApprovalStore } from "./pair-approvals.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
@@ -256,6 +257,7 @@ class IntercomBroker {
   private namespaceOwners = new Map<string, NamespaceOwner>();
   private nextOwnerOrder = 1;
   private extensionStateManager: ExtensionStateManager;
+  private pairApprovals: PairApprovalStore;
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
@@ -263,6 +265,7 @@ class IntercomBroker {
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
+    this.pairApprovals = new PairApprovalStore(INTERCOM_DIR);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);
@@ -565,6 +568,7 @@ class IntercomBroker {
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
           ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
+          ...(session.pairConsentV1 === true ? { pairConsentV1: true } : {}),
         };
 
         const connectedSession: ConnectedSession = {
@@ -594,7 +598,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, CONTACT_APPROVAL_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
