@@ -9,11 +9,18 @@ type Labels = { self: string; name: (id: string) => string; approved: (id: strin
 export const CONTACT_SESSION = 'Approve for this session only (default)';
 export const CONTACT_REMEMBER = 'Approve and remember this exact session pair';
 export const CONTACT_REFUSE = 'No — refuse this exact contact';
+export const CONTACT_CANCEL = 'Cancel — leave contact approval unchanged';
 export const CONTACT_CHOICES = [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE];
+export const CONTACT_GRANT_CHOICES = [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CANCEL];
 
 export function contactDecisionTitle(title: string, message: string): string {
   // One human decision surface; no follow-up permission prompt.
-  return `${title}\n\n${message}\n\nChoose one option. Remembered approval is limited to this exact saved session and peer, until you revoke it. A fresh or unsaved session stays live-only until Pi saves it.`;
+  return `${title}\n\n${message}\n\nChoose one option. Remembered approval is limited to this exact saved session and peer, until you revoke it. Remember applies to this session's approval; it does not save the colleague's approval. A fresh or unsaved session stays live-only until Pi saves it.`;
+}
+
+/** Explicit /comms approve changes only this session's grant; it never sends or refuses. */
+export function explicitApprovalTitle(id: string, colleague: string, work: string): string {
+  return `Approve contact with ${colleague}?\n\nWork: ${work}\n\nChoose session-only approval (default) or remember this exact saved session and peer until you revoke it.\nRemember applies to this session's approval; it does not save the colleague's approval.\nThis command does not send a message. Cancel or Esc leaves any existing contact approval unchanged; use /comms revoke to refuse an approved contact.\n\nSession: ${id}`;
 }
 
 export function approvalPrompt(id: string, colleague: string, work: string, text: string, direction: 'send' | 'receive') {
