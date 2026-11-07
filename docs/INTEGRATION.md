@@ -71,7 +71,7 @@ if (report) {
 
 This code does not wait on a new completion mode: Pi's normal incoming path delivers questions and actionable reports automatically. Progress-only records remain inspectable. The organizing package still decides what the work means and whether to accept or reassign it.
 
-For first-contact handling, a caller with no native human approval UI receives `CONTACT_APPROVAL_REQUIRED` rather than gaining access. The owner chooses session-only approval (default), remembered exact saved-session approval, or refusal in one human screen. Either tool or the organizer API uses the same runtime authority; neither can supply a flag to remember contact. B↔C needs separate consent. Only a local owner-remembered choice survives the same saved session's restart; a sender's transported assertion never persists the recipient owner's grant.
+For first-contact handling, a caller with no native human approval UI receives `CONTACT_APPROVAL_REQUIRED` rather than gaining access. The owner chooses session-only approval (default), remembered exact saved-session approval, or refusal in one human screen. Either tool or the organizer API uses the same runtime authority; neither can supply a flag to remember contact. B↔C needs separate consent. Only a local owner-remembered choice survives the same saved session's restart; a sender's transported assertion never persists the recipient owner's grant. `/comms approve` only grants/edits local permission, with Cancel/Esc leaving prior consent unchanged; `/comms revoke` handles revocation.
 
 ## Trust and lifecycle
 
