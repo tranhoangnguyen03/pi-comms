@@ -1,6 +1,6 @@
 # M4 — native-session recovery and a small durable mailbox
 
-**Status: proposed design, not shipped behavior.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
+**Status: design contract; F10 is merged, F11 is in implementation, F12 remains proposed.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
 
 ## Decision
 
@@ -84,7 +84,7 @@ A write failure must stop the affected operation and report that persistence fai
 
 ## F11 — remember only the decision actually made
 
-Runtime-only approval remains the default. Add the optional remembered exact-pair choice inside the **existing contact confirmation**, with no second routine dialog, permission mode for the agent or new settings service. Earlier grants are never upgraded automatically.
+Runtime-only approval remains the default. Use one contact choice screen in the **existing first-contact human flow**: approve for this session (default), approve and remember this exact saved pair, or refuse. No second routine dialog, permission mode for the agent or new settings service. Earlier grants are never upgraded automatically. Remembered owner consent uses the same native contact entry and is restored only for its original owner session ID, peer ID and scope; an unsaved/ephemeral choice is live-only until Pi saves it.
 
 Use the same session-record writer for owner grant, revoke and Pause. **Negative controls survive from the first slice that restores incoming records**; do not postpone revocation durability while enabling replay. F11 adds optional remembered positive consent and the complete provenance behavior.
 
