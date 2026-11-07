@@ -498,11 +498,14 @@ export default function comms(pi: ExtensionAPI) {
           if (!selected) return;
           validate(Id, selected);
           if (action === 'revoke') {
-            if (await commandCtx.ui.confirm('Revoke contact?', `${selected}. Queued messages remain held; ordinary resends cannot restore approval. Previously authorized history stays readable.`, { signal })) {
+            if (await commandCtx.ui.confirm('End this contact?', 'Stops both sessions from sending new messages to each other. Past messages remain readable.', { signal })) {
               if (signal.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
-              try { current.revokeFromOwner(selected); }
-              finally { endAsks('revoked', selected); cancelContact(selected); declined.add(selected); prompted.add(selected); status(); }
-              if (records?.info().state === 'volatile') commandCtx.ui.notify('Revoked in this runtime. The control is live-only until Pi saves this session.', 'info');
+              await ensureConnection();
+              const pair = await client!.decidePair(selected, 'revoked', '');
+              current.syncPairStatus(pair, name(selected));
+              endAsks('revoked', selected); cancelContact(selected);
+              declined.add(selected); prompted.add(selected); status();
+              commandCtx.ui.notify('Contact ended for both sessions.', 'info');
             }
             return;
           }
@@ -515,11 +518,11 @@ export default function comms(pi: ExtensionAPI) {
             explicitApprovalTitle(selected, peer.name, collaboration.trim()), CONTACT_GRANT_CHOICES, { signal });
           if (signal.aborted || runtime !== current || stopped) throw new Error('CONTACT_CANCELLED');
           if (choice !== CONTACT_SESSION && choice !== CONTACT_REMEMBER) return;
-          const state = current.approveFromOwner({ id: selected, name: peer.name, context: collaboration.trim() }, choice === CONTACT_REMEMBER);
+          await ensureConnection();
+          const pair = await client!.decidePair(selected, choice === CONTACT_REMEMBER ? 'remembered' : 'session', collaboration.trim().slice(0, 300));
+          current.syncPairStatus(pair, peer.name);
           declined.delete(selected);
-          commandCtx.ui.notify(choice === CONTACT_REMEMBER
-            ? state === 'saved' ? 'Exact-session contact remembered until revoked.' : 'Remember requested; approval is live-only until Pi saves this session.'
-            : 'Contact approved for this runtime only.', 'info');
+          commandCtx.ui.notify(choice === CONTACT_REMEMBER ? 'Contact allowed and remembered for both sessions.' : 'Contact allowed for this session.', 'info');
         });
       } catch (error) { commandCtx.ui.notify(String(error), 'error'); status(); }
       return;
@@ -581,6 +584,8 @@ export default function comms(pi: ExtensionAPI) {
     if (item) { item.peer = to; item.subject = source?.subject ?? input.subject; item.workRef = source?.workRef ?? input.workRef; }
     if (!current.isApproved(to)) {
       await ensureConnection();
+      // Remembered A-B works whichever endpoint sends first after restart.
+      if (current.isApproved(to)) return resolved;
       const peer = (await client!.listSessions()).find(p => p.id === to);
       if (!peer || to === current.self) throw new Error('TARGET_UNAVAILABLE');
       await approveContact(to, peer.name ?? to, source?.subject ?? input.subject!, input.text, 'send', signal);
