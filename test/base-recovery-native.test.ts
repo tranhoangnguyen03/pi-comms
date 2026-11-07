@@ -253,7 +253,7 @@ test('F10 native: cleared busy-boundary steer remains offered, not falsely poste
     // The existing human requests path first obtains current consent, then
     // an explicit duplicate-risk decision. It uses the original message ID.
     await b.command('requests');
-    assert.ok(b.dialogs.some(dialog => /wants to work with you/.test(dialog)), 'no silent contact reapproval after restart');
+    assert.ok(b.dialogs.some(dialog => /to contact you/.test(dialog)), 'no silent contact reapproval after restart');
     assert.ok(b.dialogs.some(dialog => /may have already received|may make the agent act twice/.test(dialog)), 'duplicate-work risk was disclosed');
     assert.ok(b.dialogs.some(dialog => /If this write succeeds, the choice will be saved in your Pi session for restart/.test(dialog)), 'saved-session prompt states the conditional commit boundary');
     await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
