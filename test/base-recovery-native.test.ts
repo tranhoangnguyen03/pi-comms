@@ -371,6 +371,8 @@ test('F11 native: owner-remembered first contact resumes without a second approv
     assert.equal(a.dialogs.length, 1, 'one owner decision screen including the Remember option');
     assert.ok(a.consentChoices[0].some(choice => /Approve and remember this exact session pair/.test(choice)));
     assert.ok(a.notifications.some(s => /Remembered for this exact saved session pair/.test(s)));
+    await a.command('status');
+    assert.match(a.notifications.at(-1)!, /remembered until revoked/, 'human status shows the saved choice');
     await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
 
     const file = a.file()!, ownerId = a.id();
@@ -382,6 +384,8 @@ test('F11 native: owner-remembered first contact resumes without a second approv
     const second = await a.tool('comms_message', { to: b.id(), subject: 'Continue remembered work', text: 'F11_AFTER_RESTART' });
     assert.equal(second.ok, true, JSON.stringify(second));
     assert.equal(a.dialogs.length, 0, 'no repeated owner confirmation after saved-session restart');
+    await a.command('status');
+    assert.match(a.notifications.at(-1)!, /remembered until revoked/);
     await waitFor(async () => (await b.tool('comms_inspect', { message: second.data.message.id })).ok === true);
 
     a.confirm(true); await a.command(`revoke ${b.id()}`);
