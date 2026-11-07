@@ -585,3 +585,25 @@ test('F11: a fresh remembered choice remains volatile until Pi saves a real turn
   assert.equal(ephemeral.log.info().state, 'volatile');
 });
 
+test('F11: failed remembered owner grant cannot replace a saved refusal or expose held history', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.revokeFromOwner(b.id);
+  const held = envelope({ text: 'STILL_WITHHELD_AFTER_FAILED_REMEMBER' });
+  f.runtime.receive(b.id, held);
+  const file = f.manager.getSessionFile()!;
+  const manager = SessionManager.open(file);
+  const broken = attach(manager, f.root, (type, data) => {
+    const event = (data as { event?: { kind?: string; remembered?: unknown } })?.event;
+    if (event?.kind === 'contact' && event.remembered) throw new Error('simulated remembered grant write failure');
+    manager.appendCustomEntry(type, data);
+  });
+  assert.equal(broken.runtime.isRevoked(b.id), true);
+  assert.throws(() => broken.runtime.approveFromOwner(b, true), /PERSISTENCE_FAILED/);
+  assert.equal(broken.runtime.isRemembered(b.id), false);
+  assert.equal(broken.runtime.isApproved(b.id), false);
+  const reopened = attach(SessionManager.open(file), f.root);
+  assert.equal(reopened.runtime.isRevoked(b.id), true);
+  assert.equal(reopened.runtime.isApproved(b.id), false);
+  assert.equal(reopened.runtime.isRemembered(b.id), false);
+  assert.equal((reopened.runtime.inspect({ message: held.id }) as any).evidence, 'withheld');
+});
