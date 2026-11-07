@@ -9,13 +9,13 @@ import { Id, EnvelopeSchema, MessageInput, AskInput, PeersInput, InspectInput, O
 import { sendExactSession } from './transport/send.ts';
 import { connect } from './transport/start.ts';
 import { IntercomClient } from './transport/broker/client.ts';
-import type { SessionInfo, ContactApproval, Message as WireMessage } from './transport/types.ts';
+import { PAIR_APPROVAL_FEATURE, type SessionInfo, type PairStatus, type Message as WireMessage } from './transport/types.ts';
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
 import { approvalPrompt, contactDecisionTitle, explicitApprovalTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CHOICES, CONTACT_GRANT_CHOICES, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
 import { getAgentDirPath, getBrokerConnectTarget } from './transport/broker/paths.ts';
 import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
-const RESET = 'Saved Pi sessions retain communication records, authorized history, return handles, Pause and revocation. Contact approval ends on reload unless you explicitly chose Remember for this exact saved session pair. Fresh or --no-session sessions remain live-only until Pi saves them. No offline mail or automatic resend.';
+const RESET = 'One approval covers both directions of an exact session pair. Remembered pairs survive restart via the local broker; either session can revoke. Native Pi records retain communication history and Pause. No offline mail or automatic resend.';
 const HELP = 'Stop ends the current run; later peers may wake it. Pause holds peer admission/wakes, not current work or already-posted content. /comms approve | revoke | pause | resume | status | inspect | requests';
 const recovery: Record<string, string> = {
   CONTACT_NOT_APPROVED: 'Contact was not approved. Nothing was sent. Do not retry unless the user asks; /comms approve can change the decision.',
@@ -229,15 +229,29 @@ export default function comms(pi: ExtensionAPI) {
     connecting = (async () => {
       const candidate = new IntercomClient();
       candidate.on('error', () => undefined);
-      candidate.on('disconnected', () => { if (client === candidate) { endAsks('disconnected'); connectionError = 'offline; reconnecting'; nextReconnect = Date.now() + 1000; status(); } });
+      current.resetPairCache();
+      candidate.on('disconnected', () => { if (client === candidate) { current.resetPairCache(); endAsks('disconnected'); connectionError = 'offline; reconnecting'; nextReconnect = Date.now() + 1000; status(); } });
       candidate.on('presence_update', (peer: SessionInfo) => { if (runtime === current && !stopped) peerNames.set(peer.id, peer.name ?? peer.id); });
-      candidate.on('message', (from: SessionInfo, wire: WireMessage, approval?: ContactApproval) => {
+      candidate.on('pair_update', (state: PairStatus) => {
+        if (runtime !== current || stopped) return;
+        const wasApproved = current.isApproved(state.peer);
+        try { current.syncPairStatus(state, name(state.peer)); }
+        catch (error) { context.ui.notify(`Pair contact state could not be applied: ${String(error)}`, 'warning'); return; }
+        if (state.mode === 'revoked' || (wasApproved && state.mode === 'none')) {
+          endAsks('revoked', state.peer);
+          cancelContact(state.peer);
+          declined.add(state.peer);
+          prompted.add(state.peer);
+        }
+        status();
+      });
+      candidate.on('message', (from: SessionInfo, wire: WireMessage) => {
         if (runtime !== current || stopped) return;
         try {
           const envelope = JSON.parse(wire.content.text ?? ''); validate(EnvelopeSchema, envelope);
           if (envelope.id !== wire.id) throw new Error('INVALID_INPUT: envelope ID mismatch');
           const fresh = current.receive(from.id, envelope);
-          if (approval) current.approveFromTransport({ id: from.id, name: from.name ?? from.id, context: approval.context });
+          // Modern pair consent is a broker decision, never transported message metadata.
           peerNames.set(from.id, from.name ?? from.id);
           if (fresh && !current.isApproved(from.id)) context.ui.notify(`Contact request from ${from.name ?? from.id}: ${envelope.subject}. Held for you, not the agent. Approval appears when idle; /comms requests to review.`, 'info');
           // This existing receipt confirms live intake, not crash-durable mail.
@@ -247,14 +261,18 @@ export default function comms(pi: ExtensionAPI) {
         } catch (error) { context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning'); status(); }
       });
       try {
-        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, candidate, new URL('./transport/broker/broker.js', import.meta.url));
+        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true }, candidate, new URL('./transport/broker/broker.js', import.meta.url));
+        if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE)) throw Error('PAIR_UNSUPPORTED_BROKER');
+        const pairSnapshot = await candidate.listPairs();
+        for (const item of pairSnapshot) current.syncPairStatus(item, name(item.peer));
         if (runtime !== current || stopped) { await candidate.disconnect(); return; }
         client = candidate; candidate.updatePresence({ name: context.sessionManager.getSessionName() ?? current.self, status: active ? 'working' : 'idle' }); lastPresenceSentAt = Date.now();
         connectionError = undefined; reconnectDelay = 1000; status();
       } catch (error) {
         await candidate.disconnect();
         if (runtime !== current || stopped) throw new Error('CONTEXT_LOST');
-        connectionError = (error as { code?: string }).code === 'E_SESSION_HELD' ? 'IDENTITY_CONFLICT' : 'TARGET_UNAVAILABLE';
+        const reason = error instanceof Error ? error.message : String(error);
+        connectionError = (error as { code?: string }).code === 'E_SESSION_HELD' ? 'IDENTITY_CONFLICT' : reason.startsWith('PAIR_') ? reason : 'TARGET_UNAVAILABLE';
         nextReconnect = Date.now() + reconnectDelay; reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
         status(); throw new Error(connectionError);
       }
@@ -321,7 +339,7 @@ export default function comms(pi: ExtensionAPI) {
       try { await ensureConnection(); }
       catch (error) { return { outcome: 'rejected', code: error instanceof Error ? error.message : 'TARGET_UNAVAILABLE' }; }
       if (runtime !== current || stopped || !client) return { outcome: 'rejected', code: 'CONTEXT_LOST' };
-      return sendExactSession(client, current.isApproved, id, envelope, current.approval(id)?.context);
+      return sendExactSession(client, current.isApproved, id, envelope);
     }, log.append);
     runtime = current; records = log;
     const restored = log.load();
