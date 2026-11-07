@@ -49,9 +49,9 @@ async function participant(label: string, manager?: SessionManager) {
     notify: (message: string) => { notifications.push(message); }, setWidget: () => {}, setStatus: () => {},
     confirm: async (title: string, message: string) => { dialogs.push(`${title}\n${message}`); return confirm; },
     input: async () => 'Review continuity', select: async (title: string, choices: string[]) => {
-      if (choices.includes('Approve for this session only (default)')) {
+      if (choices.includes('Allow this session')) {
         dialogs.push(title); consentChoices.push([...choices]);
-        if (choices.includes('Cancel — leave contact approval unchanged') && selectChoice) return selectChoice(title, choices);
+        if (choices.includes('Cancel') && selectChoice) return selectChoice(title, choices);
         return confirm ? (rememberNext ? choices[1] : choices[0]) : choices[2];
       }
       return selectChoice ? selectChoice(title, choices) : choices[0];
@@ -370,7 +370,7 @@ test('F11 native: owner-remembered first contact resumes without a second approv
     const first = await a.tool('comms_message', { to: b.id(), subject: 'Remembered contact', text: 'F11_FIRST_REVIEW' });
     assert.equal(first.ok, true, JSON.stringify(first));
     assert.equal(a.dialogs.length, 1, 'one owner decision screen including the Remember option');
-    assert.ok(a.consentChoices[0].some(choice => /Approve and remember this exact session pair/.test(choice)));
+    assert.ok(a.consentChoices[0].some(choice => /Allow & remember/.test(choice)));
     assert.ok(a.notifications.some(s => /Remembered for this exact saved session pair/.test(s)));
     await a.command('status');
     assert.match(a.notifications.at(-1)!, /remembered until revoked/, 'human status shows the saved choice');
@@ -428,7 +428,7 @@ test('F11 native: explicit /comms approve can remember without sending or adding
     a.remember(true); a.confirm(true);
     await a.command(`approve ${b.id()}`);
     assert.equal(a.dialogs.length, 1, 'explicit setup uses one consent screen, not a second permission dialog');
-    assert.ok(a.consentChoices[0].some(choice => /Approve and remember this exact session pair/.test(choice)));
+    assert.ok(a.consentChoices[0].some(choice => /Allow & remember/.test(choice)));
     assert.equal((await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0, 'approval does not send work');
     const file = a.file()!;
     await a.close(); a = await participant('f11-command-lead', SessionManager.open(file));
@@ -459,9 +459,9 @@ test('F11 native: editing an existing remembered grant can be cancelled or Esc w
     ]) {
       a.select(result);
       await a.command(`approve ${b.id()}`);
-      assert.ok(a.consentChoices.at(-1)?.some(choice => /Cancel — leave contact approval unchanged/.test(choice)));
-      assert.ok(a.dialogs.at(-1)?.includes('This command does not send a message'));
-      assert.ok(a.dialogs.at(-1)?.includes("does not save the colleague's approval"));
+      assert.ok(a.consentChoices.at(-1)?.some(choice => /Cancel/.test(choice)));
+      assert.ok(a.dialogs.at(-1)?.includes('This command sends nothing'));
+      assert.ok(a.dialogs.at(-1)?.includes("Cancel leaves existing approval unchanged"));
       await a.command('status');
       assert.match(a.notifications.at(-1)!, /remembered until revoked/);
     }
