@@ -440,3 +440,42 @@ test('F11 native: explicit /comms approve can remember without sending or adding
     assert.equal(a.dialogs.length, 0, 'remembered explicit owner contact is reused');
   } finally { await a.close(); await b.close(); }
 });
+
+test('F11 native: editing an existing remembered grant can be cancelled or Esc without changing saved consent', async () => {
+  let a = await participant('f11-grant-cancel-lead');
+  const b = await participant('f11-grant-cancel-peer');
+  try {
+    await a.runtime.session.prompt('Saved owner session');
+    await b.runtime.session.prompt('Saved peer session');
+    a.remember(true);
+    await a.command(`approve ${b.id()}`);
+    await a.command('status');
+    assert.match(a.notifications.at(-1)!, /remembered until revoked/);
+    const firstCount = a.dialogs.length;
+
+    for (const result of [
+      (_title: string, choices: string[]) => choices.find(choice => choice.startsWith('Cancel')),
+      (_title: string, _choices: string[]) => undefined, // Escape
+    ]) {
+      a.select(result);
+      await a.command(`approve ${b.id()}`);
+      assert.ok(a.consentChoices.at(-1)?.some(choice => /Cancel — leave contact approval unchanged/.test(choice)));
+      assert.ok(a.dialogs.at(-1)?.includes('This command does not send a message'));
+      assert.ok(a.dialogs.at(-1)?.includes("does not save the colleague's approval"));
+      await a.command('status');
+      assert.match(a.notifications.at(-1)!, /remembered until revoked/);
+    }
+    assert.equal(a.dialogs.length, firstCount + 2, 'only the two grant editing screens were added');
+    assert.equal((await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
+
+    const file = a.file()!, id = a.id();
+    await a.close(); a = await participant('f11-grant-cancel-lead', SessionManager.open(file));
+    assert.equal(a.id(), id);
+    a.confirm(false);
+    const known = await a.tool('comms_peers', { view: 'known' });
+    assert.ok(known.data.items.some((item: any) => item.id === b.id()), 'cancel and Escape did not remove the saved grant');
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Still approved', text: 'RETAINED_REMEMBERED_CONSENT' });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    assert.equal(a.dialogs.length, 0, 'restart uses the preserved grant without another owner prompt');
+  } finally { await a.close(); await b.close(); }
+});
