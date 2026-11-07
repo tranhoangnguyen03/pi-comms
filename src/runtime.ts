@@ -16,6 +16,7 @@ export class Runtime {
   private approvals = new Map<string, Approval>();
   // Read-through cache of broker pair decisions; not a second durable grant.
   private rememberedApprovals = new Map<string, Approval>();
+  private pairVersions = new Map<string, number>();
   private revoked = new Set<string>();
   private records = new Map<string, Entry>();
   private returns = new Map<string, Message>();
@@ -182,6 +183,8 @@ export class Runtime {
   // runtime only caches the broker's decision for its own exact peer.
   syncPairStatus(status: PairStatus, name = status.peer) {
     validate(Id, status.peer);
+    if (status.revision < (this.pairVersions.get(status.peer) ?? -1)) return;
+    this.pairVersions.set(status.peer, status.revision);
     if (status.mode === 'remembered' || status.mode === 'session') {
       // Already authorized history and new held content become readable by
       // native evidence, without persisting a second positive permission.
@@ -201,6 +204,7 @@ export class Runtime {
   resetPairCache() {
     this.approvals.clear();
     this.rememberedApprovals.clear();
+    this.pairVersions.clear();
   }
   isRevoked = (id: string) => this.revoked.has(id);
   isRemembered = (id: string) => this.rememberedApprovals.has(id);
