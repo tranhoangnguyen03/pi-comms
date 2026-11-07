@@ -879,8 +879,10 @@ test('F11: B-side owner approval replaces an A-side refusal for one shared pair'
     assert.match(a.dialogs[0].message, /Allows messages between these sessions, not approval of the work/);
     assert.equal(data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
 
-    // One fresh owner decision from B grants the SAME pair in both directions.
+    // A completed refusal cannot be reversed by a tool retry. The owner
+    // explicitly reapproves from B; that ONE decision grants both directions.
     b.confirm(true); b.remember(true);
+    await b.command(`approve ${a.id()}`);
     const later = data(await b.tool('comms_message', { to: a.id(), subject: 'Incoming', text: 'NEW_INCOMING_AFTER_NO' }));
     assert.equal(later.ok, true);
     await waitFor(() => a!.observed.some(messages => text(messages).includes('NEW_INCOMING_AFTER_NO')) && a!.runtime.session.isIdle);
