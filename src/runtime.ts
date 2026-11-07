@@ -2,45 +2,218 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, InspectInput } from './schema.ts';
 import type { Attempt } from './session-send.ts';
+import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState } from './session-records.ts';
 
-export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
+export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
-export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost' };
+type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized' | 'dismissed';
+export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
 export type Approval = { id: string; name: string; context: string };
+export const ASK_ADMISSION = 'native ask result context admission';
+export const NESTED_HANDOFF = 'ask result handed to nested caller';
 export class Runtime {
   private approvals = new Map<string, Approval>();
   private revoked = new Set<string>();
   private records = new Map<string, Entry>();
   private returns = new Map<string, Message>();
+  private saveStates = new Map<string, SaveState | 'partial'>();
+  private uncertainAdmission = new Set<string>();
+  private recoveryIssue: string | undefined;
+  private pause = false;
   waiting: string[] = [];
-  paused = false;
-  constructor(readonly self: string, private transport: (id: string, envelope: Envelope) => Promise<Attempt>) {}
+  constructor(readonly self: string, private transport: (id: string, envelope: Envelope) => Promise<Attempt>, private writer?: RecordWriter) {}
+  get paused() { return this.pause; }
+  set paused(value: boolean) {
+    if (this.pause === value) { this.assertOperational(); return; }
+    // A human stop applies immediately, even when saving the control fails.
+    if (value) this.pause = true;
+    this.write({ kind: 'pause', value });
+    this.pause = value;
+  }
+  holdReason() { return this.recoveryIssue; }
+  holdRecovery(reason: string) { this.recoveryIssue ??= reason; }
+  assertOperational() { if (this.recoveryIssue) throw new Error(`RECOVERY_BLOCKED: ${this.recoveryIssue}`); }
+  private write(event: RecoveryEvent, ids: string[] = []) {
+    this.assertOperational();
+    try {
+      const state = this.writer?.(event) ?? 'volatile';
+      ids.forEach(id => this.saveStates.set(id, state));
+      return state;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      ids.forEach(id => this.saveStates.set(id, 'partial'));
+      this.holdRecovery(reason);
+      throw error;
+    }
+  }
+  // Recovery is a reduction of our own native entries, never a replay of sends.
+  // Approval grants intentionally do not survive this F10 slice.
+  restore(events: readonly RecoveryEvent[], saved: SaveState = 'saved') {
+    if (this.records.size || this.approvals.size) throw new Error('INVALID_INPUT: restore requires a fresh runtime');
+    for (const raw of events) {
+      try {
+        if (!isRecoveryEvent(raw)) throw new Error('Invalid communication record');
+        const event = structuredClone(raw);
+        switch (event.kind) {
+          case 'message': {
+            const entry = event.entry as Entry;
+            const message = entry.message;
+            const outgoing = message.from === this.self && message.to !== this.self;
+            const incoming = message.to === this.self && message.from !== this.self;
+            if (!outgoing && !incoming) throw new Error('Record belongs to a different participant');
+            if (outgoing && (entry.returnHandle || entry.intake) || incoming && (!entry.returnHandle || entry.intake !== 'waiting')) throw new Error('Invalid recorded message direction');
+            const prior = this.records.get(message.id);
+            if (prior) {
+              if (!isDeepStrictEqual(prior.message, message) || prior.returnHandle !== entry.returnHandle) throw new Error('Conflicting recorded message ID');
+              break;
+            }
+            if (entry.returnHandle && this.returns.has(entry.returnHandle)) throw new Error('Conflicting recorded reply handle');
+            this.records.set(message.id, entry);
+            if (entry.returnHandle) this.returns.set(entry.returnHandle, message);
+            this.saveStates.set(message.id, saved);
+            break;
+          }
+          case 'outcome': {
+            const entry = this.required(event.id);
+            if (entry.message.from !== this.self) throw new Error('Outgoing outcome attached to an incoming message');
+            entry.state = event.state as Attempt['outcome']; entry.code = event.code;
+            break;
+          }
+          case 'fact': this.addFact(this.required(event.id), event.fact as Fact); break;
+          case 'visibility':
+            for (const id of event.ids) { const entry = this.required(id); if (entry.message.to !== this.self) throw new Error('Visibility attached to an outgoing message'); entry.readable = true; }
+            break;
+          case 'intake':
+            for (const id of event.ids) { const entry = this.required(id); if (entry.message.to !== this.self) throw new Error('Intake attached to an outgoing message'); entry.intake = event.disposition as Intake; entry.intakeSource = event.source; }
+            break;
+          case 'pause': this.pause = event.value; break;
+          case 'contact': {
+            if (event.revoked) this.revoked.add(event.peer);
+            else {
+              // Apply a completed owner reapproval as a single saved decision.
+              // Validate all referenced messages before clearing a durable deny.
+              const visible = (event.readableIds ?? []).map(id => this.required(id));
+              if (visible.some(entry => entry.message.to !== this.self || entry.message.from !== event.peer)) {
+                throw new Error('Contact visibility belongs to another peer');
+              }
+              visible.forEach(entry => { entry.readable = true; });
+              this.revoked.delete(event.peer);
+            }
+            break;
+          }
+        }
+      } catch (error) {
+        this.holdRecovery(`Saved communication is incomplete: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const entry of this.records.values()) {
+      if (entry.message.to !== this.self) continue;
+      // Earlier F10 drafts used 'posted' for a completed nested-caller
+      // handoff. Its explicit source is sufficient to migrate that local
+      // disposition, but NOT general Pi posting or model consumption.
+      if (entry.intake === 'posted' && entry.intakeSource === NESTED_HANDOFF) {
+        entry.intake = 'handed-off';
+        for (const fact of entry.facts) {
+          if (fact.kind === 'posted' && fact.source === NESTED_HANDOFF) fact.kind = 'handed-off';
+        }
+      }
+      if (entry.intake === 'posted' && entry.intakeSource === 'native Pi sendMessage') {
+        // Older F10 drafts marked a queued steer posted immediately. Without
+        // native-history proof, recover only the offer and discard its false
+        // posted receipt; reconciliation can confirm genuine admission later.
+        entry.intake = 'offered';
+        entry.facts = entry.facts.filter(fact => !(fact.kind === 'posted' && fact.source === 'native Pi sendMessage'));
+      }
+      if (entry.intake === 'summarized' || entry.intake === 'handed-off' || entry.intake === 'dismissed') continue;
+      this.waiting.push(entry.message.id);
+      if (entry.intake !== 'waiting') this.uncertainAdmission.add(entry.message.id);
+    }
+  }
+  private required(id: string) {
+    const entry = this.records.get(id);
+    if (!entry) throw new Error('Communication change has no original message');
+    return entry;
+  }
+  private allowHistory(id: string) {
+    const ids = [...this.records.values()].filter(entry => entry.message.from === id && !entry.readable).map(entry => entry.message.id);
+    if (!ids.length) return;
+    this.write({ kind: 'visibility', ids }, ids);
+    ids.forEach(message => { this.records.get(message)!.readable = true; });
+  }
   // Passed only to the human command handler, never registered as an agent tool.
-  approveFromOwner(peer: Approval) { this.revoked.delete(peer.id); this.approvals.set(peer.id, { ...peer }); }
-  // Only transport metadata emitted by the human-approved runtime can reach this path.
-  approveFromTransport(peer: Approval) { if (!this.revoked.has(peer.id) && !this.isApproved(peer.id)) this.approvals.set(peer.id, { ...peer }); }
-  revokeFromOwner(id: string) { this.revoked.add(id); this.approvals.delete(id); }
+  approveFromOwner(peer: Approval) {
+    validate(Id, peer.id); this.assertOperational();
+    // Reapproval and newly readable held history are one saved decision.
+    // Failure cannot clear a revocation without its matching visibility.
+    const visible = [...this.records.values()].filter(entry => entry.message.from === peer.id && !entry.readable);
+    const ids = visible.map(entry => entry.message.id);
+    this.write({ kind: 'contact', peer: peer.id, revoked: false, ...(ids.length ? { readableIds: ids } : {}) }, ids);
+    visible.forEach(entry => { entry.readable = true; });
+    this.revoked.delete(peer.id); this.approvals.set(peer.id, { ...peer });
+  }
+  // Only a fresh transport assertion reaches this path. It can authorize this
+  // runtime, not a positive grant in the restored owner's next runtime.
+  approveFromTransport(peer: Approval) {
+    if (this.revoked.has(peer.id) || this.isApproved(peer.id)) return;
+    this.assertOperational(); this.allowHistory(peer.id); this.approvals.set(peer.id, { ...peer });
+  }
+  revokeFromOwner(id: string) {
+    validate(Id, id); this.revoked.add(id); this.approvals.delete(id);
+    this.write({ kind: 'contact', peer: id, revoked: true });
+  }
+  isRevoked = (id: string) => this.revoked.has(id);
   approval(id: string) { const peer = this.approvals.get(id); return peer ? { ...peer } : undefined; }
   isApproved = (id: string) => this.approvals.has(id);
   known() { return [...this.approvals.values()].map(p => ({ ...p })); }
-  // Only describe labels this session supplied for exact recipients of accepted requests.
-  // A label belongs to an exchange, not the recipient's global identity or permissions.
   peerLabels(id: string) {
     return [...this.records.values()].reverse()
-      .filter(entry => entry.message.from === this.self && entry.message.to === id &&
-        entry.message.recipientLabel !== undefined && entry.state === 'accepted')
+      .filter(entry => entry.message.from === this.self && entry.message.to === id && entry.message.recipientLabel !== undefined && entry.state === 'accepted')
       .slice(0, 8)
-      .map(entry => ({ exchange: entry.message.exchange, workRef: entry.message.workRef ?? null,
-        label: entry.message.recipientLabel!, source: 'sender-supplied' as const }));
+      .map(entry => ({ exchange: entry.message.exchange, workRef: entry.message.workRef ?? null, label: entry.message.recipientLabel!, source: 'sender-supplied' as const }));
   }
   entry(id: string) { return this.records.get(id); }
+  private addFact(entry: Entry, fact: Fact) {
+    if (!entry.facts.some(existing => existing.kind === fact.kind && existing.evidenceRef === fact.evidenceRef)) entry.facts.push(fact);
+  }
   fact(id: string, kind: Fact['kind'], source: string, evidenceRef?: string) {
     const entry = this.records.get(id);
-    if (entry && !entry.facts.some(f => f.kind === kind && f.evidenceRef === evidenceRef)) entry.facts.push({ kind, at: new Date().toISOString(), source, ...(evidenceRef ? { evidenceRef } : {}) });
+    if (!entry || entry.facts.some(f => f.kind === kind && f.evidenceRef === evidenceRef)) return;
+    const fact: Fact = { kind, at: new Date().toISOString(), source, ...(evidenceRef ? { evidenceRef } : {}) };
+    // Native saved-history evidence is already stored by Pi. Do not duplicate
+    // that evidence in another stream, or append merely because we inspected it.
+    if (kind !== 'saved') this.write({ kind: 'fact', id, fact }, [id]);
+    this.addFact(entry, fact);
+  }
+  observedRecord(message: Message) {
+    const entry = this.records.get(message.id);
+    // The host may flush initially buffered custom entries after a real turn.
+    // A previous failed update remains partial until recovery reconciles it.
+    if (entry && this.saveStates.get(message.id) === 'volatile' && isDeepStrictEqual(entry.message, message)) this.saveStates.set(message.id, 'saved');
+  }
+  wasAskAdmitted(id: string) {
+    const entry = this.records.get(id);
+    return entry?.intake === 'posted' && entry.intakeSource === ASK_ADMISSION;
+  }
+  observedNative(ids: string[], evidenceRef: string, kind: 'batch' | 'ask' = 'batch', saved = true) {
+    for (const id of ids) {
+      const entry = this.records.get(id);
+      if (!entry || entry.message.to !== this.self || entry.intake === 'handed-off') continue;
+      // A queued steering offer is not admission. Only a matching native Pi
+      // session entry proves that the host actually took the message.
+      // A saved ask candidate alone is not evidence that it reached context.
+      if (kind === 'ask' && !this.wasAskAdmitted(id)) continue;
+      entry.intake = 'posted'; entry.readable = true;
+      entry.intakeSource = kind === 'ask' ? ASK_ADMISSION : 'native Pi session entry observed';
+      this.uncertainAdmission.delete(id);
+      this.waiting = this.waiting.filter(waiting => waiting !== id);
+      this.addFact(entry, { kind: 'posted', at: new Date().toISOString(),
+        source: kind === 'ask' ? ASK_ADMISSION : 'native Pi session entry', evidenceRef });
+      if (saved) this.addFact(entry, { kind: 'saved', at: new Date().toISOString(),
+        source: 'native session entry observed on disk', evidenceRef });
+    }
   }
   contactFor(input: MessageInput) {
-    validate(MessageInput, input);
-    checkSize(input);
+    validate(MessageInput, input); checkSize(input);
     const source = 'respondTo' in input ? this.returns.get(input.respondTo) : undefined;
     if ('respondTo' in input && !source) throw new Error('CONTEXT_LOST');
     const to = source?.from ?? input.to;
@@ -48,50 +221,46 @@ export class Runtime {
     const correction = input.corrects ? this.records.get(input.corrects)?.message : undefined;
     if (input.corrects && (!correction || correction.from !== this.self || correction.to !== to)) throw new Error('INVALID_INPUT: correction must reference your message to this exact peer');
     if (input.handoverFrom) {
-      // The sender must have a known and visible earlier exchange. This is
-      // evidence of provenance, not permission to read or copy another peer's
-      // private history into the successor's session.
-      const prior = [...this.records.values()].some(entry =>
-        entry.message.exchange === input.handoverFrom &&
-        (entry.message.from === this.self || this.isApproved(entry.message.from)));
+      const prior = [...this.records.values()].some(entry => entry.message.exchange === input.handoverFrom && this.visible(entry, 'agent'));
       if (!prior) throw new Error('CONTEXT_LOST: handover source exchange is not available to this session; no message was sent');
     }
     return { to, source };
   }
   async send(input: MessageInput, registered?: (entry: Entry) => void) {
+    this.assertOperational();
     const { to, source } = this.contactFor(input);
     if (!this.isApproved(to)) throw new Error('CONTACT_NOT_APPROVED');
     if (input.report) {
       const request = this.records.get(input.report.request)?.message;
-      if (!source || !request || request.from !== to || request.to !== this.self || request.exchange !== source.exchange) {
-        throw new Error('INVALID_INPUT: work report must reference a received request from this exact colleague in the same exchange; no message was sent');
-      }
+      if (!source || !request || request.from !== to || request.to !== this.self || request.exchange !== source.exchange) throw new Error('INVALID_INPUT: work report must reference a received request from this exact colleague in the same exchange; no message was sent');
     }
     const workRef = source?.workRef ?? input.workRef;
     const envelope: Envelope = {
-      id: randomUUID(), exchange: source?.exchange ?? randomUUID(),
-      subject: source?.subject ?? ('subject' in input ? input.subject : ''),
-      text: input.text, refs: input.refs ?? [],
-      ...(workRef ? { workRef } : {}),
+      id: randomUUID(), exchange: source?.exchange ?? randomUUID(), subject: source?.subject ?? ('subject' in input ? input.subject : ''),
+      text: input.text, refs: input.refs ?? [], ...(workRef ? { workRef } : {}),
       ...(!source && input.recipientLabel ? { recipientLabel: input.recipientLabel } : {}),
       ...(!source && input.handoverFrom ? { handoverFrom: input.handoverFrom } : {}),
-      ...(input.structured ? { structured: input.structured } : {}),
-      ...(input.report ? { report: input.report } : {}),
-      replyTo: source?.id ?? null, corrects: input.corrects ?? null,
-      createdAt: new Date().toISOString(),
+      ...(input.structured ? { structured: input.structured } : {}), ...(input.report ? { report: input.report } : {}),
+      replyTo: source?.id ?? null, corrects: input.corrects ?? null, createdAt: new Date().toISOString(),
     };
     checkSize(envelope, this.approval(to)?.context);
-    const entry: Entry = { message: { ...envelope, from: this.self, to }, facts: [], state: 'unknown' };
+    const entry: Entry & { readable: boolean } = { message: { ...envelope, from: this.self, to }, facts: [], state: 'unknown', readable: true };
+    this.write({ kind: 'message', entry }, [envelope.id]);
     this.records.set(envelope.id, entry);
     registered?.(entry);
     let outcome: Attempt;
     try { outcome = await this.transport(to, envelope); } catch { outcome = { outcome: 'unknown', code: 'OUTCOME_UNKNOWN' }; }
+    // Once dispatch happened, a failed save or switched session cannot turn an
+    // observed send into a misleading "nothing sent" result.
     entry.state = outcome.outcome; entry.code = outcome.code;
-    if (outcome.outcome !== 'unknown') this.fact(envelope.id, outcome.outcome === 'accepted' ? 'accepted' : 'rejected', 'broker');
+    try {
+      this.write({ kind: 'outcome', id: envelope.id, state: outcome.outcome, ...(outcome.code ? { code: outcome.code } : {}) }, [envelope.id]);
+      if (outcome.outcome !== 'unknown') this.fact(envelope.id, outcome.outcome === 'accepted' ? 'accepted' : 'rejected', 'broker');
+    } catch { this.saveStates.set(envelope.id, 'partial'); }
     return this.view(entry);
   }
   receive(from: string, envelope: Envelope) {
-    validate(EnvelopeSchema, envelope); checkSize(envelope);
+    this.assertOperational(); validate(Id, from); validate(EnvelopeSchema, envelope); checkSize(envelope);
     const message: Message = { ...structuredClone(envelope), from, to: this.self };
     const previous = this.records.get(envelope.id);
     if (previous) {
@@ -113,65 +282,110 @@ export class Runtime {
       if (!envelope.replyTo) throw new Error('INVALID_INPUT: a work report must be a reply');
       const request = this.records.get(envelope.report.request)?.message;
       if (!request) reportLinkage = 'context-lost';
-      else if (request.from !== this.self || request.to !== from || request.exchange !== envelope.exchange) {
-        throw new Error('INVALID_INPUT: work report references a different request, colleague or exchange');
-      }
+      else if (request.from !== this.self || request.to !== from || request.exchange !== envelope.exchange) throw new Error('INVALID_INPUT: work report references a different request, colleague or exchange');
     }
     if (envelope.corrects) {
       const source = this.records.get(envelope.corrects)?.message;
       if (!source || source.from !== from || source.to !== this.self) throw new Error('INVALID_INPUT: invalid correction linkage');
     }
     const handle = randomUUID();
-    this.returns.set(handle, message);
-    this.records.set(envelope.id, { message, facts: [], state: 'accepted', returnHandle: handle, ...(contextLost ? { linkage: 'context-lost' } : {}), ...(reportLinkage ? { reportLinkage } : {}) });
-    this.fact(envelope.id, 'queued', 'receiver runtime');
-    // Unapproved messages are visible to the human, but cannot wake or enter model context.
-    this.waiting.push(envelope.id);
+    const entry: Entry & { readable: boolean } = {
+      message, facts: [{ kind: 'queued', at: new Date().toISOString(), source: 'receiver runtime' }], state: 'accepted',
+      returnHandle: handle, readable: this.isApproved(from), intake: 'waiting',
+      ...(contextLost ? { linkage: 'context-lost' } : {}), ...(reportLinkage ? { reportLinkage } : {}),
+    };
+    this.write({ kind: 'message', entry }, [envelope.id]);
+    this.returns.set(handle, message); this.records.set(envelope.id, entry); this.waiting.push(envelope.id);
     return true;
   }
-  eligible() { return this.waiting.filter(id => this.isApproved(this.records.get(id)!.message.from)); }
+  pendingCounts() {
+    return {
+      waiting: this.waiting.filter(id => this.records.get(id)?.intake === 'waiting').length,
+      uncertain: this.uncertainAdmission.size,
+    };
+  }
+  uncertainIncoming() {
+    return this.waiting.map(id => this.records.get(id)!)
+      .filter(entry => !!entry && entry.message.to === this.self && this.uncertainAdmission.has(entry.message.id));
+  }
+  // Human-only resolution of a message Pi may or may not have admitted.
+  // This does not grant peer contact, invent a native receipt or create a
+  // new message ID. All other agent-facing communication paths remain unchanged.
+  resolveUncertainFromOwner(id: string, choice: 'retry' | 'dismiss') {
+    validate(Id, id); this.assertOperational();
+    const entry = this.required(id);
+    if (entry.message.to !== this.self || !this.uncertainAdmission.has(id) ||
+        !this.waiting.includes(id)) {
+      throw new Error('INVALID_INPUT: message is not awaiting an uncertain-admission decision');
+    }
+    if (choice === 'retry' && !this.isApproved(entry.message.from)) {
+      throw new Error('CONTACT_NOT_APPROVED: approve this exact peer before delivering again');
+    }
+    // A retry may reach Pi twice; the owner explicitly accepts that risk.
+    // It is NOT a transport resend. Reuse the original incoming record and
+    // its return handle; subsequent normal intake saves its own new offer.
+    const disposition = choice === 'retry' ? 'waiting' : 'dismissed';
+    const source = choice === 'retry' ? 'owner accepted possible duplicate admission' : 'owner dismissed uncertain admission';
+    this.write({ kind: 'intake', ids: [id], disposition, source }, [id]);
+    entry.intake = disposition; entry.intakeSource = source;
+    this.uncertainAdmission.delete(id);
+    if (choice === 'dismiss') this.waiting = this.waiting.filter(waiting => waiting !== id);
+    return this.view(entry);
+  }
+  eligible() {
+    if (this.recoveryIssue) return [];
+    return this.waiting.filter(id => this.isApproved(this.records.get(id)!.message.from) && this.records.get(id)!.intake === 'waiting' && !this.uncertainAdmission.has(id));
+  }
+  offered(ids: string[], source = 'native Pi sendMessage') {
+    const pending = ids.filter(id => this.waiting.includes(id) && this.records.get(id)?.intake === 'waiting');
+    if (!pending.length) return;
+    this.write({ kind: 'intake', ids: pending, disposition: 'offered', source }, pending);
+    pending.forEach(id => { const entry = this.records.get(id)!; entry.intake = 'offered'; entry.intakeSource = source; this.uncertainAdmission.add(id); });
+  }
   posted(ids: string[], source = 'native Pi sendMessage') {
+    if (!ids.length) return;
+    this.offered(ids, source);
+    this.write({ kind: 'intake', ids, disposition: 'posted', source }, ids);
     const posted = new Set(ids);
     this.waiting = this.waiting.filter(id => !posted.has(id));
-    ids.forEach(id => this.fact(id, 'posted', source));
+    ids.forEach(id => { const entry = this.required(id); entry.intake = 'posted'; entry.intakeSource = source; this.uncertainAdmission.delete(id); this.addFact(entry, { kind: 'posted', at: new Date().toISOString(), source }); });
   }
-  // An incoming progress report remains in the authoritative record and
-  // inspection, but need not create a separate model turn. This is not "posted".
+  handedOff(ids: string[]) {
+    if (!ids.length) return;
+    // A nested caller has received this reply. That is a completed handoff,
+    // not a native Pi post or proof that the caller used the reply.
+    this.write({ kind: 'intake', ids, disposition: 'handed-off', source: NESTED_HANDOFF }, ids);
+    const handed = new Set(ids);
+    this.waiting = this.waiting.filter(id => !handed.has(id));
+    ids.forEach(id => {
+      const entry = this.required(id);
+      entry.intake = 'handed-off'; entry.intakeSource = NESTED_HANDOFF;
+      this.uncertainAdmission.delete(id);
+      this.addFact(entry, { kind: 'handed-off', at: new Date().toISOString(), source: NESTED_HANDOFF });
+    });
+  }
   summarized(ids: string[]) {
-    const done = new Set(ids);
-    this.waiting = this.waiting.filter(id => !done.has(id));
-    ids.forEach(id => this.fact(id, 'summarized', 'request-aware intake'));
+    if (!ids.length) return;
+    this.write({ kind: 'intake', ids, disposition: 'summarized', source: 'request-aware intake' }, ids);
+    const done = new Set(ids); this.waiting = this.waiting.filter(id => !done.has(id));
+    ids.forEach(id => { const entry = this.required(id); entry.intake = 'summarized'; entry.intakeSource = 'request-aware intake'; this.addFact(entry, { kind: 'summarized', at: new Date().toISOString(), source: 'request-aware intake' }); });
   }
   private reportsFor(requestId: string, audience: 'agent' | 'human' = 'agent') {
     const request = this.records.get(requestId)?.message;
     if (!request || request.from !== this.self) return [];
-    return [...this.records.values()].filter(entry => entry.message.report?.request === requestId &&
-      entry.message.from === request.to && entry.message.exchange === request.exchange &&
-      !entry.reportLinkage && this.visible(entry, audience));
+    return [...this.records.values()].filter(entry => entry.message.report?.request === requestId && entry.message.from === request.to && entry.message.exchange === request.exchange && !entry.reportLinkage && this.visible(entry, audience));
   }
-  // A correction is actionable even when its status is "progress": it may
-  // retract evidence that the requester has already seen.
-  private actionableReport(entry: Entry) {
-    return !!entry.message.report && (entry.message.report.state !== 'progress' || !!entry.message.corrects);
-  }
-  // Project from existing records, never a second work-status store. An
-  // actionable report remains current even if a late progress update arrives.
+  private actionableReport(entry: Entry) { return !!entry.message.report && (entry.message.report.state !== 'progress' || !!entry.message.corrects); }
   reportState(requestId: string, audience: 'agent' | 'human' = 'agent') {
     const reports = this.reportsFor(requestId, audience);
     const lastActionable = [...reports].reverse().find(entry => this.actionableReport(entry));
     const current = lastActionable ?? reports.at(-1);
-    const laterProgressCount = lastActionable
-      ? reports.slice(reports.indexOf(lastActionable) + 1).filter(e => e.message.report?.state === 'progress').length : 0;
+    const laterProgressCount = lastActionable ? reports.slice(reports.indexOf(lastActionable) + 1).filter(e => e.message.report?.state === 'progress').length : 0;
     return { reports, current, laterProgressCount };
   }
-  // A source exchange can point to one or more explicit successor exchanges.
-  // Derive the links from the single communication record; never move, merge
-  // or retarget the source exchange or infer that the successor accepted work.
   handoversFrom(exchange: string) {
-    return [...this.records.values()]
-      .filter(entry => entry.message.from === this.self && entry.message.handoverFrom === exchange)
-      .map(entry => ({ toExchange: entry.message.exchange, toPeer: entry.message.to,
-        message: entry.message.id, state: entry.state, code: entry.code ?? null }));
+    return [...this.records.values()].filter(entry => entry.message.from === this.self && entry.message.handoverFrom === exchange)
+      .map(entry => ({ toExchange: entry.message.exchange, toPeer: entry.message.to, message: entry.message.id, state: entry.state, code: entry.code ?? null }));
   }
   reportNote(entry: Entry) {
     const report = entry.message.report;
@@ -186,20 +400,18 @@ export class Runtime {
     if (current && current.message.id !== entry.message.id) parts.push(`a later actionable state (${current.message.report!.state}) is on record`);
     return parts.length ? `Report history for request ${report.request}: ${parts.join('; ')}.\n` : '';
   }
-  // One intake route: deliver all useful messages and every actionable peer
-  // report. Fold only progress reports into inspection so an old progress update
-  // cannot wake the lead after a later completion or correction.
   planIntake(ids: string[]) {
+    const eligible = new Set(this.eligible());
     const deliver: Entry[] = [], summarized: string[] = [];
     for (const id of ids) {
       const entry = this.records.get(id);
-      if (!entry || !this.waiting.includes(id) || !this.isApproved(entry.message.from)) continue;
+      if (!entry || !eligible.has(id)) continue;
       if (entry.message.report?.state === 'progress' && !entry.reportLinkage && !entry.message.corrects) summarized.push(id);
       else deliver.push(entry);
     }
     return { deliver, summarized };
   }
-  private visible(entry: Entry, audience: 'agent' | 'human') { return audience === 'human' || entry.message.from === this.self || this.isApproved(entry.message.from); }
+  private visible(entry: Entry, audience: 'agent' | 'human') { return audience === 'human' || entry.message.from === this.self || entry.readable === true; }
   private project(entry: Entry, audience: 'agent' | 'human') {
     if (!this.visible(entry, audience)) {
       const { id, exchange, from, to } = entry.message;
@@ -208,69 +420,58 @@ export class Runtime {
     return this.view(entry);
   }
   view(entry: Entry) {
-    return structuredClone({ ...entry, responses: [...this.records.values()].filter(r => r.message.replyTo === entry.message.id).map(r => r.message.id), evidence: 'available' });
+    return structuredClone({ ...entry, responses: [...this.records.values()].filter(r => r.message.replyTo === entry.message.id).map(r => r.message.id), evidence: 'available',
+      record: { state: this.saveStates.get(entry.message.id) ?? 'volatile', ...(this.saveStates.get(entry.message.id) === 'partial' ? { warning: 'The latest observation was not saved. Do not resend solely because of this storage failure.' } : {}) },
+      ...(this.uncertainAdmission.has(entry.message.id) ? { admission: 'uncertain' as const } : {}),
+    });
   }
   page(entries: Entry[], cursor?: string, audience: 'agent' | 'human' = 'agent') {
     const start = cursor ? entries.findIndex(e => e.message.id === cursor) + 1 : 0;
     if (cursor && start === 0) throw new Error('CONTEXT_LOST: cursor no longer available');
-    const items: ReturnType<Runtime['project']>[] = [];
-    let bytes = 0;
+    const items: ReturnType<Runtime['project']>[] = []; let bytes = 0;
     for (const entry of entries.slice(start)) {
       const view = this.project(entry, audience); const size = Buffer.byteLength(JSON.stringify(view));
       if (items.length && bytes + size > MAX_PAGE_BYTES) break;
-      items.push(view); bytes += size;
-      if (items.length === 30) break;
+      items.push(view); bytes += size; if (items.length === 30) break;
     }
     return { items, nextCursor: start + items.length < entries.length ? items.at(-1)!.message.id : null };
   }
   inspect(input: InspectInput, audience: 'agent' | 'human' = 'agent') {
     validate(InspectInput, input);
     if (input.message) {
-      const entry = this.records.get(input.message);
-      if (!entry) throw new Error('CONTEXT_LOST');
-      return this.project(entry, audience);
+      const entry = this.records.get(input.message); if (!entry) throw new Error('CONTEXT_LOST'); return this.project(entry, audience);
     }
     const records = [...this.records.values()];
     if (input.requests) return { responses: input.requests.map(id => {
       const request = this.records.get(id);
       if (!request || request.message.from !== this.self) return { request: id, outcome: 'context-lost' };
       const replies = records.filter(entry => entry.message.replyTo === id && entry.message.from === request.message.to);
-      // The final report may reply to a later clarification in the same exchange.
-      // Its explicit original-request link is separate from direct replyTo tracking.
       const { reports, current, laterProgressCount } = this.reportState(id, audience);
       return { request: id, peer: request.message.to, subject: request.message.subject, workRef: request.message.workRef ?? null, state: request.state,
         code: request.code, outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
         responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)),
         reportCount: reports.length, ...(reports.length ? { latestReport: this.project(reports.at(-1)!, audience) } : {}),
-        ...(current ? { currentReport: this.project(current, audience) } : {}),
-        ...(laterProgressCount ? { laterProgressCount } : {}) };
+        ...(current ? { currentReport: this.project(current, audience) } : {}), ...(laterProgressCount ? { laterProgressCount } : {}) };
     }) };
     if (input.peer || input.workRef || !input.exchange && !input.queue && !input.outbox) {
       const latest = new Map<string, Entry>();
       for (const entry of records) {
         if (input.peer && entry.message.from !== input.peer && entry.message.to !== input.peer) continue;
         if (input.workRef && (entry.message.workRef !== input.workRef || !this.visible(entry, audience))) continue;
-        // A late progress report does not replace a more useful final/corrective
-        // report as the exchange preview. Its full record stays inspectable.
         if (entry.message.report?.state === 'progress' && !entry.message.corrects) {
           const current = this.reportState(entry.message.report.request, audience).current;
-          // A missing current report means there is nothing to supersede this
-          // preview (notably for sent or unverified progress reports).
           if (current && this.actionableReport(current)) continue;
         }
         latest.delete(entry.message.exchange); latest.set(entry.message.exchange, entry);
       }
       const exchanges = [...latest.values()].reverse().map(entry => {
         const visible = this.visible(entry, audience);
-        const labeled = visible ? records.find(record => record.message.exchange === entry.message.exchange &&
-          record.message.recipientLabel !== undefined && this.visible(record, audience))?.message : undefined;
+        const labeled = visible ? records.find(record => record.message.exchange === entry.message.exchange && record.message.recipientLabel !== undefined && this.visible(record, audience))?.message : undefined;
         return { exchange: entry.message.exchange, peer: entry.message.from === this.self ? entry.message.to : entry.message.from,
-          ...(visible ? {
-            subject: entry.message.subject, preview: entry.message.text.slice(0, 240), at: entry.message.createdAt,
+          ...(visible ? { subject: entry.message.subject, preview: entry.message.text.slice(0, 240), at: entry.message.createdAt,
             ...(entry.message.workRef ? { workRef: entry.message.workRef } : {}),
-            ...(labeled ? { recipientLabel: labeled.recipientLabel, labeledSession: labeled.to, labelSource: 'sender-supplied' } : {}),
-          } : { code: 'CONTACT_NOT_APPROVED' }),
-          state: entry.state, latestMessage: entry.message.id };
+            ...(labeled ? { recipientLabel: labeled.recipientLabel, labeledSession: labeled.to, labelSource: 'sender-supplied' } : {})
+          } : { code: 'CONTACT_NOT_APPROVED' }), state: entry.state, latestMessage: entry.message.id };
       });
       if (input.peer || input.workRef) {
         const start = input.cursor ? exchanges.findIndex(e => e.exchange === input.cursor) + 1 : 0;
@@ -278,8 +479,9 @@ export class Runtime {
         const items = exchanges.slice(start, start + 30);
         return { items, nextCursor: start + items.length < exchanges.length ? items.at(-1)!.exchange : null };
       }
-      return { waiting: this.waiting.length, paused: this.paused, recentExchanges: exchanges.slice(0, 8),
-        uncertainOutgoing: records.filter(e => e.message.from === this.self && e.state === 'unknown').slice(-8).map(e => ({ message: e.message.id, to: e.message.to, code: e.code ?? 'OUTCOME_UNKNOWN' })) };
+      return { ...this.pendingCounts(), paused: this.paused, recentExchanges: exchanges.slice(0, 8),
+        uncertainOutgoing: records.filter(e => e.message.from === this.self && e.state === 'unknown').slice(-8).map(e => ({ message: e.message.id, to: e.message.to, code: e.code ?? 'OUTCOME_UNKNOWN' })),
+        uncertainAdmission: [...this.uncertainAdmission].slice(-8), ...(this.recoveryIssue ? { recoveryHold: this.recoveryIssue } : {}) };
     }
     const selected = 'queue' in input ? this.waiting.map(id => this.records.get(id)!) : 'outbox' in input ? records.filter(e => e.message.from === this.self) : records.filter(e => e.message.exchange === input.exchange);
     if ('exchange' in input && !selected.length) throw new Error('CONTEXT_LOST');

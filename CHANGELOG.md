@@ -1,9 +1,24 @@
 # Changelog
 
-## [0.1.9] - 2026-11-06
+## [0.2.0] - 2026-11-07
 
-- Allow separately installed Pi/PiG agent homes to use one opt-in, same-user pi-comms broker through an absolute `PI_COMMS_BROKER_DIR`, while each agent retains its own credentials, settings, sessions and records.
-- Keep the default per-agent broker path, exact-session approval, Pause/revoke and volatile recovery rules unchanged. Test both connection and listener path selection and reject cwd-dependent overrides.
+- Add the opt-in absolute `PI_COMMS_BROKER_DIR` to let independently installed Pi/PiG agents use one local broker while retaining private agent directories, credentials, chats and settings. With no override, the original per-agent broker remains unchanged.
+- Keep exact native session addressing and human first-contact permission unchanged. Do not add a name resolver, privilege grant, auto-launch, new protocol or separate permission store.
+- Refuse to unlink a live incompatible shared socket even if its PID file is missing; give an actionable stop/restart/update error instead.
+- Verify three separate OS processes with one broker, exact routing despite duplicate display names/different model labels, round-trip messaging, stale-ID isolation, default split brokers and incompatible socket rejection. Run the process tests against the installed package broker too.
+- Include a manual native Pi ↔ PiG ↔ PiG journey covering real consent, reports, first-reply waits, lifecycle and recovery. Actual interactive model acceptance remains an explicitly separate gate.
+- This release is stacked on unreleased **0.1.9 F10** recovery. Its native saved-session history and negative-contact/paused state recovery remain part of 0.2.0; positive approval and disconnected broker mail are still not durable.
+
+## [0.1.9] - 2026-11-04
+
+- M4-A / F10: restore communication messages, work/report/correction/handover links, return handles, known outcomes and historical agent readability for the **same saved Pi session**, using Pi's native extension-state entries instead of another transcript database.
+- Restore records, Pause and explicit negative contact decisions before broker registration; new outgoing/incoming communication still requires current approval. Old authorized history remains readable after approval expires or the peer is revoked; previously withheld content stays withheld.
+- Keep native Pi's real persistence limits visible: fresh/ephemeral sessions can be live-only; failed writes, malformed records and uncertain native admission are not silently reported as saved or replayed. Restore without reviving local `comms_ask` waits or automatically resending unknown operations.
+- Preserve existing four agent tools, human-first intake, corrections and M3 organizer API. F11 remembered positive approvals and F12 broker-crash-durable offline mail are **not** included.
+- Cover saved-session restart, Pause/revocation, read versus admission, withheld mail, forks/branches, corruption, storage failure and installed-package recovery paths. See the M4 contract for remaining host and acceptance limits.
+- Keep a busy-boundary batch **offered/uncertain** until native Pi history proves admission; a cleared steering queue cannot manufacture a posted receipt. Keep a completed nested-ask **handed-off** result out of the recovery waiting queue, without claiming a saved child transcript or model consumption.
+- Add human resolution of uncertain intake via existing `/comms requests`: owner-confirmed same-ID redelivery (possible duplicate work, current contact approval required) or dismissal, persisted when Pi confirms a saved session entry, otherwise marked live-only until the host saves them; confirmation and outcome text reflect this limit. Separate uncertain from normal waiting counts; no automatic resend or new agent tool.
+- Treat a completed **No/Esc** on both incoming and outgoing first-contact prompts as a persisted refusal; explicit owner reapproval is required to clear it. Stop/abort only cancels the attempt and never saves a refusal. Tests cover transport assertion and same-session restart.
 
 ## [0.1.8] - 2026-11-02
 

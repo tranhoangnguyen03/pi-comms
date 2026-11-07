@@ -16,8 +16,8 @@ with three live terminals and working model accounts.
 - pi-comms main before integration: `eaed7edad3963410bc70b63f52a788f0b6288eae`
   (published-line `0.1.8`). Recovery PR #33:
   `a4f65125f2d5feb4402ad7c36a2f9d896f046eb7`
-  (unreleased `0.1.9` candidate). Shared transport #34 is staged
-  after recovery; its eventual released version must not also be `0.1.9`.
+  (unreleased `0.1.9` candidate). Shared transport #34 is stacked after F10 with candidate version `0.2.0`,
+  not another `0.1.9`.
 - Native Pi fixture baseline: **Pi 1.4.0** (tested in pi-comms CI).
   Record the real `pi --version` and installed package path when running.
 - Each Pi session must load the **same reviewed Comms code and compatible

@@ -77,15 +77,15 @@ For first-contact handling, a caller with no native human confirmation UI receiv
 
 - **Trust boundary:** This interface is available to extensions installed in the same Pi runtime. It is **not** a safe boundary against malicious local extensions. Load only extensions you trust. The channel's event data cannot grant contact approval, transfer owner identity or override native tool permissions.
 - **Human priority:** The same contact approvals, explicit revocations, Pause, editor drafts and ordinary session lifetime checks apply. A send may be rejected or have an uncertain result. Approval metadata is carried separately from peer-authored message fields.
-- **Privacy:** `inspect` uses pi-comms' agent-facing visibility and never reveals unapproved message contents or return handles. A connected organizer has no privileged human-only inspection method.
-- **Session scope:** This is one running Pi session. On reload, session replacement, switch, restart or extension shutdown, discover a new handle. Runtime records, consent and reply handles are memory-only; no automatic replay or restore is implied.
+- **Privacy:** `inspect` uses the same agent-facing per-message visibility as the native tool: previously authorized saved history remains readable, but new or previously withheld content stays hidden until valid consent. A connected organizer has no privileged human-only inspection method.
+- **Session scope:** Organizer API handles belong to the current running Pi session; discover a new handle after reload, replacement, switch, restart or shutdown. F10 restores saved-session communication records, links and return handles before reconnect, but does **not** restore positive contact approvals or local `comms_ask` waiters. A fork/new session inherits no operational permission. No automatic resend or work replay occurs.
 - **No transitive permission:** A↔B consent does not grant B↔C or permit a replacement session to impersonate B. Exact IDs remain binding.
 - **No task system:** The caller owns rosters, work instructions, task completion and acceptance. A peer's `report.state` is the peer's claim, never authoritative acceptance.
 - **F09 (0.1.8+) uses v1:** Authored handovers supply an earlier exchange link through the same `send` method. Recipients are explicitly chosen; no transfer of sessions, identities, approvals or task acceptance occurs.
 
 The test suite includes a **separate organizing extension** loaded beside pi-comms in a real Pi 1.4.0 fixture. It requests the v1 interface, asks for first-contact consent on its first send, reuses approval on later sends, and reads a request-linked work report through both the integration and native inspection paths. That establishes the in-process contract; it is not a claim that another production organizing package has adopted the API.
 
-## Independently installed agents sharing one broker (proposed support)
+## Independently installed agents sharing one broker (0.2.0+)
 
 An independent PiG/Pi application can keep its private credentials, settings and
 sessions in its own agent directory while joining the same-user local pi-comms
@@ -105,7 +105,15 @@ Normal exact-session identities, contact approval, Pause and revocation still ap
 Use this only among processes belonging to the same trusted OS user; the
 broker is not a remote or cross-user trust boundary.
 
-The option does not launch agents, make an offline session available, or solve
-M4 history recovery. Every agent must be running, or an external controller
-must start/resume it, for its exact session to be reachable. Treat a newly
-started session as a different contact subject to normal consent.
+The override does not launch agents or grant consent. Every agent must be
+running, or an external controller must start/resume its **exact saved
+session** to become reachable. F10 (0.1.9) restores same-saved-session
+communication records, historical readability, negative decisions and Pause
+before reconnect. It does **not** restore positive contact approval or a
+pending local `comms_ask` waiter. Fresh sessions have distinct native IDs;
+unsaved/ephemeral history may be volatile. F12 durable broker-offline mail
+remains pending. Never retarget stale IDs to same-named new sessions.
+
+Use [the exact-pin Pi ↔ PiG ↔ PiG manual recipe](PIG-CROSS-HOME-QUALIFICATION.md).
+Path, broker and simulated native tests are not substitutes for real owner
+approval and model dialogue.

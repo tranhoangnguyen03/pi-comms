@@ -63,7 +63,10 @@ test('overlapping waits have independent rejection, timeout, late replies, relea
   runtime.revokeFromOwner(peer); asks.end('revoked', undefined, peer);
   assert.equal(revoked.item.outcome, 'revoked'); assert.doesNotMatch(JSON.stringify(asks.project('revoked', .1)), /PRIVATE/);
   const progress = runtime.inspect({ requests: [revoked.sent.message.id] });
-  assert.doesNotMatch(modelView(progress, () => 'B'), /PRIVATE/);
+  assert.match(modelView(progress, () => 'B'), /PRIVATE/, 'inspection retains history authorized before revoke');
+  assert.deepEqual(runtime.eligible(), [], 'historical access is not permission for new model admission');
+  const fresh = envelope(revoked.sent.message, 'NEW_PRIVATE_AFTER_REVOKE'); runtime.receive(peer, fresh);
+  assert.doesNotMatch(modelView(runtime.inspect({ requests: [revoked.sent.message.id] }), () => 'B'), /NEW_PRIVATE_AFTER_REVOKE/);
 });
 
 test('reply clock starts after acceptance; all local endings clear outstanding waits', async () => {

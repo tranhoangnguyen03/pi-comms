@@ -1,4 +1,4 @@
-import type { Entry, Runtime } from './runtime.ts';
+import { ASK_ADMISSION, NESTED_HANDOFF, type Entry, type Runtime } from './runtime.ts';
 
 export type AskOutcome = 'replied' | 'timeout' | 'interrupted' | 'paused' | 'revoked' | 'disconnected' | 'context-lost' | 'not-sent' | 'rejected' | 'unknown';
 export type AskItem = { request?: string; peer?: string; subject?: string; workRef?: string; outcome?: AskOutcome; code?: string; reply?: string };
@@ -71,19 +71,52 @@ export class Asks {
       }
     }
   }
+  private checkAdmission(call: string) {
+    const operation = this.calls.get(call);
+    if (!operation || operation.presented) return;
+    // A readable historical record is not permission to newly admit an ask
+    // result. Keep already-presented results intact; hold unpresented replies.
+    for (const item of operation.items) {
+      if (item.reply && item.peer && !this.runtime.isApproved(item.peer)) this.end('revoked', call, item.peer);
+    }
+  }
   project(call: string, seconds: number) {
+    this.checkAdmission(call);
     const operation = this.calls.get(call)!;
     return { timeoutSeconds: seconds, items: operation.items.map(item => ({ ...item,
       outcome: item.outcome ?? operation.ended ?? 'not-sent',
       ...(item.reply ? { response: this.runtime.inspect({ message: item.reply }) } : {}),
     })) };
   }
-  present(call: string, source = 'native ask result context admission') {
+  restoredProjection(value: unknown): unknown | undefined {
+    if (!value || typeof value !== 'object') return;
+    const data = value as { items?: unknown[]; timeoutSeconds?: number };
+    if (!Array.isArray(data.items)) return;
+    let changed = false;
+    const items = data.items.map(value => {
+      if (!value || typeof value !== 'object') return value;
+      const item = value as AskItem & { response?: unknown };
+      if (!item.reply || !this.runtime.entry(item.reply) || this.runtime.wasAskAdmitted(item.reply)) return item;
+      // A saved candidate may have been withdrawn, remained uncertain, or later
+      // arrived in a normal batch. Do not expose it again through an old ask.
+      // Pre-F10/forked text with no owned operational record remains Pi history.
+      changed = true;
+      const { reply: _reply, response: _response, ...rest } = item;
+      return { ...rest, outcome: 'interrupted', code: 'RECOVERED_ASK_NOT_ADMITTED' };
+    });
+    return changed ? { ...data, items } : undefined;
+  }
+  present(call: string, source = ASK_ADMISSION) {
     const operation = this.calls.get(call);
     if (!operation || operation.presented) return;
-    operation.presented = true;
+    this.checkAdmission(call);
     const ids = operation.items.flatMap(item => item.reply ? [item.reply] : []);
-    this.runtime.posted(ids, source);
+    // A nested caller handoff is complete when the caller receives the result,
+    // not when a child ask appears in a native transcript. Keep that disposition
+    // distinct from normal model-context posting across recovery.
+    if (source === NESTED_HANDOFF) this.runtime.handedOff(ids);
+    else this.runtime.posted(ids, source);
+    operation.presented = true;
     ids.forEach(id => this.claims.delete(id));
   }
   has(call: string) { return this.calls.has(call); }
