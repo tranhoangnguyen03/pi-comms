@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { KeybindingsManager, TUI_KEYBINDINGS, TuiAltScreen, TuiMainScreen, Text, visibleWidth } from '@earendil-works/pi-tui';
 import { Runtime } from '../src/runtime.ts';
-import { approvalPrompt, admissionDecisionStorageNotice, inspectionText, inspectionState, inspectionScreen, showInspection } from '../src/human-view.ts';
+import { approvalPrompt, contactDecisionTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE, CONTACT_CHOICES, admissionDecisionStorageNotice, inspectionText, inspectionState, inspectionScreen, showInspection } from '../src/human-view.ts';
 
 const self = randomUUID(), peer = randomUUID();
 const labels = { self, name: (id: string) => id === self ? 'Coordinator' : 'Reviewer', approved: () => false };
@@ -28,11 +28,24 @@ test('approval copy puts colleague, work and consequences before technical ident
     assert.match(prompt.message, /both directions/);
     assert.match(prompt.message, /not a per-task limit/);
     assert.match(prompt.message, /Your directions and tool permissions still apply/);
-    assert.match(prompt.message, /Approval lasts until reload\/restart/);
+    assert.match(prompt.message, /Session-only approval ends on reload\/restart/);
+    assert.match(prompt.message, /Remembered approval continues for this exact saved session pair until revoked/);
     assert.ok(prompt.message.includes(peer)); assert.ok(!prompt.message.includes('long request '.repeat(100)));
     if (direction === 'send') assert.match(prompt.message, /send this request now/);
     else assert.match(prompt.message, /held for you, not the agent/);
   }
+});
+
+test('F11 contact choice is one human screen, with runtime-only as the default', () => {
+  assert.deepEqual(CONTACT_CHOICES, [CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_REFUSE]);
+  assert.match(CONTACT_SESSION, /default/);
+  assert.match(CONTACT_REMEMBER, /remember this exact session pair/);
+  const p = approvalPrompt(peer, 'Reviewer', 'Review changes', 'Need a code review', 'send');
+  const title = contactDecisionTitle(p.title, p.message);
+  assert.match(title, /Review changes/);
+  assert.match(title, /exact saved session and peer/);
+  assert.match(title, /until you revoke it/);
+  assert.match(title, /unsaved session stays live-only/);
 });
 
 test('uncertain admission confirmation distinguishes saved, volatile and blocked Pi session records', () => {
