@@ -934,33 +934,26 @@ test('requester-approved intake respects drafts/Pause and lifetime replacement c
   } finally { await b?.close(); await a?.close(); }
 });
 
-test('installed Base model tools: private inspection boundary and discover → send → two reads → contextual reply', async () => {
+test('installed Base model tools: Pause holds delivery, human inspection and two-file contextual reply', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('tool-coordinator'); b = await participant('tool-reviewer');
-    b.confirm(true); await b.command(`revoke ${a.id()}`);
-    // Select through the normal human selector, rather than supplying an ID.
+    await b.command('pause');
+    // One owner choice grants A-B; Pause still prevents automatic model intake.
     a.confirm(true); await a.command('approve');
     const privateMessage = data(await a.tool('comms_message', { to: b.id(), subject: 'PRIVATE_SUBJECT', text: 'PRIVATE_BODY', refs: [{ uri: 'file:///PRIVATE_REFERENCE', label: 'PRIVATE_LABEL' }] })).data;
-    await waitFor(() => b!.notifications.some(n => /Contact request from/.test(n)));
+    await waitFor(async () => data(await b!.tool('comms_inspect', { message: privateMessage.message.id })).ok === true);
     assert.equal(b.observed.length, 0);
     await b.command(`inspect ${privateMessage.message.id}`);
     assert.match(b.inspectedByHuman.at(-1)!, /PRIVATE_BODY/);
     const privateHandle = b.inspectedByHuman.at(-1)!.match(/Return handle: ([0-9a-f-]{36})/)![1];
-    b.responses([
-      call('comms_inspect', { queue: 'self' }), call('comms_inspect', { message: privateMessage.message.id }), call('comms_inspect', { exchange: privateMessage.message.exchange }), fauxAssistantMessage('Held for human approval.'),
-    ]);
-    await b.runtime.session.prompt('Inspect waiting metadata only.');
-    for (const request of b.observed) {
-      assert.doesNotMatch(text(request), /PRIVATE_/);
-      assert.ok(!JSON.stringify(request).includes(privateHandle));
-    }
-    assert.match(text(b.observed.at(-1)!), /contact not approved/);
-    // Approve while paused: metadata-only inspection changes to complete evidence, without automatic intake.
-    await b.command('pause'); b.confirm(true); await b.command('approve');
-    assert.match(JSON.stringify(data(await b.tool('comms_inspect', { message: privateMessage.message.id }))), /PRIVATE_BODY/);
+    assert.ok(privateHandle);
+    assert.equal(b.runtime.session.sessionManager.getEntries().filter(e => e.type === 'custom_message' &&
+      (e.details as any)?.ids?.includes(privateMessage.message.id)).length, 0,
+      'Pause stops unsolicited model injection but does not erase human-readable messages');
     b.responses([fauxAssistantMessage('No reply required for the earlier message.')]);
-    await b.command('resume'); await waitFor(() => b!.runtime.session.isIdle && b!.observed.some(m => text(m).includes('PRIVATE_BODY')));
+    await b.command('resume');
+    await waitFor(() => b!.runtime.session.isIdle && b!.observed.some(m => text(m).includes('PRIVATE_BODY')));
     writeFileSync(join(b.dir, 'evidence.txt'), 'Evidence alpha: preserve exact session identity.');
     writeFileSync(join(b.dir, 'detail.txt'), 'Evidence beta: no durable queue required.');
     b.responses([
@@ -1004,7 +997,7 @@ test('installed Base model tools: private inspection boundary and discover → s
     const aTools = a.events.filter(e => e.type === 'tool_execution_end').map(e => e.toolName);
     const bTools = b.events.filter(e => e.type === 'tool_execution_end').map(e => e.toolName);
     assert.deepEqual(aTools, ['comms_peers', 'comms_message']);
-    assert.deepEqual(bTools, ['comms_inspect', 'comms_inspect', 'comms_inspect', 'read', 'read', 'comms_message', 'comms_message']);
+    assert.deepEqual(bTools, ['read', 'read', 'comms_message', 'comms_message']);
     assert.equal(b.events.filter(e => e.type === 'tool_execution_end' && e.isError).length, 1);
     assert.equal(data(await b.tool('comms_inspect', { outbox: 'self' })).data.items.length, 1, 'invalid reply created no send record; valid correction sent once');
     const sent = data(await a.tool('comms_inspect', { outbox: 'self' })).data.items.find((e: any) => e.message.subject === 'Model tool review');
