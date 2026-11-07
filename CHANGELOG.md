@@ -2,11 +2,11 @@
 
 ## [0.1.10] - 2026-11-07
 
-- M4-B / F11: add an **optional owner-remembered contact approval** for one exact saved Pi session and peer, lasting across restarts until the owner revokes it. Runtime-only consent stays the default.
-- Use one human first-contact choice screen: approve this session, approve and remember, or refuse. The grant-only `/comms approve` command offers session-only, remember or Cancel/Esc; it does not send a message or revoke on cancellation. `/comms revoke` remains the sole explicit revocation command. No extra routine dialog, model-facing permission option, broker protocol or permission database.
-- Persist remembered owner consent using the existing versioned Pi contact entry, alongside historical visibility and revocation. Restore only local owner-remembered approvals; never upgrade old F10 grants, transport assertions or saved peer messages into remembered consent. Forks/new session IDs and other agent-directory scopes inherit no grant.
-- A completed No/revocation overrides remembered consent. Explicit session-only reapproval clears an earlier remembered grant. Fresh unsaved and `--no-session` sessions report live-only storage until the host saves their records. F12 durable offline delivery remains out of scope.
-- Cover real-session restart and exact-ID use, peer-side provenance, refusal/reapproval, branch/fork, fresh/ephemeral storage, and the unchanged agent/organizer interfaces with native Pi fixtures.
+- M4-B / F11: one owner approval for an **unordered exact A–B pair**, valid for communication in either direction. The default lasts until a participant runtime disconnects; optional **Allow & remember** survives both original sessions and broker restart.
+- Shorten the first-contact decision to **who, topic, request preview and effect**, with concise Allow this session / Allow & remember / Decline choices. Detailed UUIDs and transport rules move to inspection/help.
+- Store **one canonical pair decision** in the existing local broker scope using an independent atomic file, not duplicate native participant grants. Either endpoint can revoke the pair, stopping both directions and affected asks. A newer committed revoke cannot be replaced by an older backup.
+- Broker checks pair status at send admission, handles concurrent decisions in order, and sends status updates to both endpoints. Session-only grants expire on disconnect or broker restart; remembered grants survive. Fork/new native IDs and other scopes inherit nothing.
+- Detect unsupported old broker/peer pair protocol and corrupt saved pair state; reject rather than silently bypass shared revocation. The four agent tools and organizer API remain unchanged. F12 durable offline delivery is not part of F11.
 
 ## [0.1.9] - 2026-11-04
 
