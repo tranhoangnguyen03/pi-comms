@@ -1,13 +1,14 @@
 # Changelog
 
-## [0.1.10] - 2026-11-07
+## [0.1.10] - 2026-11-08
 
-- M4-B / F11: one owner approval for an **unordered exact A–B pair**, valid for communication in either direction. The default lasts until a participant runtime disconnects; optional **Allow & remember** survives both original sessions and broker restart.
-- Shorten the first-contact decision to **who, topic, request preview and effect**, with concise Allow this session / Allow & remember / Decline choices. Detailed UUIDs and transport rules move to inspection/help.
-- Store **one canonical pair decision** in the existing local broker scope using an independent atomic file, not duplicate native participant grants. Either endpoint can revoke the pair, stopping both directions and affected asks. A newer committed revoke cannot be replaced by an older backup.
-- Broker checks pair status at send admission, handles concurrent decisions in order, and sends status updates to both endpoints. Session-only grants expire on **normal unregister, abrupt disconnect and stale-holder replacement** (including notifying the surviving endpoint and ending affected asks as disconnected), or broker restart; remembered grants survive. Fork/new native IDs and other scopes inherit nothing.
-- Import the final **saved F10 negative contact controls** at pair-aware session registration, before the peer is reachable. One canonical import marker per original owner/native event index stops an old refusal from replaying after a new explicit owner grant; a newer refusal written after a downgrade is still honored. F10 positive grants are never imported.
-- Detect missing migration evidence, unsupported old broker/peer pair protocol and corrupt saved pair state; reject rather than silently bypass shared revocation. The four agent tools and organizer API remain unchanged. F12 durable offline delivery is not part of F11.
+- M4-B / F11: one owner approval for an **unordered exact A–B pair**, valid in either direction. **Allow this session** (default) lasts until either Pi session reloads or is replaced, or the broker restarts; a dropped connection that reconnects in the same Pi session keeps it. **Allow & remember** survives restart of both original sessions and the broker.
+- Contact is **approved or not approved**; there is no stored refusal or block list. **Decline**/Esc stores nothing; the agent does not re-prompt in the same turn and may ask again after the user's next message. `/comms revoke` from either side ends an approval for both directions and affected asks.
+- Shorten the first-contact decision to **who, topic, request preview and effect**. Detailed UUIDs and transport rules move to inspection/help.
+- The broker stores only remembered approvals, in one atomic file under the comms directory. Session-only approvals stay in memory, and ended pairs leave no records. The broker checks approval at send admission and pushes status changes to both endpoints.
+- A failed save rejects only that remembered choice (`PAIR_SAVE_FAILED`); other pairs keep working. An unreadable approvals file is moved aside and grants nothing.
+- Approvals now live only in the broker. Removed the per-message transported approval and the native record's approval role. Approvals and refusals saved by 0.1.9 are history only; message readability they granted is kept.
+- **Upgrade:** all sessions sharing a broker must run 0.1.10. Older peers yield `PEER_OUTDATED`; an older running broker yields `BROKER_OUTDATED` until its sessions reload. Both carry recovery guidance for agents. The four agent tools and the organizer API are unchanged. F12 durable offline delivery is not part of F11.
 
 ## [0.1.9] - 2026-11-04
 
