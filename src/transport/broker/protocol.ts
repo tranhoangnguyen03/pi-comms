@@ -260,6 +260,13 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
     return false;
   }
   if (value.pairConsentV1 !== undefined && typeof value.pairConsentV1 !== "boolean") return false;
+  // An upgraded session must report its final native F10 refusal snapshot.
+  // Otherwise registration cannot safely distinguish "none" from "not read".
+  if (value.pairConsentV1 === true && !Array.isArray(value.legacyRefusals)) return false;
+  if (value.legacyRefusals !== undefined && (!Array.isArray(value.legacyRefusals) ||
+      value.legacyRefusals.length > 4096 || value.legacyRefusals.some(item =>
+        !isRecord(item) || !isSessionId(item.peer) ||
+        !Number.isSafeInteger(item.entryIndex) || (item.entryIndex as number) < 1))) return false;
   if (value.extensions !== undefined && !Array.isArray(value.extensions)) {
     return false;
   }
