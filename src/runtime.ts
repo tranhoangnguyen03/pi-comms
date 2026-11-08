@@ -20,7 +20,7 @@ export class Runtime {
   private revoked = new Set<string>();
   // Snapshot the FINAL negative decisions from old native F10 entries before
   // broker sync. New pair grants/revokes do not rewrite this migration source.
-  private restoredLegacyRefusals: string[] = [];
+  private restoredLegacyRefusals: { peer: string; entryIndex: number }[] = [];
   private records = new Map<string, Entry>();
   private returns = new Map<string, Message>();
   private saveStates = new Map<string, SaveState | 'partial'>();
@@ -57,7 +57,8 @@ export class Runtime {
   // Native records restore history and negative F10 evidence, never a positive pair grant.
   restore(events: readonly RecoveryEvent[], saved: SaveState = 'saved') {
     if (this.records.size || this.approvals.size) throw new Error('INVALID_INPUT: restore requires a fresh runtime');
-    for (const raw of events) {
+    const legacyRefusals = new Map<string, number>();
+    for (const [position, raw] of events.entries()) {
       try {
         if (!isRecoveryEvent(raw)) throw new Error('Invalid communication record');
         const event = structuredClone(raw);
@@ -97,6 +98,7 @@ export class Runtime {
           case 'contact': {
             if (event.revoked) {
               this.revoked.add(event.peer);
+              legacyRefusals.set(event.peer, position + 1);
               this.rememberedApprovals.delete(event.peer);
             } else {
               // A single owner decision clears the deny, authorizes old
@@ -108,6 +110,7 @@ export class Runtime {
               }
               visible.forEach(entry => { entry.readable = true; });
               this.revoked.delete(event.peer);
+              legacyRefusals.delete(event.peer);
               // Older, unshipped F11 one-sided grant data are historic records,
               // not authority after shared pair consent is introduced.
             }
@@ -119,7 +122,8 @@ export class Runtime {
       }
     }
     // Only the final saved F10 negative state is submitted for one-time pair migration.
-    this.restoredLegacyRefusals = [...this.revoked].sort();
+    this.restoredLegacyRefusals = [...legacyRefusals].sort(([a], [b]) => a.localeCompare(b))
+      .map(([peer, entryIndex]) => ({ peer, entryIndex }));
     // Positive contact authority always comes from the broker after reconnect.
     this.approvals.clear(); this.rememberedApprovals.clear();
     for (const entry of this.records.values()) {
