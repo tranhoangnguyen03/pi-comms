@@ -1,6 +1,6 @@
 # M4 — native-session recovery and a small durable mailbox
 
-**Status: proposed design, not shipped behavior.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
+**Status: design contract; F10 is merged, F11 unordered-pair implementation is under test, F12 remains proposed.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
 
 ## Decision
 
@@ -11,7 +11,8 @@ Do not add a participant sidecar database, a second transcript, a general event-
 | State | Owner and proposed location | Lifetime |
 | --- | --- | --- |
 | Original messages, reply handles, links, readability and observed outcomes | Versioned private custom entries in the participant's **existing Pi session JSONL** | Native saved session |
-| Pause, explicit local refusals/revocations, optional remembered contact decisions | The same Pi session entries, not a separate permission store | Exact session; approved lifetime |
+| Pause and communication history | Pi native session entries | Exact saved session |
+| Contact approval (remembered only) | Broker `pair-approvals.json` under the comms directory | Until either side ends it |
 | Runtime maps, report views, indexes and duplicate lookup | Rebuilt from those entries | Current runtime; disposable |
 | Pending offline payloads and bounded transport outcomes | One versioned broker-owned mailbox state file under the **existing comms directory** | Queue expiry and evidence retention |
 | Live connection, endpoint epoch and current presence | Existing broker/client mechanisms | Current connection; not durable identity |
@@ -82,17 +83,20 @@ A write failure must stop the affected operation and report that persistence fai
 - A damaged message/link can be withheld or marked uncertain without disabling unrelated work. An unreadable latest contact control requires holding that peer; if the affected authority cannot be identified, hold new communication for that session. Keep verified history inspectable. Do not block the rest of Pi or reset to empty recovered state.
 - Reuse native retention, export and deletion for participant data. No separate transcript cleanup or second compactor. Custom entries are outside model context, **not encrypted**; native export/share can include them. Preserve existing owner access and document this consequence. An old memory-only runtime cannot be reconstructed where no trustworthy record survived.
 
-## F11 — remember only the decision actually made
+## F11 — one approval per unordered session pair
 
-Runtime-only approval remains the default. Add the optional remembered exact-pair choice inside the **existing contact confirmation**, with no second routine dialog, permission mode for the agent or new settings service. Earlier grants are never upgraded automatically.
+**Owner decisions (7–8 November 2026):** One explicit approval belongs to the **unordered pair** of exact native session IDs, scoped to the current pi-comms broker/agent directory. Either member can initiate later communication without a repeated prompt. A pair is **approved or not approved**: there is no stored refusal or block list.
 
-Use the same session-record writer for owner grant, revoke and Pause. **Negative controls survive from the first slice that restores incoming records**; do not postpone revocation durability while enabling replay. F11 adds optional remembered positive consent and the complete provenance behavior.
+- **Session-only** (default) applies in both directions for the lifetime of both **Pi runtimes**. Each client registers with a per-runtime ID; a dropped socket that reconnects with the same runtime ID keeps the approval, so a network blip or broker heartbeat miss does not re-prompt. A reload, restart, unregister, or replacement of a dead-PID stale registration by a different runtime ends it, notifies the remaining participant and ends its affected asks as disconnected. A broker restart ends it. **Remember pair** persists the same one approval across restarts of both original sessions and the broker.
+- **Decline / Esc** stores nothing. The agent does not re-prompt within the same user turn; after the user's next input it may ask again. **`/comms revoke` from either endpoint** ends the approval for both directions, ends affected asks as revoked, and returns the pair to not approved. An already admitted message or running remote task cannot be recalled.
+- **Exact identity:** canonical pair key = `(scope, min(sessionA,sessionB), max(sessionA,sessionB))`. Rename does not change it. A fork, new session or other broker scope inherits nothing. Do not substitute a name, path, cwd, old thread or role for a native ID.
+- **One owner / one decision:** the same-owner local trust boundary remains. The human choice is the only source of approval; peer messages, model text, organizer hints and old records cannot create one.
+- **One authoritative state:** the broker holds approvals; it saves only remembered approvals, in one atomic file (`pair-approvals.json`). Session-only approvals stay in broker memory, and ended pairs are deleted, so the file does not grow with history. Participants cache the broker's status and replace the cache from a fresh snapshot on every connect. Native Pi records keep message history, visibility, Pause and recovery evidence; they hold no approvals. Contact records written by 0.1.9 restore only the readability they granted.
+- **Failure boundary:** the broker is the sole writer; decisions are serialized and saved before acknowledgment, then pushed to both live endpoints. Sends are checked against the same state at admission. A failed save rejects only that remembered choice (`PAIR_SAVE_FAILED`) and leaves all other state unchanged. An unreadable file is moved aside at broker start and grants nothing; affected remembered approvals must be granted again. Arbitrary rollback of a valid older file is not detected.
+- **Versions:** all sessions sharing a broker must be pair-aware. A send or approval involving an older peer fails with `PEER_OUTDATED`; a pair-aware session that finds an older broker reports `BROKER_OUTDATED`. Both carry recovery guidance. There is no fallback to per-message transported approval; that path is removed.
+- **One human flow:** the short first-contact screen shows who, topic, request preview and one-sentence effect, with Allow this session (default), Allow & remember or Decline. `/comms approve` is grant-only (Cancel/Esc changes nothing) and sends no message. No second routine dialog or agent-selected permission mode.
 
-**First-contact refusal has one meaning:** A completed human **No/Esc** during a new contact prompt, whether the user initiated an outgoing send or reviewed an incoming request, persists the same exact-peer refusal. Peer-carried approval cannot undo it. A genuinely interrupted or aborted dialog is **not** an owner refusal and must not write a durable deny. New consent requires a subsequent explicit owner approval. F10 already applies these negative-control rules; F11 extends only positive consent lifetime.
-
-Keep owner-issued and transport-derived decisions distinct. A's remembered choice is A's decision about exact B; it is not B's owner's permanent grant. A fresh valid sender assertion can support the existing receiver-runtime/bidirectional contact flow, subject to local refusal. Restoring an old assertion or reading old mail cannot create persistent receiver consent. A queued stale assertion alone is not proof of current authority; use a valid local grant or fresh supported confirmation, otherwise the ordinary human review path holds the arrival.
-
-Revocation takes precedence on this session's new sends and admission, including locally held messages. Only a fresh owner action changes it. It does not erase historical visibility, recall an already accepted remote send, retract native context or stop remote execution. Do not imply global instantaneous revocation when the transport cannot provide it.
+**Acceptance journeys:** A approves A–B; either side sends first without a second approval, including after *both original saved sessions* restart. End from A, then separately from B: both directions stop at once and stay stopped across broker and participant restart until a new approval. Fork B to B_new: A–B unchanged; A–B_new needs its own approval. A dropped socket of the same runtime keeps session-only approval; a reload or stale-holder replacement ends it with notification and ask cleanup. Decline stores nothing and allows a later request. Failed and torn broker writes, 0.1.9 records and mixed versions behave as above. Do not claim F12 offline delivery because remembered consent exists.
 
 ## F12 — persist the existing mailbox, not an identity service
 
@@ -152,7 +156,7 @@ Expose only evidence actually available to each participant. Do not add cross-pr
 | --- | --- | --- |
 | M4-0, this PR | Source-backed architecture, host characterization tests and acceptance contract | Runtime recovery, release or self-approval |
 | M4-A / F10 | `Runtime` record restoration/visibility; `extension.ts` native entry adapter, startup barrier, native evidence; durable Pause/refusal/revocation | Participant sidecar, offline mail, remembered positive grants |
-| M4-B / F11 | Existing owner consent UI, same record writer and transport provenance | Extra routine dialog, approval transfer or identity service |
+| M4-B / F11 | Short owner consent UI, one broker-held unordered pair approval, shared end, exact-ID broker check | Two directional grants, stored refusals, mirrored participant permission records, identity service |
 | M4-C / F12 | Existing broker mailbox/delivery records, client/exact send policy and receipt reconciliation; small file helper | Second inbox, durable ask, peer registry, alias routing |
 
 A single focused native-record helper may handle validation and restoration; avoid a pluggable persistence abstraction. Keep schema checks close to existing records and use the shared send/inspect paths for both tools and organizer API. Extend current model/human/card projections together when shipped behavior changes.
@@ -176,7 +180,7 @@ The new host characterization tests establish only host behavior. F10 must separ
 | Broker dies after queued acknowledgment | Saved item or honest retained outcome; no alias substitution or silent success |
 | Full/corrupt/old-version mailbox | No acceptance without supported storage; evidence loss is unknown; verified history remains useful |
 | Offline item in `comms_ask` | Independent unavailable/interrupted result, no queue or restored waiter |
-| Remembered A grant and resumed B | Provenance retained; no invented permanent B-owner grant |
+| Remembered A–B pair and both original sessions resume | Either side initiates first without renewed approval; broker remains authoritative |
 | M2 reports and M3 handover after restart | Correction precedence, original request links and authored new C request remain intact |
 
 **Real-agent evaluation, separate from [M3 handover acceptance](M3-ACCEPTANCE.md):** Ask A, “Ask B to review the retry logic and report the risks. Keep working while B reviews.” Let B ask a question or send a finding. Restart A's same saved session while B continues, then say, “Continue the review with B. Tell me what we know, what's still waiting, and whether you need anything from me.” Supply no IDs, technical tool names or recovery instructions. Observe natural recovery, no repeated request and correct treatment of approval/uncertainty. Let B finish or correct its report. Repeat targeted variants for Pause, expired approval, withheld content, offline async mail and an unavailable ask item.

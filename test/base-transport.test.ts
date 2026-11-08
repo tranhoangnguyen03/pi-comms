@@ -31,11 +31,9 @@ test('production exact-send refreshes stale same-ID once on real wire; approval 
     assert.ok((await old.listSessions()).some(p => p.id === sender.sessionId));
     await connect(randomUUID(), reg('Reviewer'), similar);
     let similarReceived = 0, received = 0;
-    similar.on('message', () => { similarReceived++; }); replacement.on('message', (from, wire, approval) => {
+    similar.on('message', () => { similarReceived++; }); replacement.on('message', (from) => {
       received++;
       assert.equal(from.id, sender.sessionId);
-      assert.deepEqual(approval, { context: 'Owner-approved read-only review' });
-      assert.equal(JSON.parse(wire.content.text).contactApproval, undefined, 'approval is outside the agent envelope');
     });
     const nativeList = sender.listSessions.bind(sender);
     let resolveCalls = 0;
@@ -45,7 +43,7 @@ test('production exact-send refreshes stale same-ID once on real wire; approval 
       return sessions;
     };
     const envelope = { id: randomUUID(), exchange: randomUUID(), subject: 'refresh', text: 'same exact saved ID', refs: [], replyTo: null, corrects: null, createdAt: new Date().toISOString() };
-    const outcome = await sendExactSession(sender, () => true, target, envelope, 'Owner-approved read-only review');
+    const outcome = await sendExactSession(sender, () => true, target, envelope);
     assert.equal(outcome.outcome, 'accepted'); assert.equal(resolveCalls, 2);
     await new Promise(r => setTimeout(r, 30)); assert.equal(received, 1); assert.equal(similarReceived, 0);
     // A simultaneous live claim is rejected rather than replacing the session.
@@ -57,11 +55,6 @@ test('production exact-send refreshes stale same-ID once on real wire; approval 
     sender.sendExact = async (...args) => { sends++; return nativeSend(...args); };
     assert.equal((await sendExactSession(sender, () => approved, target, { ...envelope, id: randomUUID() })).code, 'CONTACT_NOT_APPROVED'); assert.equal(sends, 0);
     sender.listSessions = nativeList; sends = 0;
-    const supports = sender.supportsFeature.bind(sender);
-    sender.supportsFeature = feature => feature === 'owner-contact-v1' ? false : supports(feature);
-    assert.equal((await sendExactSession(sender, () => true, target, { ...envelope, id: randomUUID() }, 'review')).code, 'UNSUPPORTED_CAPABILITY');
-    assert.equal(sends, 0, 'old broker rejection is known before sending, not an unknown write');
-    sender.supportsFeature = supports;
     sender.sendExact = async () => { sends++; throw new Error('unknown after write'); };
     assert.equal((await sendExactSession(sender, () => true, target, { ...envelope, id: randomUUID() })).outcome, 'unknown'); assert.equal(sends, 1);
   } finally {

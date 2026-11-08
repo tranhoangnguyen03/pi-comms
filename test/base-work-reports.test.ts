@@ -15,7 +15,7 @@ function pair() {
   const sentA: any[] = [], sentB: any[] = [];
   const lead = new Runtime(a, async (_to, envelope) => { sentA.push(envelope); return { outcome: 'accepted' }; });
   const reviewer = new Runtime(b, async (_to, envelope) => { sentB.push(envelope); return { outcome: 'accepted' }; });
-  lead.approveFromOwner(approval(b)); reviewer.approveFromOwner(approval(a));
+  lead.approve(approval(b)); reviewer.approve(approval(a));
   return { lead, reviewer, sentA, sentB };
 }
 
@@ -38,7 +38,7 @@ test('structured data is optional JSON object; work reports require an exact rep
 test('rejects non-JSON nested structured values before sending or recording messages', async () => {
   let transports = 0;
   const runtime = new Runtime(a, async () => { transports++; return { outcome: 'accepted' }; });
-  runtime.approveFromOwner(approval(b));
+  runtime.approve(approval(b));
 
   const nestedOverflow = JSON.parse('{"metrics":{"count":1e400}}');
   assert.equal(nestedOverflow.metrics.count, Infinity, 'parsed JSON may contain non-finite JS numbers');
@@ -163,7 +163,7 @@ test('revocation preserves authorized report history but withholds later incomin
   lead.receive(b, sentB[0]);
   const approved: any = lead.inspect({ requests: [req.message.id] }).responses[0];
   assert.equal(approved.reportCount, 1);
-  lead.revokeFromOwner(b);
+  lead.unapprove(b);
   const history: any = lead.inspect({ requests: [req.message.id] }).responses[0];
   assert.equal(history.reportCount, 1);
   assert.equal(history.latestReport.message.id, sentB[0].id);

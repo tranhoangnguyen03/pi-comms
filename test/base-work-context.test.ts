@@ -35,7 +35,7 @@ test('a request labels its exact recipient; linked replies inherit only the work
   const firstWire: any[] = [], secondWire: any[] = [];
   const lead = new Runtime(a, async (_to, msg) => { firstWire.push(msg); return { outcome: 'accepted' }; });
   const reviewer = new Runtime(b, async (_to, msg) => { secondWire.push(msg); return { outcome: 'accepted' }; });
-  lead.approveFromOwner(approved(b)); reviewer.approveFromOwner(approved(a));
+  lead.approve(approved(b)); reviewer.approve(approved(a));
 
   const request = await lead.send({ to: b, subject: 'Security', text: 'Review AUTH-42', workRef: 'AUTH-42', recipientLabel: 'Security reviewer' });
   validate(EnvelopeSchema, firstWire[0]);
@@ -96,14 +96,14 @@ test('work-filter inspection cannot reveal unapproved metadata or create a peer 
   assert.equal(masked.items[0].code, 'CONTACT_NOT_APPROVED');
   assert.equal(runtime.waiting.length, 1, 'inspection must not admit messages');
 
-  runtime.approveFromOwner(approved(c));
+  runtime.approve(approved(c));
   assert.equal(runtime.inspect({ workRef: 'SECRET-42' }).items.length, 1);
 });
 
 test('human and model displays explain work and sender-supplied labels without treating them as authority', async () => {
   const runtime = new Runtime(b, async () => ({ outcome: 'accepted' }));
   runtime.receive(a, incoming('AUTH-42', 'Security reviewer'));
-  runtime.approveFromOwner(approved(a));
+  runtime.approve(approved(a));
   const entry: any = runtime.inspect({ queue: 'self' });
   const model = modelView(entry, id => id === a ? 'Lead' : 'Reviewer');
   assert.match(model, /Work: AUTH-42/);

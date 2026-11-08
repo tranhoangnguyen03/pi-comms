@@ -2,18 +2,20 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, InspectInput } from './schema.ts';
 import type { Attempt } from './session-send.ts';
+import type { PairStatus } from './transport/types.ts';
 import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState } from './session-records.ts';
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
 type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized' | 'dismissed';
 export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
-export type Approval = { id: string; name: string; context: string };
+export type Approval = { id: string; name: string; context: string; remembered?: boolean };
 export const ASK_ADMISSION = 'native ask result context admission';
 export const NESTED_HANDOFF = 'ask result handed to nested caller';
 export class Runtime {
+  // Cache of the broker's pair approvals for this runtime; never saved here.
   private approvals = new Map<string, Approval>();
-  private revoked = new Set<string>();
+  private pairVersions = new Map<string, number>();
   private records = new Map<string, Entry>();
   private returns = new Map<string, Message>();
   private saveStates = new Map<string, SaveState | 'partial'>();
@@ -47,7 +49,7 @@ export class Runtime {
     }
   }
   // Recovery is a reduction of our own native entries, never a replay of sends.
-  // Approval grants intentionally do not survive this F10 slice.
+  // Native records restore history, never contact approval (the broker owns it).
   restore(events: readonly RecoveryEvent[], saved: SaveState = 'saved') {
     if (this.records.size || this.approvals.size) throw new Error('INVALID_INPUT: restore requires a fresh runtime');
     for (const raw of events) {
@@ -88,17 +90,13 @@ export class Runtime {
             break;
           case 'pause': this.pause = event.value; break;
           case 'contact': {
-            if (event.revoked) this.revoked.add(event.peer);
-            else {
-              // Apply a completed owner reapproval as a single saved decision.
-              // Validate all referenced messages before clearing a durable deny.
-              const visible = (event.readableIds ?? []).map(id => this.required(id));
-              if (visible.some(entry => entry.message.to !== this.self || entry.message.from !== event.peer)) {
-                throw new Error('Contact visibility belongs to another peer');
-              }
-              visible.forEach(entry => { entry.readable = true; });
-              this.revoked.delete(event.peer);
+            // Written by 0.1.9 only. Its approvals and refusals are history now;
+            // keep only the message visibility the owner granted then.
+            const visible = event.revoked ? [] : (event.readableIds ?? []).map(id => this.required(id));
+            if (visible.some(entry => entry.message.to !== this.self || entry.message.from !== event.peer)) {
+              throw new Error('Contact visibility belongs to another peer');
             }
+            visible.forEach(entry => { entry.readable = true; });
             break;
           }
         }
@@ -140,28 +138,27 @@ export class Runtime {
     this.write({ kind: 'visibility', ids }, ids);
     ids.forEach(message => { this.records.get(message)!.readable = true; });
   }
-  // Passed only to the human command handler, never registered as an agent tool.
-  approveFromOwner(peer: Approval) {
+  // Applies a broker pair approval: the peer's held history becomes readable.
+  approve(peer: Approval) {
     validate(Id, peer.id); this.assertOperational();
-    // Reapproval and newly readable held history are one saved decision.
-    // Failure cannot clear a revocation without its matching visibility.
-    const visible = [...this.records.values()].filter(entry => entry.message.from === peer.id && !entry.readable);
-    const ids = visible.map(entry => entry.message.id);
-    this.write({ kind: 'contact', peer: peer.id, revoked: false, ...(ids.length ? { readableIds: ids } : {}) }, ids);
-    visible.forEach(entry => { entry.readable = true; });
-    this.revoked.delete(peer.id); this.approvals.set(peer.id, { ...peer });
+    this.allowHistory(peer.id);
+    this.approvals.set(peer.id, { ...peer });
   }
-  // Only a fresh transport assertion reaches this path. It can authorize this
-  // runtime, not a positive grant in the restored owner's next runtime.
-  approveFromTransport(peer: Approval) {
-    if (this.revoked.has(peer.id) || this.isApproved(peer.id)) return;
-    this.assertOperational(); this.allowHistory(peer.id); this.approvals.set(peer.id, { ...peer });
+  unapprove(id: string) { this.approvals.delete(id); }
+  // Applies a broker pair_update or pair list item; older revisions are ignored.
+  syncPairStatus(status: PairStatus, name = status.peer) {
+    validate(Id, status.peer);
+    if (status.revision < (this.pairVersions.get(status.peer) ?? -1)) return;
+    this.pairVersions.set(status.peer, status.revision);
+    if (status.mode === 'none') this.unapprove(status.peer);
+    else this.approve({ id: status.peer, name, context: status.context ?? 'Approved pair contact', remembered: status.mode === 'remembered' });
   }
-  revokeFromOwner(id: string) {
-    validate(Id, id); this.revoked.add(id); this.approvals.delete(id);
-    this.write({ kind: 'contact', peer: id, revoked: true });
+  // Replaces the cache with a broker snapshot. Callers must apply it in wire
+  // order relative to pair_update events.
+  replacePairs(items: readonly PairStatus[], name: (id: string) => string = id => id) {
+    this.approvals.clear(); this.pairVersions.clear();
+    for (const item of items) this.syncPairStatus(item, name(item.peer));
   }
-  isRevoked = (id: string) => this.revoked.has(id);
   approval(id: string) { const peer = this.approvals.get(id); return peer ? { ...peer } : undefined; }
   isApproved = (id: string) => this.approvals.has(id);
   known() { return [...this.approvals.values()].map(p => ({ ...p })); }
@@ -243,7 +240,7 @@ export class Runtime {
       ...(input.structured ? { structured: input.structured } : {}), ...(input.report ? { report: input.report } : {}),
       replyTo: source?.id ?? null, corrects: input.corrects ?? null, createdAt: new Date().toISOString(),
     };
-    checkSize(envelope, this.approval(to)?.context);
+    checkSize(envelope);
     const entry: Entry & { readable: boolean } = { message: { ...envelope, from: this.self, to }, facts: [], state: 'unknown', readable: true };
     this.write({ kind: 'message', entry }, [envelope.id]);
     this.records.set(envelope.id, entry);

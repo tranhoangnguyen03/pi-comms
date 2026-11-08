@@ -16,7 +16,7 @@ function fixture() {
   const lead = new Runtime(a, async (_to, envelope) => { wiresA.push(envelope); return { outcome: 'accepted' }; });
   const former = new Runtime(b, async (_to, envelope) => { wiresB.push(envelope); return { outcome: 'accepted' }; });
   const successor = new Runtime(c, async (_to, envelope) => { wiresC.push(envelope); return { outcome: 'accepted' }; });
-  lead.approveFromOwner(approved(b)); former.approveFromOwner(approved(a));
+  lead.approve(approved(b)); former.approve(approved(a));
   return { lead, former, successor, wiresA, wiresB, wiresC };
 }
 
@@ -40,7 +40,7 @@ test('explicit handover carries only authored brief and old-exchange reference i
     /CONTACT_NOT_APPROVED/);
   assert.equal(lead.known().some(p => p.id === c), false);
   assert.equal(successor.inspect({}).recentExchanges.length, 0);
-  lead.approveFromOwner(approved(c)); successor.approveFromOwner(approved(a));
+  lead.approve(approved(c)); successor.approve(approved(a));
 
   const text = 'Goal: review retry safety. Finding: uncertain write retry. Open question: can we avoid duplicate writes?';
   const forwarded = await lead.send({
@@ -130,7 +130,7 @@ test('invalid handover provenance and mixing with replies fail before transport 
   // Source metadata received from an unapproved colleague is not automatically
   // usable as a handover source by the lead's agent.
   const stranger = new Runtime(a, async () => { assert.fail('must not send'); return { outcome: 'accepted' }; });
-  stranger.approveFromOwner(approved(c));
+  stranger.approve(approved(c));
   const incoming = { id: randomUUID(), exchange: randomUUID(), subject: 'Private', text: 'Unapproved',
     refs: [], replyTo: null, corrects: null, createdAt: new Date().toISOString() };
   stranger.receive(b, incoming);
@@ -158,7 +158,7 @@ test('ordinary messages, reply forms, unknown old wire and batched asks remain c
   // A recipient may not verify a sender's former exchange: it is a pointer,
   // not a foreign-session read or a claim that records were restored.
   const successor = new Runtime(c, async () => ({ outcome: 'accepted' }));
-  successor.approveFromOwner(approved(a));
+  successor.approve(approved(a));
   const external = { ...wiresA[0], id: randomUUID(), exchange: randomUUID(),
     handoverFrom: randomUUID(), replyTo: null };
   successor.receive(a, external);

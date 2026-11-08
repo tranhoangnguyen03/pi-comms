@@ -230,6 +230,7 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
+  if (value.pairConsentV1 !== undefined && typeof value.pairConsentV1 !== "boolean") return false;
   return value.trustedLocal === undefined || typeof value.trustedLocal === "boolean";
 }
 
@@ -258,6 +259,8 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
   if (value.runtimeFallbackAlias !== undefined && typeof value.runtimeFallbackAlias !== "boolean") {
     return false;
   }
+  if (value.pairConsentV1 !== undefined && typeof value.pairConsentV1 !== "boolean") return false;
+  if (value.pairConsentV1 === true && (typeof value.runtimeId !== "string" || !value.runtimeId)) return false;
   if (value.extensions !== undefined && !Array.isArray(value.extensions)) {
     return false;
   }

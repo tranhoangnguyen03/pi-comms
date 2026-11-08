@@ -11,7 +11,7 @@ function pair() {
   const outbound: any[] = [], inbound: any[] = [];
   const lead = new Runtime(self, async (_to, msg) => { outbound.push(msg); return { outcome: 'accepted' }; });
   const reviewer = new Runtime(peer, async (_to, msg) => { inbound.push(msg); return { outcome: 'accepted' }; });
-  lead.approveFromOwner(approve(peer)); reviewer.approveFromOwner(approve(self));
+  lead.approve(approve(peer)); reviewer.approve(approve(self));
   return { lead, reviewer, outbound, inbound };
 }
 async function start(lead: Runtime, reviewer: Runtime, outbound: any[]) {
@@ -116,7 +116,7 @@ test('sender-side progress remains a conversation preview without an actionable 
 
 test('unverified progress-only exchange remains discoverable in the overview', () => {
   const runtime = new Runtime(self, async () => ({ outcome: 'accepted' }));
-  runtime.approveFromOwner(approve(peer));
+  runtime.approve(approve(peer));
   const orphan = {
     id: randomUUID(), exchange: randomUUID(), subject: 'Earlier context lost',
     text: 'Progress with lost original request', refs: [], replyTo: randomUUID(),
@@ -198,7 +198,7 @@ test('unapproved progress and reports with missing links keep human-visible orig
   assert.deepEqual(lead.planIntake([entry.id]).summarized, []);
   assert.equal(JSON.stringify(lead.inspect({ queue: 'self' })).includes('PRIVATE_REPORT'), false);
   assert.match(JSON.stringify(lead.inspect({ queue: 'self' }, 'human')), /PRIVATE_REPORT/);
-  lead.approveFromOwner(approve(unapproved));
+  lead.approve(approve(unapproved));
   const allowed = lead.planIntake(lead.eligible());
   assert.deepEqual(allowed.deliver.map(e => e.message.id), [entry.id],
     'an unverified report must be shown with its link warning, not silently grouped');

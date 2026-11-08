@@ -72,7 +72,7 @@ The new recipient must be separately approved. The former session stays unchange
 
 A local Pi extension can discover pi-comms through Pi's shared event bus, then call the **same session's** peer discovery, message send and inspection paths. This is an optional developer interface; it adds no agent tools or new setup step for standalone users. It does not launch, replace or manage agents.
 
-See [the organizer integration guide](docs/INTEGRATION.md) for the versioned contract, an example and its security and lifetime limits. Every new contact still requires the ordinary human confirmation. An organizing extension cannot pass a flag that creates contact approval; work and recipient labels remain descriptive. No shared credentials, new broker protocol or cross-process API is created.
+See [the organizer integration guide](docs/INTEGRATION.md) for the versioned contract, an example and its security and lifetime limits. Every new contact still requires the ordinary human confirmation. An organizing extension cannot pass a flag that creates contact approval; work and recipient labels remain descriptive. The organizer API adds no shared credentials or new public tool; F11's internal pair-consent protocol remains broker-owned.
 
 ## Automatic request-aware outcome delivery (0.1.6+)
 
@@ -96,13 +96,31 @@ For short, on-demand workflows, use the bundled Pi skill **`/skill:pi-comms`**. 
 
 ## Saved-session recovery (M4-A / F10 — 0.1.9)
 
-A saved Pi session retains communication records, original request/reply/report/correction and handover links, reusable return handles, previously authorized history, Pause and explicit revocation. pi-comms restores those facts **before broker registration** and checks native history before admitting old incoming messages. It never replays uncertain outgoing requests or restarts an old `comms_ask` wait.
+A saved Pi session retains communication records, original request/reply/report/correction and handover links, reusable return handles, previously authorized history and Pause. pi-comms restores those facts **before broker registration** and checks native history before admitting old incoming messages. It never replays uncertain outgoing requests or restarts an old `comms_ask` wait.
 
-**Past access is not new permission.** Previously agent-readable incoming messages remain inspectable in the same saved session after contact approval expires or a contact is revoked. Incoming content that was withheld stays withheld, and new sends/intake still need current consent. Positive contact approval remains runtime-only until F11.
+**Past access is not new permission.** Previously agent-readable incoming messages remain inspectable in the same saved session after contact approval expires or a contact is ended. Incoming content that was withheld stays withheld, and new sends/intake still need current consent. F11 can restore an explicitly remembered **broker pair decision**, but never assumes consent from old session history.
 
 **Limits:** A fresh, unused or `--no-session` run continues with live-only records until Pi writes a real saved session. We do not fabricate turns or force Pi's file flush. Storage outcomes show `saved`, `volatile` or `partial` evidence. Corrupt or unknown saved controls hold unsafe communication while verified history remains inspectable; recovery does not block unrelated Pi work. Native session persistence does not promise protection from disk loss or an interrupted host write.
 
-**Still pending:** F11's optional remembered contact approval and F12's durable offline queue. The public exact-session send still rejects unavailable recipients. See [M4 recovery design and limits](docs/M4-RECOVERY-CONTRACT.md). The separate M3 real-agent handover evaluation is not an F10 recovery test.
+**Still pending:** F12's durable offline queue. The public exact-session send still rejects unavailable recipients. See [M4 recovery design and limits](docs/M4-RECOVERY-CONTRACT.md). The separate M3 real-agent handover evaluation is not an F10 recovery test.
+
+## Contact approval (M4-B / F11 — 0.1.10)
+
+The contact prompt shows **who**, a short **topic and request preview**, and the **effect**. It does not require reading session IDs or transport rules. The owner chooses:
+
+- **Allow this session** (default): one approval for both directions between the two exact sessions. It lasts until either Pi session reloads, restarts or is replaced, or the broker restarts. A dropped connection that reconnects in the same Pi session keeps it.
+- **Allow & remember:** the same single A–B approval survives restart of those original sessions and the broker. Either session can initiate first.
+- **Decline** (or Esc): not approved. Nothing is stored. The agent does not ask again in the same turn; after your next message it may ask again.
+
+A pair is either **approved or not approved**; there is no block list. `/comms revoke` from either side ends an approval for both directions and ends affected asks. A later approval from either side restores it.
+
+The broker stores remembered approvals only, keyed by the shared comms scope and the two sorted native Pi session IDs, and saves them before reporting success. Session-only approvals stay in broker memory. Local session records retain message history, visibility, Pause and recovery evidence, not approvals. A fork (`B_new`) has a different ID, so `A–B_new` needs its own approval. Rename does not change a pair. When a session-only approval ends because a Pi session left (unregister, a reload, or replacement of a dead-PID registration whose socket is still open), the remaining participant is notified and its affected asks end as disconnected.
+
+**Upgrading from 0.1.9:** Earlier approvals and refusals in saved sessions are history only; any messages they made readable stay readable. All sessions sharing a broker must run 0.1.10: a session talking to an older peer gets `PEER_OUTDATED`, and a session that finds an older broker still running gets `BROKER_OUTDATED`. Reload or close the older sessions; the old broker exits when they leave and newer sessions reconnect automatically.
+
+The explicit `/comms approve` command only grants/edits approval and sends no message. Cancel/Esc keeps the existing approval and active asks. If the broker cannot save a remembered approval, that one choice fails with `PAIR_SAVE_FAILED` and nothing else changes; an unreadable approvals file is moved aside (`pair-approvals.json.unreadable-*`) and remembered approvals must be granted again.
+
+**Limit:** This is the same-owner local workflow, not cross-user authentication. F12 broker-restart-durable offline messages are not included; remembered contact does not make an offline peer reachable.
 
 ## Build and try in isolation
 
@@ -110,7 +128,7 @@ A saved Pi session retains communication records, original request/reply/report/
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.9.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.10.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -124,7 +142,7 @@ PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.6`, which is published). The `0.1.8` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.6`, which is published). The `0.1.10` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 
@@ -132,11 +150,11 @@ Ask your agent to work with the colleague, for example:
 
 > Have Reviewer review the current implementation and return supported findings. Do not edit.
 
-The agent discovers the exact colleague and attempts the send. **First contact opens a native human confirmation** with colleague, work and Yes/No consequences first. Request preview, exact session and approval lifetime follow. Allow it and that same send continues—no setup command, ID relay or repeated task prompt.
+The agent discovers the exact colleague and attempts the send. **First contact opens one short human choice**: Allow this session (default), Allow & remember, or Decline. The same send continues when approved. Decline sends nothing; the agent may ask again after your next message. Stop/abort cancels the attempt.
 
-**One approval per exact pair of sessions, not per tool or work item.** In this same-owner local workflow, an approved A→B contact authorizes later `comms_message` and `comms_ask` calls between A and B in **both directions**, without more prompts while the runtimes retain approval. The initial work description is context, **not** an enforced per-task limit or permission to perform unrelated work. The requester sends this contact approval as exact-target transport metadata, separate from the agent message; the receiver accepts without another prompt but still follows its own user directives, Pause/revoke and native tool permissions. Approval of A↔B never approves B↔C. Each distinct first contact (such as A→B and A→C) needs its own decision; concurrent decisions stay independent. Approvals reset on reload/session switch/restart, and an explicit revocation blocks trust until the owner reapproves.
+**One decision per unordered pair.** In this same-owner local workflow, approving A–B enables messages and asks in **both directions**, whichever session initiates first. The broker binds the exact original session IDs and scope. Session-only approval ends when either Pi session reloads or the broker restarts; remembered approval survives the original pair's restarts until either side runs `/comms revoke`. It never grants work authority or native tool permissions, and it never transfers to a fork or a different peer.
 
-**No/Esc at a first-contact prompt is a durable refusal in either direction** for that saved Pi session: no outgoing message is sent and later incoming transport assertions cannot reapprove the exact peer. Stop/abort of an in-flight tool cancels that attempt without saving a refusal. `/comms requests` lets the human reconsider held incoming contacts; `/comms approve` can explicitly reapprove an exact contact for later sends. Receiver **Pause** holds admission/wakes. Already-admitted content is not retracted. Fresh/ephemeral sessions retain live-only controls until Pi saves them. Reapproval is a human choice, not automatic permission from another agent.
+**Decline means not approved, not blocked.** Nothing is stored, and either session may ask again later; every approval still needs a human choice. `/comms approve` is grant-only, while `/comms revoke` ends an approval from either side. Pause still holds incoming admission and already-admitted content cannot be recalled.
 
 Unapproved content remains fully human-visible in `/comms inspect`; model inspection returns only IDs and a contact-approval hold, withholding subject, body, references and return handle. Noninteractive callers without human approval UI fail with an actionable approval-required result; no consent is inferred. Native Stop or session replacement cancels pending approval without sending. Peer messages cannot broaden approval or bypass host tool permissions. This trust model is for one owner's local sessions, not mutually untrusted users or malicious same-account processes. Runtime metadata and prompt attribution are not a security sandbox.
 
@@ -144,8 +162,8 @@ Unapproved content remains fully human-visible in `/comms inspect`; model inspec
 
 - `/comms` or `/comms status`: current approval, waiting count, recovery/storage state and broker location.
 - `/comms requests`: review held incoming contact requests **and uncertain native admission**. For an uncertain message, choose **Deliver again** (warns of possible duplicate model work; requires current consent; retains its ID) or **Dismiss** (no further pi-comms intake). In a saved Pi session, the choice is stored for restart once the write succeeds. Fresh and `--no-session` choices are live-only until Pi actually saves the session; the confirmation and result notice state which applies.
-- `/comms approve [exact-session-id]`: optional explicit contact setup/change through human selection/context/confirmation.
-- `/comms revoke [exact-session-id]`: remove contact approval after confirmation; queued traffic remains held.
+- `/comms approve [exact-session-id]`: grant-only setup or lifetime change. Choose session-only or remembered approval; **Cancel/Esc leaves any existing grant and active asks unchanged**. This command does not send work or refuse contact; use `/comms revoke` for revocation.
+- `/comms revoke [exact-session-id]`: end contact approval for both sessions after confirmation; the pair returns to not approved. Queued traffic remains held.
 - `/comms pause`: keep buffering arrivals without peer admission/wakes.
 - `/comms resume`: resume eligible intake.
 - `/comms inspect [message-id]`: read waiting messages or a specific message without consuming/admitting it. The read-only view shows counterpart, subject, full content, references and observed state—not editable JSON. Use arrows/PageUp/PageDown to scroll, **d** for technical evidence, **n/p** for more/previous messages, and **Esc/q** to close. It is a snapshot, not a second inbox. A malformed ID produces a notice rather than opening unrelated messages; an unavailable ID explains that it is not in the current saved session (older memory-only records cannot be reconstructed). RPC clients use equivalent read-only selections; model inspection is plain text and script results retain structured evidence.
@@ -192,7 +210,7 @@ Same-ID reconnect refresh is internal: after a definite stale-epoch rejection, r
 - **Saved:** a native session entry was actually observed on disk, distinct from an in-memory native entry.
 - **Response:** a linked peer message exists. None of these means work completed.
 
-F10 restores saved-session message/outbox records, authorized historical visibility, reply handles, Pause and explicit negative controls after reload or restart. Positive contact approvals still reset; a new send may require the existing approval flow. Fresh unused or in-memory sessions remain live-only until Pi saves them; an interrupted native write does not establish durability. Local ask waiters never resume automatically. Inspect unknown outgoing results before attempting new work. The broker's inherited mailbox remains memory-only; the public exact-send path still rejects unavailable peers until F12.
+F10 restores saved-session message/outbox records, authorized historical visibility, reply handles, Pause and explicit negative controls after reload or restart. F11 asks the broker for the one current A–B pair decision; native records and transported approval cannot recreate a superseded grant. Fresh unused or in-memory sessions remain live-only until Pi saves them; an interrupted native write does not establish durability. Local ask waiters never resume automatically. Inspect unknown outgoing results before attempting new work. The broker's inherited mailbox remains memory-only; the public exact-send path still rejects unavailable peers until F12.
 
 ## Update and rollback
 

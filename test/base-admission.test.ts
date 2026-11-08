@@ -17,11 +17,9 @@ test('inspection preserves authorized history but withholds new revoked content 
     assert.match(human, /PRIVATE_BODY/);
     if ('message' in input || 'exchange' in input || 'queue' in input) assert.ok(human.includes(handle));
   }
-  runtime.approveFromOwner({ id: peer, name: 'Reviewer', context: 'review' });
+  runtime.approve({ id: peer, name: 'Reviewer', context: 'review' });
   assert.match(JSON.stringify(runtime.inspect({ message: envelope.id })), /PRIVATE_BODY/);
-  runtime.revokeFromOwner(peer);
-  runtime.approveFromTransport({ id: peer, name: 'Reviewer', context: 'attempted resend' });
-  assert.equal(runtime.isApproved(peer), false, 'transport cannot undo explicit receiver revocation');
+  runtime.unapprove(peer);
   for (const input of [{ message: envelope.id }, { exchange: envelope.exchange }, {}, { peer }]) {
     assert.match(JSON.stringify(runtime.inspect(input)), /PRIVATE_BODY/, 'revocation does not erase already authorized history');
   }
@@ -29,7 +27,6 @@ test('inspection preserves authorized history but withholds new revoked content 
 
   const fresh = { ...envelope, id: randomUUID(), exchange: randomUUID(), subject: 'NEW_WITHHELD_SUBJECT', text: 'NEW_WITHHELD_BODY', refs: [] };
   runtime.receive(peer, fresh);
-  runtime.approveFromTransport({ id: peer, name: 'Reviewer', context: 'stale assertion' });
   const freshHandle = runtime.entry(fresh.id)!.returnHandle!;
   for (const input of [{ message: fresh.id }, { exchange: fresh.exchange }, { queue: 'self' as const }, {}, { peer }]) {
     const hidden = JSON.stringify(runtime.inspect(input));

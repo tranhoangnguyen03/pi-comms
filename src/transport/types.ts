@@ -1,8 +1,10 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
-export const CONTACT_APPROVAL_FEATURE = "owner-contact-v1";
-// Runtime-owned routing metadata, never part of the model's message envelope.
-export interface ContactApproval { context: string }
+export const PAIR_APPROVAL_FEATURE = "pair-consent-v1";
+/** Approved (this runtime or remembered) or not approved. There is no stored refusal. */
+export type PairMode = "session" | "remembered" | "none";
+/** Why a pair_update reports `none`: an owner ended it, or a runtime left. */
+export interface PairStatus { peer: string; mode: PairMode; revision: number; context?: string; reason?: "ended" | "expired" }
 /** Broker refused a register because another live process holds the session id. */
 export const SESSION_HELD_ERROR_CODE = "E_SESSION_HELD";
 
@@ -49,6 +51,7 @@ export interface SessionInfo {
   statusReportedAt?: number;
   peerUid?: number;
   trustedLocal?: boolean;
+  pairConsentV1?: boolean;
   /** Live context-window usage, pushed via presence from the source session's
    *  getContextUsage(). contextPct is 0..100 (rounded); contextTokens /
    *  contextWindow are raw token counts. All optional: unknown right after a
@@ -152,6 +155,8 @@ export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "st
   acknowledgesReceipts?: boolean;
   /** The client sends a frame at least this often, so the broker may drop it after several silent intervals. */
   livenessIntervalMs?: number;
+  /** Per Pi runtime; session-only pair approvals survive reconnects of the same runtime only. Required for pair-aware peers. */
+  runtimeId?: string;
 };
 
 export type ClientMessage =
@@ -159,10 +164,12 @@ export type ClientMessage =
   | { type: "unregister" }
   | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
-  | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string; contactApproval?: ContactApproval }
+  | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string }
   | { type: "message_receipt"; receipt: MessageReceipt }
   | { type: "cancel_message"; messageId: string }
   | { type: "cancel_ask"; messageId: string }
+  | { type: "pair_list"; requestId: string }
+  | { type: "pair_decide"; requestId: string; peerId: string; mode: PairMode; context: string }
   | { type: "presence"; name?: string; runtimeFallbackAlias?: boolean; status?: string; model?: string; contextPct?: number | null; contextTokens?: number | null; contextWindow?: number | null }
   | {
       type: "extension_publish";
@@ -182,8 +189,11 @@ export type ClientMessage =
 
 export type BrokerMessage =
   | { type: "registered"; sessionId: string; features?: string[] }
+  | { type: "pair_list_result"; requestId: string; items?: PairStatus[]; error?: string }
+  | { type: "pair_decision_result"; requestId: string; status?: PairStatus; error?: string }
+  | { type: "pair_update"; status: PairStatus }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
-  | { type: "message"; from: SessionInfo; message: Message; contactApproval?: ContactApproval }
+  | { type: "message"; from: SessionInfo; message: Message }
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }

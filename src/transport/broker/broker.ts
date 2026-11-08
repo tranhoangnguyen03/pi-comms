@@ -18,9 +18,10 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { CONTACT_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
+import { PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
+import { PairApprovalStore } from "./pair-approvals.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
@@ -80,6 +81,8 @@ interface ConnectedSession {
   /** Heartbeat interval the client promised; absent for clients that never heartbeat. */
   livenessIntervalMs?: number;
   lastInboundAt: number;
+  /** Pi runtime that owns this session's session-only pair approvals. */
+  pairRuntime?: string;
 }
 
 /** A socket delivery whose success reply waits for the receiver's receipt. */
@@ -256,6 +259,7 @@ class IntercomBroker {
   private namespaceOwners = new Map<string, NamespaceOwner>();
   private nextOwnerOrder = 1;
   private extensionStateManager: ExtensionStateManager;
+  private pairApprovals: PairApprovalStore;
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
@@ -263,6 +267,8 @@ class IntercomBroker {
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
+    this.pairApprovals = new PairApprovalStore(INTERCOM_DIR);
+    if (this.pairApprovals.recovered) console.log(this.pairApprovals.recovered);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);
@@ -390,14 +396,8 @@ class IntercomBroker {
       this.settlePendingReceiptsForSocket(socket);
       if (sessionKey) {
         const existing = this.sessions.get(sessionKey);
-        if (existing?.socket === socket) {
-          this.rememberDisconnectedSession(existing);
-          this.sessions.delete(sessionKey);
-          this.clearMessageReceiptRoutesForSession(sessionKey);
-          this.broadcast({ type: "session_left", sessionId: existing.info.id }, sessionKey, existing.scopeId);
-          this.recomputeNamespaceOwners();
-          this.scheduleShutdownCheck();
-        }
+        // A dropped socket is not a runtime exit: the same runtime may reconnect.
+        if (existing?.socket === socket) this.removeRegisteredSession(existing, existing.pairRuntime);
       }
     });
 
@@ -436,6 +436,21 @@ class IntercomBroker {
     return true;
   }
 
+  // Shared by unregister, socket loss and stale-holder replacement. Session-only
+  // pairs end unless they belong to `keepRuntime` (the runtime that may return).
+  private removeRegisteredSession(existing: ConnectedSession, keepRuntime?: string): void {
+    if (this.sessions.get(existing.key)?.socket !== existing.socket) return;
+    this.rememberDisconnectedSession(existing);
+    this.sessions.delete(existing.key);
+    this.clearMessageReceiptRoutesForSession(existing.key);
+    for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id, keepRuntime)) {
+      this.publishPair(existing.scopeId, existing.info.id, peer, "expired");
+    }
+    this.broadcast({ type: "session_left", sessionId: existing.info.id }, existing.key, existing.scopeId);
+    this.recomputeNamespaceOwners();
+    this.scheduleShutdownCheck();
+  }
+
   private scheduleShutdownCheck(delayMs = 5000): void {
     if (this.shutdownTimer) return;
 
@@ -453,6 +468,21 @@ class IntercomBroker {
       console.log("No sessions connected, shutting down");
       this.shutdown();
     }, delayMs);
+  }
+
+  private pairRuntime(scope: string | undefined, id: string): string | undefined {
+    return this.sessions.get(scopedSessionKey(scope, id))?.pairRuntime;
+  }
+
+  // A committed pair decision is pushed to both live endpoints. Local Pi
+  // records never override these broker-owned contact statuses.
+  private publishPair(scope: string | undefined, a: string, b: string, reason?: "ended" | "expired"): void {
+    for (const [id, peer] of [[a, b], [b, a]]) {
+      const session = this.sessions.get(scopedSessionKey(scope, id));
+      if (!session?.info.pairConsentV1) continue;
+      const status = this.pairApprovals.state(scope, id, peer);
+      writeMessage(session.socket, { type: "pair_update", status: { ...status, ...(reason && status.mode === "none" ? { reason } : {}) } });
+    }
   }
 
   private handleMessage(
@@ -546,10 +576,14 @@ class IntercomBroker {
           socket.end();
           break;
         }
-        if (previous) {
-          this.clearMessageReceiptRoutesForSession(key);
-          previous.socket.end();
+        // A different runtime of this session (reload, restart, replacement)
+        // ends the session-only pairs of the previous one, even when the old
+        // socket never closed. The same runtime reconnecting keeps them.
+        if (previous) this.removeRegisteredSession(previous, session.runtimeId);
+        else for (const peer of this.pairApprovals.expireSession(scopeId, id, session.runtimeId)) {
+          this.publishPair(scopeId, id, peer, "expired");
         }
+        if (previous) previous.socket.end(); // Its later close must not clean up the replacement.
         setKey(key);
         const info: SessionInfo = {
           id,
@@ -565,6 +599,7 @@ class IntercomBroker {
           ...(session.tmuxPane !== undefined ? { tmuxPane: session.tmuxPane } : {}),
           ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
+          ...(session.pairConsentV1 === true ? { pairConsentV1: true } : {}),
         };
 
         const connectedSession: ConnectedSession = {
@@ -579,6 +614,7 @@ class IntercomBroker {
           acknowledgesReceipts: session.acknowledgesReceipts === true,
           ...(session.livenessIntervalMs !== undefined ? { livenessIntervalMs: session.livenessIntervalMs } : {}),
           lastInboundAt: Date.now(),
+          ...(session.pairConsentV1 === true ? { pairRuntime: session.runtimeId } : {}),
         };
         this.sessions.set(key, connectedSession);
         this.disconnectedSessions.delete(key);
@@ -594,7 +630,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, CONTACT_APPROVAL_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PAIR_APPROVAL_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
@@ -624,19 +660,10 @@ class IntercomBroker {
       }
 
       case "unregister": {
-        if (!currentKey) {
-          throw new Error("Received unregister before register");
-        }
+        if (!currentKey) throw new Error("Received unregister before register");
         const existing = this.sessions.get(currentKey);
-        if (existing?.socket === socket) {
-          this.rememberDisconnectedSession(existing);
-          this.sessions.delete(currentKey);
-          this.clearMessageReceiptRoutesForSession(currentKey);
-          this.broadcast({ type: "session_left", sessionId: existing.info.id }, currentKey, existing.scopeId);
-          this.recomputeNamespaceOwners();
-          this.scheduleShutdownCheck();
-        }
-        setKey(null);
+        if (existing?.socket === socket) this.removeRegisteredSession(existing);
+        setKey(null); // Unregister is a runtime exit; a later socket close is not.
         break;
       }
 
@@ -728,11 +755,6 @@ class IntercomBroker {
           this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
           break;
         }
-        const approval = clientMessage.contactApproval;
-        if (approval !== undefined && (!hasTargetId || !hasTargetEpoch || typeof approval !== 'object' || approval === null || typeof approval.context !== 'string' || !approval.context.trim())) {
-          this.writeDeliveryFailure(socket, message.id, 'Invalid runtime contact approval', 'E_INVALID_MESSAGE');
-          break;
-        }
         if (hasTargetId && hasTargetEpoch) {
           const targetId = clientMessage.targetId as string;
           const targetEpoch = clientMessage.targetEpoch as string;
@@ -761,6 +783,16 @@ class IntercomBroker {
             break;
           }
           const target = targets[0];
+          if (fromSession.info.pairConsentV1 || target.info.pairConsentV1) {
+            if (!fromSession.info.pairConsentV1 || !target.info.pairConsentV1) {
+              this.writeDeliveryFailure(socket, message.id, "One session runs an older pi-comms without shared pair approval", "PEER_OUTDATED");
+              break;
+            }
+            if (this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, target.info.id).mode === "none") {
+              this.writeDeliveryFailure(socket, message.id, "This exact session pair is not approved", "E_PAIR_NOT_APPROVED");
+              break;
+            }
+          }
           const fingerprint = messageDeliveryFingerprint(message, target.info.id);
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
@@ -814,7 +846,6 @@ class IntercomBroker {
             type: "message",
             from: fromSession.info,
             message: deliveredMessage,
-            ...(approval ? { contactApproval: { context: approval.context } } : {}),
           });
           this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, target, message, fingerprint);
           break;
@@ -1057,6 +1088,53 @@ class IntercomBroker {
             session.lastPresenceBroadcastAt = now;
             this.broadcast({ type: "presence_update", session: session.info }, currentKey, session.scopeId);
           }
+        }
+        break;
+      }
+
+      case "pair_list": {
+        const session = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
+          throw Error("Invalid pair list request");
+        }
+        writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, items: this.pairApprovals.list(session.scopeId, session.info.id) });
+        break;
+      }
+
+      case "pair_decide": {
+        const session = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
+          throw Error("Invalid pair decision request");
+        }
+        const peerId = clientMessage.peerId;
+        const mode = clientMessage.mode;
+        const context = clientMessage.context;
+        if (typeof peerId !== "string" || !isSessionId(peerId) || peerId === session.info.id ||
+            (mode !== "session" && mode !== "remembered" && mode !== "none") ||
+            typeof context !== "string" || context.length > 300 || (mode !== "none" && !context.trim())) {
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PAIR_INVALID_DECISION" });
+          break;
+        }
+        if (mode !== "none") {
+          const peer = this.sessions.get(scopedSessionKey(session.scopeId, peerId));
+          if (!peer) {
+            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "TARGET_UNAVAILABLE: the colleague is not connected" });
+            break;
+          }
+          if (!peer.info.pairConsentV1) {
+            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PEER_OUTDATED: the colleague runs an older pi-comms" });
+            break;
+          }
+        }
+        try {
+          const status = this.pairApprovals.decide(session.scopeId, session.info.id, peerId, mode, context,
+            id => this.pairRuntime(session.scopeId, id));
+          this.publishPair(session.scopeId, session.info.id, peerId, "ended");
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, status });
+        } catch (error) {
+          // Only this decision fails; earlier approvals and other pairs are unchanged.
+          const text = error instanceof Error ? error.message : String(error);
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: /^[A-Z_]+:/.test(text) ? text : `PAIR_SAVE_FAILED: ${text}` });
         }
         break;
       }

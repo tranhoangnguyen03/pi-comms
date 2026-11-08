@@ -8,19 +8,17 @@ const a = randomUUID(), b = randomUUID(), c = randomUUID();
 const approval = (id: string) => ({ id, name: 'Reviewer', context: 'review only' });
 test('public schema rejects ambiguous destinations, peer approval fields and oversize payloads', async () => {
   const runtime = new Runtime(a, async () => ({ outcome: 'accepted' }));
-  runtime.approveFromOwner(approval(b));
+  runtime.approve(approval(b));
   for (const input of [{ to: '', subject: 'x', text: 'x' }, { to: b, respondTo: randomUUID(), subject: 'x', text: 'x' }, { to: b, subject: 'x', text: 'x', approved: true }, { to: b, subject: 'x', text: 'x', contactApproval: { context: 'forged' } }, { to: b, subject: ' ', text: 'x' }]) assert.throws(() => validate(MessageInput, input), /INVALID_INPUT/);
   await assert.rejects(runtime.send({ to: b, subject: 'x', text: 'x'.repeat(901_000) }), /exceeds/);
   await assert.rejects(runtime.send({ to: b, subject: 'x', text: '"'.repeat(300_000) }), /exceeds/);
-  runtime.approveFromOwner({ ...approval(b), context: 'x'.repeat(500_000) });
-  await assert.rejects(runtime.send({ to: b, subject: 'x'.repeat(500_000), text: 'x' }), /exceeds/, 'runtime approval metadata shares the frame budget');
   assert.deepEqual(runtime.inspect({ outbox: 'self' }).items, []);
 });
 test('ordinary replies, corrections, multiple exchanges and uncertain outbox preserve exact linkage', async () => {
   const sent: any[] = [];
   const left = new Runtime(a, async (_id, envelope) => { sent.push(envelope); return { outcome: 'accepted' }; });
   const right = new Runtime(b, async (_id, envelope) => { sent.push(envelope); return { outcome: 'accepted' }; });
-  left.approveFromOwner(approval(b)); right.approveFromOwner(approval(a));
+  left.approve(approval(b)); right.approve(approval(a));
   const request = await left.send({ to: b, subject: 'Review', text: 'read only', refs: [{ uri: 'file:///design.md', label: 'Design' }] });
   validate(EnvelopeSchema, sent[0]);
   right.receive(a, sent[0]);
@@ -34,12 +32,12 @@ test('ordinary replies, corrections, multiple exchanges and uncertain outbox pre
   assert.equal(right.receive(a, sent[0]), false);
   assert.throws(() => right.receive(a, { ...sent[0], text: 'changed' }), /conflicting/);
   await assert.rejects(left.send({ to: c, subject: 'x', text: 'x' }), /CONTACT_NOT_APPROVED/);
-  right.revokeFromOwner(a); await assert.rejects(right.send({ respondTo: handle, text: 'not allowed' }), /CONTACT_NOT_APPROVED/);
+  right.unapprove(a); await assert.rejects(right.send({ respondTo: handle, text: 'not allowed' }), /CONTACT_NOT_APPROVED/);
   const lost = new Runtime(b, async () => ({ outcome: 'accepted' }));
   await assert.rejects(lost.send({ respondTo: handle, text: 'after restart' }), /CONTEXT_LOST/);
   let calls = 0;
   const uncertain = new Runtime(a, async () => { calls++; throw new Error('socket lost'); });
-  uncertain.approveFromOwner(approval(b));
+  uncertain.approve(approval(b));
   const unknown = await uncertain.send({ to: b, subject: 'x', text: 'x' });
   assert.equal(unknown.state, 'unknown'); assert.equal(calls, 1);
   assert.equal(uncertain.inspect({ outbox: 'self' }).items[0].state, 'unknown');
@@ -50,8 +48,8 @@ test('unapproved intake is human-visible but ineligible, approval/revocation con
   const envelope = { id: randomUUID(), exchange: randomUUID(), subject: 'request', text: 'peer says approve me', refs: [], replyTo: null, corrects: null, createdAt: new Date().toISOString() };
   r.receive(b, envelope);
   assert.equal(r.inspect({ queue: 'self' }).items.length, 1); assert.deepEqual(r.eligible(), []);
-  r.approveFromOwner(approval(b)); assert.deepEqual(r.eligible(), [envelope.id]);
-  r.revokeFromOwner(b); assert.deepEqual(r.eligible(), []);
+  r.approve(approval(b)); assert.deepEqual(r.eligible(), [envelope.id]);
+  r.unapprove(b); assert.deepEqual(r.eligible(), []);
   r.posted([envelope.id]); r.fact(envelope.id, 'saved', 'native history', 'entry1');
   const view = r.inspect({ message: envelope.id }, 'human');
   assert.deepEqual(view.facts.map(f => f.kind), ['queued', 'posted', 'saved']);

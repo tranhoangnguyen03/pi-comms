@@ -1,12 +1,15 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai';
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { RECORD_TYPE } from '../src/session-records.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'comms-f10-native-'));
 process.env.PI_CODING_AGENT_DIR = root;
@@ -15,6 +18,7 @@ after(async () => {
   try { process.kill(Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8')), 'SIGTERM'); } catch {}
   await new Promise(resolve => setTimeout(resolve, 100)); rmSync(root, { recursive: true, force: true });
 });
+const { IntercomClient } = await import('../src/transport/broker/client.ts');
 const waitFor = async (predicate: () => boolean | Promise<boolean>) => {
   const until = Date.now() + 8000;
   while (!await predicate()) { if (Date.now() >= until) throw new Error('F10 native fixture timed out'); await new Promise(resolve => setTimeout(resolve, 15)); }
@@ -27,8 +31,8 @@ async function participant(label: string, manager?: SessionManager) {
   const faux = fauxProvider({ provider: `f10-${label}-${randomUUID()}` });
   const models = await ModelRuntime.create({ authPath: join(root, `${label}-auth.json`), modelsPath: null, refreshOnCreate: false });
   models.registerNativeProvider(faux.provider);
-  const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [];
-  let draft = '', confirm = true, hold = false;
+  const observed: any[][] = [], notifications: string[] = [], dialogs: string[] = [], consentChoices: string[][] = [];
+  let draft = '', confirm = true, hold = false, rememberNext = false;
   let selectChoice: ((title: string, options: string[]) => string | undefined) | undefined;
   const releases: (() => void)[] = [];
   faux.setResponses(Array.from({ length: 100 }, () => async context => {
@@ -48,14 +52,21 @@ async function participant(label: string, manager?: SessionManager) {
     ...session.extensionRunner.getUIContext(), getEditorText: () => draft,
     notify: (message: string) => { notifications.push(message); }, setWidget: () => {}, setStatus: () => {},
     confirm: async (title: string, message: string) => { dialogs.push(`${title}\n${message}`); return confirm; },
-    input: async () => 'Review continuity', select: async (title: string, choices: string[]) => selectChoice?.(title, choices) ?? choices[0],
+    input: async () => 'Review continuity', select: async (title: string, choices: string[]) => {
+      if (choices.includes('Allow this session')) {
+        dialogs.push(title); consentChoices.push([...choices]);
+        if (choices.includes('Cancel') && selectChoice) return selectChoice(title, choices);
+        return confirm ? (rememberNext ? choices[1] : choices[0]) : choices[2];
+      }
+      return selectChoice ? selectChoice(title, choices) : choices[0];
+    },
   } });
   await bind(runtime.session); runtime.setRebindSession(bind);
-  return { runtime, manager, observed, notifications, dialogs,
+  return { runtime, manager, observed, notifications, dialogs, consentChoices,
     id: () => runtime.session.sessionId,
     file: () => runtime.session.sessionManager.getSessionFile(),
     command: (value: string) => runtime.session.prompt(`/comms ${value}`),
-    confirm: (value: boolean) => { confirm = value; }, draft: (value: string) => { draft = value; },
+    confirm: (value: boolean) => { confirm = value; }, remember: (value: boolean) => { rememberNext = value; }, draft: (value: string) => { draft = value; },
     select: (next: (title: string, options: string[]) => string | undefined) => { selectChoice = next; },
     hold: (value: boolean) => { hold = value; }, release: () => { releases.shift()?.(); },
     tool: async (name: string, input: unknown) => {
@@ -87,17 +98,15 @@ test('F10 native: readable history, original return handles, Pause and revocatio
     assert.equal(old.data.returnHandle, incoming.returnHandle);
     assert.equal((await b.tool('comms_inspect', {})).data.paused, true);
     assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.length, 0);
-    const fresh = await a.tool('comms_message', { to: oldId, subject: 'Held', text: 'F10_WITHHELD_AFTER_REVOKE' });
-    assert.equal(fresh.ok, true);
-    // Transport acceptance is not receiver admission. Wait for the exact
-    // arrival before checking its privacy; do not weaken the visibility check.
-    await waitFor(async () => (await b.tool('comms_inspect', { message: fresh.data.message.id })).ok === true);
-    const held = await b.tool('comms_inspect', { message: fresh.data.message.id });
-    assert.equal(held.ok, true, JSON.stringify(held));
-    assert.equal(held.data.evidence, 'withheld');
-    assert.doesNotMatch(JSON.stringify(held), /F10_WITHHELD_AFTER_REVOKE/);
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', { to: oldId, subject: 'Blocked', text: 'F10_MUST_NOT_CROSS_REVOKE' });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED', 'broker refuses new sends after either endpoint revokes');
     await b.command('resume'); await new Promise(resolve => setTimeout(resolve, 250));
-    assert.equal(b.observed.length, 0); assert.equal(b.dialogs.length, 0, 'restored revoke does not prompt repeatedly');
+    assert.equal(b.observed.length, 0);
+    // The saved return handle remains valid once the same owner explicitly
+    // reapproves the pair. Historic content is not erased by revocation.
+    b.confirm(true);
+    await b.command(`approve ${a.id()}`);
     const reply = await b.tool('comms_message', { respondTo: incoming.returnHandle, text: 'F10_LINKED_ANSWER', report: { request: id, state: 'complete' } });
     assert.equal(reply.ok, true, JSON.stringify(reply));
     assert.equal(reply.data.message.replyTo, id); assert.equal(reply.data.message.workRef, 'F10-NATIVE');
@@ -246,7 +255,7 @@ test('F10 native: cleared busy-boundary steer remains offered, not falsely poste
     // The existing human requests path first obtains current consent, then
     // an explicit duplicate-risk decision. It uses the original message ID.
     await b.command('requests');
-    assert.ok(b.dialogs.some(dialog => /wants to work with you/.test(dialog)), 'no silent contact reapproval after restart');
+    assert.ok(b.dialogs.some(dialog => /to contact you/.test(dialog)), 'no silent contact reapproval after restart');
     assert.ok(b.dialogs.some(dialog => /may have already received|may make the agent act twice/.test(dialog)), 'duplicate-work risk was disclosed');
     assert.ok(b.dialogs.some(dialog => /If this write succeeds, the choice will be saved in your Pi session for restart/.test(dialog)), 'saved-session prompt states the conditional commit boundary');
     await waitFor(() => b.observed.length === 1 && b.runtime.session.isIdle);
@@ -353,4 +362,310 @@ test('F10 native: in-memory owner dismissal is live-only, never promised to surv
     assert.equal((await b.tool('comms_inspect', { message: id })).ok, false,
       'the ephemeral decision was not claimed to survive a new process');
   } finally { unsubscribe?.(); await b.close(); await a.close(); }
+});
+
+test('F11 native: owner-remembered first contact resumes without a second approval prompt', async () => {
+  let a = await participant('f11-remember-lead'); const b = await participant('f11-remember-reviewer');
+  try {
+    await a.runtime.session.prompt('Saved owner session'); await b.runtime.session.prompt('Saved reviewer session');
+    a.remember(true); a.confirm(true);
+    const first = await a.tool('comms_message', { to: b.id(), subject: 'Remembered contact', text: 'F11_FIRST_REVIEW' });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.equal(a.dialogs.length, 1, 'one owner decision screen including the Remember option');
+    assert.ok(a.consentChoices[0].some(choice => /Allow & remember/.test(choice)));
+    assert.ok(a.notifications.some(s => /allowed and remembered for this pair/.test(s)));
+    await a.command('status');
+    assert.match(a.notifications.at(-1)!, /remembered until revoked/, 'human status shows the saved choice');
+    await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
+
+    const file = a.file()!, ownerId = a.id();
+    await a.close(); a = await participant('f11-remember-lead', SessionManager.open(file));
+    assert.equal(a.id(), ownerId);
+    a.confirm(false); // No new first-contact prompt may be needed.
+    const listed = await a.tool('comms_peers', { view: 'known' });
+    assert.ok(listed.data.items.some((p: any) => p.id === b.id() && p.approved), 'only the exact saved pair is remembered');
+    const second = await a.tool('comms_message', { to: b.id(), subject: 'Continue remembered work', text: 'F11_AFTER_RESTART' });
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.equal(a.dialogs.length, 0, 'no repeated owner confirmation after saved-session restart');
+    await a.command('status');
+    assert.match(a.notifications.at(-1)!, /remembered until revoked/);
+    await waitFor(async () => (await b.tool('comms_inspect', { message: second.data.message.id })).ok === true);
+
+    a.confirm(true); await a.command(`revoke ${b.id()}`);
+    const afterRevoke = a.file()!;
+    await a.close(); a = await participant('f11-remember-lead', SessionManager.open(afterRevoke));
+    assert.equal((await a.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === b.id()), false);
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', { to: b.id(), subject: 'No remembered grant', text: 'F11_MUST_NOT_SEND' });
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(a.dialogs.length, 1, 'revoked contact requires a fresh owner decision');
+  } finally { await a.close(); await b.close(); }
+});
+
+test('F11 native: one remembered A-B pair lets B send first after both original sessions restart', async () => {
+  let a = await participant('f11-bilateral-lead'), b = await participant('f11-bilateral-reviewer');
+  try {
+    await a.runtime.session.prompt('Saved lead'); await b.runtime.session.prompt('Saved reviewer');
+    a.remember(true); a.confirm(true);
+    const initial = await a.tool('comms_message', { to: b.id(), subject: 'Remember bilateral pair', text: 'F11_SHARED_PAIR' });
+    assert.equal(initial.ok, true, JSON.stringify(initial));
+    await waitFor(async () => (await b.tool('comms_inspect', { message: initial.data.message.id })).ok === true);
+
+    const aFile = a.file()!, bFile = b.file()!;
+    const aId = a.id(), bId = b.id();
+    await a.close(); await b.close();
+    a = await participant('f11-bilateral-lead', SessionManager.open(aFile));
+    b = await participant('f11-bilateral-reviewer', SessionManager.open(bFile));
+    assert.equal(a.id(), aId); assert.equal(b.id(), bId);
+    a.confirm(false); b.confirm(false);
+    const reverse = await b.tool('comms_message', { to: a.id(), subject: 'B first after restart', text: 'F11_B_FIRST' });
+    assert.equal(reverse.ok, true, JSON.stringify(reverse));
+    assert.equal(b.dialogs.length, 0, 'the one remembered pair authorizes B first without another dialog');
+    await waitFor(async () => (await a.tool('comms_inspect', { message: reverse.data.message.id })).ok === true);
+    const forward = await a.tool('comms_message', { to: b.id(), subject: 'A second', text: 'F11_A_SECOND' });
+    assert.equal(forward.ok, true, JSON.stringify(forward));
+    assert.equal(a.dialogs.length, 0, 'A also reuses the same pair consent');
+  } finally { await b.close(); await a.close(); }
+});
+
+test('F11 native: explicit /comms approve can remember without sending or adding a second dialog', async () => {
+  let a = await participant('f11-command-lead'); const b = await participant('f11-command-peer');
+  try {
+    await a.runtime.session.prompt('Saved owner session'); await b.runtime.session.prompt('Saved colleague session');
+    a.remember(true); a.confirm(true);
+    await a.command(`approve ${b.id()}`);
+    assert.equal(a.dialogs.length, 1, 'explicit setup uses one consent screen, not a second permission dialog');
+    assert.ok(a.consentChoices[0].some(choice => /Allow & remember/.test(choice)));
+    assert.equal((await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0, 'approval does not send work');
+    const file = a.file()!;
+    await a.close(); a = await participant('f11-command-lead', SessionManager.open(file));
+    a.confirm(false);
+    const known = await a.tool('comms_peers', { view: 'known' });
+    assert.ok(known.data.items.some((p: any) => p.id === b.id() && p.approved));
+    const msg = await a.tool('comms_message', { to: b.id(), subject: 'Now review', text: 'F11_COMMAND_REMEMBERED' });
+    assert.equal(msg.ok, true, JSON.stringify(msg));
+    assert.equal(a.dialogs.length, 0, 'remembered explicit owner contact is reused');
+  } finally { await a.close(); await b.close(); }
+});
+
+test('F11 native: editing an existing remembered grant can be cancelled or Esc without changing saved consent', async () => {
+  let a = await participant('f11-grant-cancel-lead');
+  const b = await participant('f11-grant-cancel-peer');
+  try {
+    await a.runtime.session.prompt('Saved owner session');
+    await b.runtime.session.prompt('Saved peer session');
+    a.remember(true);
+    await a.command(`approve ${b.id()}`);
+    await a.command('status');
+    assert.match(a.notifications.at(-1)!, /remembered until revoked/);
+    const firstCount = a.dialogs.length;
+
+    for (const result of [
+      (_title: string, choices: string[]) => choices.find(choice => choice.startsWith('Cancel')),
+      (_title: string, _choices: string[]) => undefined, // Escape
+    ]) {
+      a.select(result);
+      await a.command(`approve ${b.id()}`);
+      assert.ok(a.consentChoices.at(-1)?.some(choice => /Cancel/.test(choice)));
+      assert.ok(a.dialogs.at(-1)?.includes('This command sends nothing'));
+      assert.ok(a.dialogs.at(-1)?.includes("Cancel leaves existing approval unchanged"));
+      await a.command('status');
+      assert.match(a.notifications.at(-1)!, /remembered until revoked/);
+    }
+    assert.equal(a.dialogs.length, firstCount + 2, 'only the two grant editing screens were added');
+    assert.equal((await a.tool('comms_inspect', { outbox: 'self' })).data.items.length, 0);
+
+    const file = a.file()!, id = a.id();
+    await a.close(); a = await participant('f11-grant-cancel-lead', SessionManager.open(file));
+    assert.equal(a.id(), id);
+    a.confirm(false);
+    const known = await a.tool('comms_peers', { view: 'known' });
+    assert.ok(known.data.items.some((item: any) => item.id === b.id()), 'cancel and Escape did not remove the saved grant');
+    const sent = await a.tool('comms_message', { to: b.id(), subject: 'Still approved', text: 'RETAINED_REMEMBERED_CONSENT' });
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    assert.equal(a.dialogs.length, 0, 'restart uses the preserved grant without another owner prompt');
+  } finally { await a.close(); await b.close(); }
+});
+
+
+test('F11 native: revoking from B ends one shared pair for both sides and survives restart', async () => {
+  let a = await participant('f11-revoke-b-a'), b = await participant('f11-revoke-b-b');
+  try {
+    await a.runtime.session.prompt('Saved A'); await b.runtime.session.prompt('Saved B');
+    a.remember(true); a.confirm(true);
+    const first = await a.tool('comms_message', { to: b.id(), subject: 'Shared contact', text: 'PAIR_BEFORE_B_REVOKE' });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
+    assert.ok((await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === a.id()));
+
+    b.confirm(true); await b.command(`revoke ${a.id()}`);
+    await waitFor(async () => !(await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()));
+    assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === a.id()), false);
+    const afile = a.file()!, bfile = b.file()!;
+    await a.close(); await b.close();
+    a = await participant('f11-revoke-b-a', SessionManager.open(afile));
+    b = await participant('f11-revoke-b-b', SessionManager.open(bfile));
+    assert.equal((await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()), false);
+    assert.equal((await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === a.id()), false);
+    a.confirm(false); b.confirm(false);
+    const blocked = await a.tool('comms_message', { to: b.id(), subject: 'Blocked after B revoked', text: 'MUST_NOT_CROSS_REVOKE' });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+    a.confirm(true);
+    await a.command(`approve ${b.id()}`); // Fresh explicit owner action after a completed revoke.
+    const regrant = await a.tool('comms_message', { to: b.id(), subject: 'Fresh owner reapproval', text: 'PAIR_RESTORED' });
+    assert.equal(regrant.ok, true, JSON.stringify(regrant));
+    await waitFor(async () => (await b.tool('comms_inspect', { message: regrant.data.message.id })).ok === true);
+  } finally { await a.close(); await b.close(); }
+});
+
+test('F11 native: forking B never grants new A-B_new pair', async () => {
+  const a = await participant('f11-fork-a'), b = await participant('f11-fork-b');
+  let bNew: Awaited<ReturnType<typeof participant>> | undefined;
+  try {
+    await a.runtime.session.prompt('Saved A'); await b.runtime.session.prompt('Saved B');
+    a.remember(true); a.confirm(true);
+    const first = await a.tool('comms_message', { to: b.id(), subject: 'Old pair', text: 'OLD_PAIR_WORK' });
+    assert.equal(first.ok, true);
+    await waitFor(async () => (await b.tool('comms_inspect', { message: first.data.message.id })).ok === true);
+    const fork = SessionManager.forkFrom(b.file()!, join(root, 'f11-fork-b-new'), join(root, 'f11-fork-sessions'));
+    bNew = await participant('f11-fork-b-new', fork);
+    assert.notEqual(b.id(), bNew.id());
+    assert.equal((await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === bNew!.id()), false);
+    a.confirm(false); bNew.confirm(false);
+    assert.equal((await a.tool('comms_message', { to: bNew.id(), subject: 'No fork inheritance', text: 'UNAUTHORIZED_FORK' })).error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal((await bNew.tool('comms_message', { to: a.id(), subject: 'No reverse inheritance', text: 'UNAUTHORIZED_REVERSE_FORK' })).error.code, 'CONTACT_NOT_APPROVED');
+    const original = await a.tool('comms_message', { to: b.id(), subject: 'Original pair continues', text: 'STILL_OLD_PAIR' });
+    assert.equal(original.ok, true, JSON.stringify(original));
+  } finally { await bNew?.close(); await b.close(); await a.close(); }
+});
+
+test('F11 native: normal unregister expires session-only pair and ends outstanding ask', async () => {
+  let a = await participant('f11-unregister-a');
+  let b = await participant('f11-unregister-b');
+  try {
+    await a.runtime.session.prompt('Saved A'); await b.runtime.session.prompt('Saved B');
+    a.remember(false); a.confirm(true);
+    const subject = 'PENDING_ASK_DURING_NORMAL_UNREGISTER';
+    const pending = a.tool('comms_ask', {
+      requests: [{ to: b.id(), subject, text: 'Please answer after you finish' }],
+      timeoutSeconds: 60,
+    });
+    await waitFor(async () => (await a.tool('comms_inspect', { outbox: 'self' }))
+      .data.items.some((entry: any) => entry.message.subject === subject));
+    const bId = b.id(), bFile = b.file()!;
+    assert.ok((await a.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === bId));
+
+    // This is the production normal path: client sends 'unregister' before
+    // closing, not an abrupt socket.destroy or process kill.
+    await b.close();
+    const outcome = await Promise.race([pending, new Promise<never>((_, reject) =>
+      setTimeout(() => reject(Error('Normal unregister stranded an active ask')), 1500).unref())]);
+    assert.equal(outcome.data.items[0].outcome, 'disconnected',
+      'expiry event reaches remaining participant and ends its actual ask');
+    await waitFor(async () => !(await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((p: any) => p.id === bId));
+    await a.command('status');
+    assert.ok(!a.notifications.at(-1)!.includes(bId), 'human approval status is no longer stale');
+
+    b = await participant('f11-unregister-b', SessionManager.open(bFile));
+    assert.equal(b.id(), bId);
+    assert.equal((await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((p: any) => p.id === bId), false,
+      'reconnecting the same original session does not revive session-only approval');
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', {
+      to: bId, subject: 'New consent needed', text: 'No silent approval after reconnect',
+    });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+  } finally { await b.close(); await a.close(); }
+});
+
+test('F11 native upgrade: a saved 0.1.9 refusal is history only and does not cancel a remembered pair', async () => {
+  let a = await participant('f11-upgrade-a'), b = await participant('f11-upgrade-b');
+  try {
+    await a.runtime.session.prompt('A existing saved session');
+    await b.runtime.session.prompt('B existing saved session');
+    a.confirm(true); a.remember(true);
+    const before = await a.tool('comms_message', { to: b.id(), subject: 'Old collaboration', text: 'BEFORE_UPGRADE' });
+    assert.equal(before.ok, true, JSON.stringify(before));
+    // A refusal record written by 0.1.9 at B. It is not a block in this version.
+    const bId = b.id(), bFile = b.file()!, aId = a.id();
+    await b.close();
+    const bSaved = SessionManager.open(bFile);
+    bSaved.appendCustomEntry(RECORD_TYPE, {
+      version: 1, owner: bId, scope: root, writeId: randomUUID(),
+      event: { kind: 'contact', peer: aId, revoked: true },
+    });
+    b = await participant('f11-upgrade-b', bSaved);
+    assert.equal(b.id(), bId);
+    await waitFor(async () => (await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === aId));
+    b.confirm(false);
+    const reverse = await b.tool('comms_message', { to: aId, subject: 'B first after upgrade', text: 'REMEMBERED_PAIR_STILL_ACTIVE' });
+    assert.equal(reverse.ok, true, JSON.stringify(reverse));
+    assert.equal(b.dialogs.length, 0);
+  } finally { await b.close(); await a.close(); }
+});
+
+test('F11 native: stale same-ID broker replacement expires pair and ends the remaining Pi ask', async () => {
+  const a = await participant('f11-stale-replacement-a');
+  const bId = randomUUID();
+  let claimedPid: ChildProcess | undefined;
+  const stale = new IntercomClient(); stale.on('error', () => undefined);
+  const replacement = new IntercomClient(); replacement.on('error', () => undefined);
+  try {
+    await a.runtime.session.prompt('Saved A');
+    // A real child PID dies without closing the *registered* broker socket,
+    // which this test deliberately keeps open in the test process.
+    claimedPid = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    assert.ok(claimedPid.pid);
+    const registration = (pid: number, name: string) => ({
+      name, cwd: root, model: 'native-fixture', pid,
+      startedAt: Date.now(), lastActivity: Date.now(),
+      pairConsentV1: true, runtimeId: randomUUID(),
+    });
+    await stale.connect(registration(claimedPid.pid!, 'Old B holder'), bId);
+    a.confirm(true); a.remember(false);
+    const subject = 'STALLED_ASK_BEFORE_STALE_REPLACEMENT';
+    const pending = a.tool('comms_ask', {
+      requests: [{ to: bId, subject, text: 'Please reply' }], timeoutSeconds: 60,
+    });
+    await waitFor(async () => (await a.tool('comms_inspect', { outbox: 'self' }))
+      .data.items.some((item: any) => item.message.subject === subject));
+    await waitFor(async () => (await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((peer: any) => peer.id === bId));
+    assert.equal(stale.isConnected(), true, 'stale holder socket remains live before PID exit');
+
+    const exited = once(claimedPid, 'exit');
+    claimedPid.kill('SIGTERM'); await exited;
+    assert.equal(stale.isConnected(), true, 'server has not yet observed socket close');
+
+    await replacement.connect(registration(process.pid, 'B reclaims same session'), bId);
+    const ended = await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(Error('Stale replacement stranded A pending ask')), 2000).unref();
+      }),
+    ]);
+    assert.equal(ended.data.items[0].outcome, 'disconnected',
+      'A receives pair-expiry notification rather than retaining the ask');
+    await waitFor(async () => !(await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((peer: any) => peer.id === bId));
+    const peer = (await a.tool('comms_peers', { view: 'all' }))
+      .data.items.find((item: any) => item.id === bId);
+    assert.ok(peer && !peer.approved, 'replacement is visible but not approved');
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', {
+      to: bId, subject: 'No silent reuse', text: 'NO_REAPPROVAL_AFTER_STALE_TAKEOVER',
+    });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+
+    await stale.disconnect(); // Its late socket close must not remove B replacement.
+    assert.ok((await a.tool('comms_peers', { view: 'all' }))
+      .data.items.some((item: any) => item.id === bId && item.presence === 'online'));
+  } finally {
+    await Promise.all([stale, replacement].map(client => client.disconnect().catch(() => undefined)));
+    if (claimedPid && claimedPid.exitCode === null && claimedPid.signalCode === null) claimedPid.kill('SIGKILL');
+    await a.close();
+  }
 });
