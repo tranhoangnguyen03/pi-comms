@@ -251,6 +251,11 @@ export default function comms(pi: ExtensionAPI) {
         } else if (wasApproved && state.mode === 'none') endAsks('disconnected', state.peer);
         status();
       });
+      candidate.on('pair_snapshot', (items: PairStatus[]) => {
+        if (runtime !== current || stopped) return;
+        try { current.replacePairs(items, name); }
+        catch (error) { context.ui.notify(`Pair contact state could not be applied: ${String(error)}`, 'warning'); }
+      });
       candidate.on('message', (from: SessionInfo, wire: WireMessage) => {
         if (runtime !== current || stopped) return;
         try {
@@ -269,10 +274,8 @@ export default function comms(pi: ExtensionAPI) {
       try {
         await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, runtimeId }, candidate, new URL('./transport/broker/broker.js', import.meta.url));
         if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE)) throw Error('BROKER_OUTDATED');
-        // Replace the cache: approvals may have ended while this runtime was offline.
-        const pairSnapshot = await candidate.listPairs();
-        current.resetPairCache();
-        for (const item of pairSnapshot) current.syncPairStatus(item, name(item.peer));
+        // The pair_snapshot handler replaces the cache: approvals may have ended while offline.
+        await candidate.listPairs();
         if (runtime !== current || stopped) { await candidate.disconnect(); return; }
         client = candidate; candidate.updatePresence({ name: context.sessionManager.getSessionName() ?? current.self, status: active ? 'working' : 'idle' }); lastPresenceSentAt = Date.now();
         connectionError = undefined; reconnectDelay = 1000; status();

@@ -153,7 +153,12 @@ export class Runtime {
     if (status.mode === 'none') this.unapprove(status.peer);
     else this.approve({ id: status.peer, name, context: status.context ?? 'Approved pair contact', remembered: status.mode === 'remembered' });
   }
-  resetPairCache() { this.approvals.clear(); this.pairVersions.clear(); }
+  // Replaces the cache with a broker snapshot. Callers must apply it in wire
+  // order relative to pair_update events.
+  replacePairs(items: readonly PairStatus[], name: (id: string) => string = id => id) {
+    this.approvals.clear(); this.pairVersions.clear();
+    for (const item of items) this.syncPairStatus(item, name(item.peer));
+  }
   approval(id: string) { const peer = this.approvals.get(id); return peer ? { ...peer } : undefined; }
   isApproved = (id: string) => this.approvals.has(id);
   known() { return [...this.approvals.values()].map(p => ({ ...p })); }

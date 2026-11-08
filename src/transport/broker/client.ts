@@ -399,8 +399,13 @@ export class IntercomClient extends EventEmitter {
         this.pendingPairLists.delete(requestId);
         if (typeof brokerMessage.error === "string") { pending.reject(Error(brokerMessage.error)); break; }
         if (!Array.isArray(brokerMessage.items)) { pending.reject(Error("Invalid pair list")); break; }
-        try { pending.resolve(brokerMessage.items.map(parsePairStatus)); }
-        catch (error) { pending.reject(toError(error)); }
+        let items: PairStatus[];
+        try { items = brokerMessage.items.map(parsePairStatus); }
+        catch (error) { pending.reject(toError(error)); break; }
+        // Emit synchronously so listeners apply the snapshot in wire order with
+        // pair_update; a promise continuation could run after a later update.
+        this.emit("pair_snapshot", items);
+        pending.resolve(items);
         break;
       }
       case "pair_decision_result": {
