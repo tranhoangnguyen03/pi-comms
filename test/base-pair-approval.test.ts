@@ -80,3 +80,47 @@ test('F11: remembered pair state is scoped and has one serialized revision order
   assert.equal(reopened.state('local-workspace', b, a, epoch).revision, second.revision);
   assert.equal(reopened.state('local-workspace', b, a, epoch).mode, 'revoked');
 });
+
+test('F11 migration: native F10 refusal is shared, imported once, and never replayed after fresh human approval', t => {
+  const root = mkdtempSync(join(tmpdir(), 'pair-f10-migration-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const a = randomUUID(), b = randomUUID();
+  const epochs = new Map([[a, 'a-epoch'], [b, 'b-epoch']]);
+  const epoch = (id: string) => epochs.get(id);
+  const store = new PairApprovalStore(root);
+  assert.deepEqual(store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 4 }]), [a]);
+  assert.equal(store.state(undefined, a, b, epoch).mode, 'revoked', 'B old saved No blocks A and B');
+  assert.equal(new PairApprovalStore(root).state(undefined, b, a, epoch).mode, 'revoked');
+  assert.deepEqual(store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 4 }]), [],
+    'old F10 evidence is not an owner action each time the session restarts');
+
+  // The SAME human can later reapprove the pair from either endpoint.
+  store.decide(undefined, a, b, 'remembered', 'Owner explicitly reapproved', epoch);
+  const restarted = new PairApprovalStore(root);
+  assert.deepEqual(restarted.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 4 }]), [],
+    'reopening the saved F10 file cannot undo later explicit owner approval');
+  assert.equal(restarted.state(undefined, b, a, epoch).mode, 'remembered');
+  assert.deepEqual(restarted.importLegacyRefusals(undefined, a, []), [], 'F10 positives are not imported');
+
+  // If an older F10 build writes a NEW saved refusal after a downgrade,
+  // its later native entry index is distinguishable from the old one.
+  assert.deepEqual(restarted.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 9 }]), [a]);
+  assert.equal(restarted.state(undefined, a, b, epoch).mode, 'revoked');
+  assert.deepEqual(new PairApprovalStore(root).importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 9 }]), []);
+});
+
+test('F11 migration: two F10 refusals from different endpoints preserve one pair state', t => {
+  const root = mkdtempSync(join(tmpdir(), 'pair-f10-dual-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const a = randomUUID(), b = randomUUID(), store = new PairApprovalStore(root);
+  const epoch = (id: string) => id === a ? 'a' : id === b ? 'b' : undefined;
+  store.importLegacyRefusals(undefined, a, [{ peer: b, entryIndex: 2 }]);
+  store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 3 }]);
+  assert.equal(store.list(undefined, a, epoch).filter(p => p.peer === b).length, 1,
+    'both negative owners still control one canonical pair');
+  assert.equal(store.state(undefined, a, b, epoch).mode, 'revoked');
+  store.decide(undefined, b, a, 'session', 'Fresh owner choice', epoch);
+  assert.deepEqual(store.importLegacyRefusals(undefined, a, [{ peer: b, entryIndex: 2 }]), []);
+  assert.deepEqual(store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 3 }]), []);
+  assert.equal(store.state(undefined, b, a, epoch).mode, 'session');
+});
