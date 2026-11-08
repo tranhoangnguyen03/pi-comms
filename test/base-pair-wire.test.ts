@@ -38,9 +38,11 @@ async function stopBroker(child: ChildProcess | undefined) {
   child.kill('SIGTERM');
   await done;
 }
-const reg = (name: string, pairConsentV1 = true) => ({
+const reg = (name: string, pairConsentV1 = true,
+  legacyRefusals: { peer: string; entryIndex: number }[] = []) => ({
   name, cwd: root, model: 'fixture', pid: process.pid, startedAt: Date.now(),
   lastActivity: Date.now(), pairConsentV1,
+  ...(pairConsentV1 ? { legacyRefusals } : {}),
 });
 async function member(id: string, name: string, pairConsentV1 = true) {
   const client = new IntercomClient();
