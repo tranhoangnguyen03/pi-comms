@@ -5,7 +5,7 @@ import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
 import { getIntercomScopeId } from "../config.ts";
-import { CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE, type ContactApproval, type PairStatus, type PairDecision, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
+import { PAIR_APPROVAL_FEATURE, type PairStatus, type PairMode, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -76,11 +76,13 @@ function parseSessionHolder(value: unknown): SessionHolder {
 function parsePairStatus(input: unknown): PairStatus {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw Error("Invalid pair status");
   const v = input as Record<string, unknown>;
-  if (typeof v.peer !== "string" || !["session", "remembered", "revoked", "none"].includes(String(v.mode)) ||
-      !Number.isSafeInteger(v.revision) || (v.context !== undefined && typeof v.context !== "string"))
+  if (typeof v.peer !== "string" || !["session", "remembered", "none"].includes(String(v.mode)) ||
+      !Number.isSafeInteger(v.revision) || (v.context !== undefined && typeof v.context !== "string") ||
+      (v.reason !== undefined && v.reason !== "ended" && v.reason !== "expired"))
     throw Error("Invalid pair status");
   return { peer: v.peer, mode: v.mode as PairStatus["mode"], revision: v.revision as number,
-    ...(typeof v.context === "string" ? { context: v.context } : {}) };
+    ...(typeof v.context === "string" ? { context: v.context } : {}),
+    ...(v.reason ? { reason: v.reason as "ended" | "expired" } : {}) };
 }
 
 export class IntercomClient extends EventEmitter {
@@ -422,9 +424,7 @@ export class IntercomClient extends EventEmitter {
           throw new Error("Invalid message event");
         }
 
-        const approval = brokerMessage.contactApproval as ContactApproval | undefined;
-        if (approval !== undefined && (typeof approval !== 'object' || approval === null || typeof approval.context !== 'string' || !approval.context.trim())) throw new Error('Invalid contact approval');
-        this.emit("message", from, message, approval);
+        this.emit("message", from, message);
         break;
       }
 
@@ -683,7 +683,7 @@ export class IntercomClient extends EventEmitter {
     command: (requestId: string) => ClientMessage,
     pending: Map<string, { resolve: (item: T) => void; reject: (error: Error) => void }>,
   ): Promise<T> {
-    if (!this.supportsFeature(PAIR_APPROVAL_FEATURE)) return Promise.reject(Error("PAIR_UNSUPPORTED_BROKER"));
+    if (!this.supportsFeature(PAIR_APPROVAL_FEATURE)) return Promise.reject(Error("BROKER_OUTDATED"));
     let socket: net.Socket;
     try { socket = this.requireActiveSocket(); }
     catch (error) { return Promise.reject(toError(error)); }
@@ -705,12 +705,11 @@ export class IntercomClient extends EventEmitter {
     return this.requestPair(id => ({ type: "pair_list", requestId: id }), this.pendingPairLists);
   }
 
-  decidePair(peerId: string, mode: PairDecision, context: string): Promise<PairStatus> {
+  decidePair(peerId: string, mode: PairMode, context: string): Promise<PairStatus> {
     return this.requestPair(id => ({ type: "pair_decide", requestId: id, peerId, mode, context }), this.pendingPairDecisions);
   }
 
-  async sendExact(to: string, epoch: string, options: SendOptions, contactApproval?: ContactApproval): Promise<SendResult> {
-    if (contactApproval && !this.supportsFeature(CONTACT_APPROVAL_FEATURE)) throw new Error('UNSUPPORTED_CAPABILITY');
+  async sendExact(to: string, epoch: string, options: SendOptions): Promise<SendResult> {
     let socket: net.Socket;
     try {
       socket = this.requireActiveSocket();
@@ -753,7 +752,7 @@ export class IntercomClient extends EventEmitter {
       this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
 
       try {
-        writeMessage(socket, { type: "send", to, message, ...(targetId && targetEpoch ? { targetId, targetEpoch } : {}), ...(contactApproval ? { contactApproval } : {}) });
+        writeMessage(socket, { type: "send", to, message, ...(targetId && targetEpoch ? { targetId, targetEpoch } : {}) });
       } catch (error) {
         clearTimeout(timeout);
         this.pendingSends.delete(messageId);

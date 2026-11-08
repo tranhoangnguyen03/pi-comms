@@ -18,7 +18,7 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
+import { PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { PairApprovalStore } from "./pair-approvals.ts";
@@ -81,6 +81,8 @@ interface ConnectedSession {
   /** Heartbeat interval the client promised; absent for clients that never heartbeat. */
   livenessIntervalMs?: number;
   lastInboundAt: number;
+  /** Pi runtime that owns this session's session-only pair approvals. */
+  pairRuntime?: string;
 }
 
 /** A socket delivery whose success reply waits for the receiver's receipt. */
@@ -266,6 +268,7 @@ class IntercomBroker {
     this.prunePendingAskRecords();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
     this.pairApprovals = new PairApprovalStore(INTERCOM_DIR);
+    if (this.pairApprovals.recovered) console.log(this.pairApprovals.recovered);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);
@@ -393,7 +396,8 @@ class IntercomBroker {
       this.settlePendingReceiptsForSocket(socket);
       if (sessionKey) {
         const existing = this.sessions.get(sessionKey);
-        if (existing?.socket === socket) this.removeRegisteredSession(existing);
+        // A dropped socket is not a runtime exit: the same runtime may reconnect.
+        if (existing?.socket === socket) this.removeRegisteredSession(existing, existing.pairRuntime);
       }
     });
 
@@ -432,17 +436,15 @@ class IntercomBroker {
     return true;
   }
 
-  // Both normal unregister and socket loss must produce the same peer
-  // notifications. A non-remembered pair ends on *either* endpoint exit.
-  private removeRegisteredSession(existing: ConnectedSession): void {
+  // Shared by unregister, socket loss and stale-holder replacement. Session-only
+  // pairs end unless they belong to `keepRuntime` (the runtime that may return).
+  private removeRegisteredSession(existing: ConnectedSession, keepRuntime?: string): void {
     if (this.sessions.get(existing.key)?.socket !== existing.socket) return;
     this.rememberDisconnectedSession(existing);
     this.sessions.delete(existing.key);
     this.clearMessageReceiptRoutesForSession(existing.key);
-    if (!this.pairApprovals.holdReason()) {
-      for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id)) {
-        this.publishPair(existing.scopeId, existing.info.id, peer);
-      }
+    for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id, keepRuntime)) {
+      this.publishPair(existing.scopeId, existing.info.id, peer, "expired");
     }
     this.broadcast({ type: "session_left", sessionId: existing.info.id }, existing.key, existing.scopeId);
     this.recomputeNamespaceOwners();
@@ -468,18 +470,18 @@ class IntercomBroker {
     }, delayMs);
   }
 
-  private pairEpoch(scope: string | undefined, id: string): string | undefined {
-    return this.sessions.get(scopedSessionKey(scope, id))?.info.endpointEpoch;
+  private pairRuntime(scope: string | undefined, id: string): string | undefined {
+    return this.sessions.get(scopedSessionKey(scope, id))?.pairRuntime;
   }
 
   // A committed pair decision is pushed to both live endpoints. Local Pi
   // records never override these broker-owned contact statuses.
-  private publishPair(scope: string | undefined, a: string, b: string): void {
+  private publishPair(scope: string | undefined, a: string, b: string, reason?: "ended" | "expired"): void {
     for (const [id, peer] of [[a, b], [b, a]]) {
       const session = this.sessions.get(scopedSessionKey(scope, id));
       if (!session?.info.pairConsentV1) continue;
-      const status = this.pairApprovals.state(scope, id, peer, current => this.pairEpoch(scope, current));
-      writeMessage(session.socket, { type: "pair_update", status });
+      const status = this.pairApprovals.state(scope, id, peer);
+      writeMessage(session.socket, { type: "pair_update", status: { ...status, ...(reason && status.mode === "none" ? { reason } : {}) } });
     }
   }
 
@@ -574,29 +576,14 @@ class IntercomBroker {
           socket.end();
           break;
         }
-        // Import this registered native session's saved F10 *negative* state
-        // before it becomes a reachable target and before any new pair grant.
-        // The broker remembers each original event index so a later explicit
-        // owner reapproval cannot be undone by restarting an old F10 session.
-        let migratedPeers: string[] = [];
-        if (session.pairConsentV1 === true) {
-          try {
-            migratedPeers = this.pairApprovals.importLegacyRefusals(scopeId, id, session.legacyRefusals ?? []);
-          } catch (error) {
-            writeMessage(socket, { type: "error",
-              error: `PAIR_MIGRATION_FAILED: ${String(error)}` });
-            socket.end();
-            break;
-          }
+        // A different runtime of this session (reload, restart, replacement)
+        // ends the session-only pairs of the previous one, even when the old
+        // socket never closed. The same runtime reconnecting keeps them.
+        if (previous) this.removeRegisteredSession(previous, session.runtimeId);
+        else for (const peer of this.pairApprovals.expireSession(scopeId, id, session.runtimeId)) {
+          this.publishPair(scopeId, id, peer, "expired");
         }
-        if (previous) {
-          // A stale holder can be replaced before its socket emits close.
-          // Expire session-only pairs and notify the remaining participant
-          // through the same path as unregister and socket loss, then retire
-          // the old socket. Its later close must not clean up the replacement.
-          this.removeRegisteredSession(previous);
-          previous.socket.end();
-        }
+        if (previous) previous.socket.end(); // Its later close must not clean up the replacement.
         setKey(key);
         const info: SessionInfo = {
           id,
@@ -627,6 +614,7 @@ class IntercomBroker {
           acknowledgesReceipts: session.acknowledgesReceipts === true,
           ...(session.livenessIntervalMs !== undefined ? { livenessIntervalMs: session.livenessIntervalMs } : {}),
           lastInboundAt: Date.now(),
+          ...(session.pairConsentV1 === true ? { pairRuntime: session.runtimeId } : {}),
         };
         this.sessions.set(key, connectedSession);
         this.disconnectedSessions.delete(key);
@@ -642,11 +630,8 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PAIR_APPROVAL_FEATURE],
         });
-        // Pair updates follow the registered response so the new client can
-        // safely parse them. Other live endpoints are invalidated immediately.
-        for (const peer of migratedPeers) this.publishPair(scopeId, id, peer);
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
         this.recomputeNamespaceOwners();
@@ -678,7 +663,7 @@ class IntercomBroker {
         if (!currentKey) throw new Error("Received unregister before register");
         const existing = this.sessions.get(currentKey);
         if (existing?.socket === socket) this.removeRegisteredSession(existing);
-        setKey(null); // A later socket close must not expire the same pair twice.
+        setKey(null); // Unregister is a runtime exit; a later socket close is not.
         break;
       }
 
@@ -770,11 +755,6 @@ class IntercomBroker {
           this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
           break;
         }
-        const approval = clientMessage.contactApproval;
-        if (approval !== undefined && (!hasTargetId || !hasTargetEpoch || typeof approval !== 'object' || approval === null || typeof approval.context !== 'string' || !approval.context.trim())) {
-          this.writeDeliveryFailure(socket, message.id, 'Invalid runtime contact approval', 'E_INVALID_MESSAGE');
-          break;
-        }
         if (hasTargetId && hasTargetEpoch) {
           const targetId = clientMessage.targetId as string;
           const targetEpoch = clientMessage.targetEpoch as string;
@@ -805,18 +785,11 @@ class IntercomBroker {
           const target = targets[0];
           if (fromSession.info.pairConsentV1 || target.info.pairConsentV1) {
             if (!fromSession.info.pairConsentV1 || !target.info.pairConsentV1) {
-              this.writeDeliveryFailure(socket, message.id, "Both sessions must support shared pair consent", "E_PAIR_UNSUPPORTED");
+              this.writeDeliveryFailure(socket, message.id, "One session runs an older pi-comms without shared pair approval", "PEER_OUTDATED");
               break;
             }
-            try {
-              const pair = this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, target.info.id,
-                id => this.pairEpoch(fromSession.scopeId, id));
-              if (pair.mode !== "remembered" && pair.mode !== "session") {
-                this.writeDeliveryFailure(socket, message.id, "This exact session pair is not approved", "E_PAIR_NOT_APPROVED");
-                break;
-              }
-            } catch (error) {
-              this.writeDeliveryFailure(socket, message.id, String(error), "E_PAIR_STATE_BLOCKED");
+            if (this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, target.info.id).mode === "none") {
+              this.writeDeliveryFailure(socket, message.id, "This exact session pair is not approved", "E_PAIR_NOT_APPROVED");
               break;
             }
           }
@@ -873,7 +846,6 @@ class IntercomBroker {
             type: "message",
             from: fromSession.info,
             message: deliveredMessage,
-            ...(approval ? { contactApproval: { context: approval.context } } : {}),
           });
           this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, target, message, fingerprint);
           break;
@@ -1125,13 +1097,7 @@ class IntercomBroker {
         if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
           throw Error("Invalid pair list request");
         }
-        try {
-          const items = this.pairApprovals.list(session.scopeId, session.info.id,
-            id => this.pairEpoch(session.scopeId, id));
-          writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, items });
-        } catch (error) {
-          writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, error: String(error) });
-        }
+        writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, items: this.pairApprovals.list(session.scopeId, session.info.id) });
         break;
       }
 
@@ -1144,25 +1110,31 @@ class IntercomBroker {
         const mode = clientMessage.mode;
         const context = clientMessage.context;
         if (typeof peerId !== "string" || !isSessionId(peerId) || peerId === session.info.id ||
-            (mode !== "session" && mode !== "remembered" && mode !== "revoked") ||
-            typeof context !== "string" || context.length > 300 || (mode !== "revoked" && !context.trim())) {
+            (mode !== "session" && mode !== "remembered" && mode !== "none") ||
+            typeof context !== "string" || context.length > 300 || (mode !== "none" && !context.trim())) {
           writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PAIR_INVALID_DECISION" });
           break;
         }
-        if (mode !== "revoked") {
+        if (mode !== "none") {
           const peer = this.sessions.get(scopedSessionKey(session.scopeId, peerId));
-          if (!peer?.info.pairConsentV1) {
-            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PAIR_PEER_UNAVAILABLE_OR_UNSUPPORTED" });
+          if (!peer) {
+            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "TARGET_UNAVAILABLE: the colleague is not connected" });
+            break;
+          }
+          if (!peer.info.pairConsentV1) {
+            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PEER_OUTDATED: the colleague runs an older pi-comms" });
             break;
           }
         }
         try {
           const status = this.pairApprovals.decide(session.scopeId, session.info.id, peerId, mode, context,
-            id => this.pairEpoch(session.scopeId, id));
-          this.publishPair(session.scopeId, session.info.id, peerId);
+            id => this.pairRuntime(session.scopeId, id));
+          this.publishPair(session.scopeId, session.info.id, peerId, "ended");
           writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, status });
         } catch (error) {
-          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: String(error) });
+          // Only this decision fails; earlier approvals and other pairs are unchanged.
+          const text = error instanceof Error ? error.message : String(error);
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: /^[A-Z_]+:/.test(text) ? text : `PAIR_SAVE_FAILED: ${text}` });
         }
         break;
       }

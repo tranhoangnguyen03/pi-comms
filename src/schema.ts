@@ -113,6 +113,6 @@ export function validate(schema: TSchema, value: unknown) {
 }
 // Below the reused transport's 1 MiB frame bound, including routing metadata.
 export const MAX_ENVELOPE_BYTES = 900_000;
-export function checkSize(value: unknown, contactContext?: string) {
-  if (Buffer.byteLength(JSON.stringify({ content: { text: JSON.stringify(value) }, ...(contactContext ? { contactApproval: { context: contactContext } } : {}) })) > MAX_ENVELOPE_BYTES) throw new Error('INVALID_INPUT: message exceeds 900000 bytes; send a work-product reference instead');
+export function checkSize(value: unknown) {
+  if (Buffer.byteLength(JSON.stringify({ content: { text: JSON.stringify(value) } })) > MAX_ENVELOPE_BYTES) throw new Error('INVALID_INPUT: message exceeds 900000 bytes; send a work-product reference instead');
 }
