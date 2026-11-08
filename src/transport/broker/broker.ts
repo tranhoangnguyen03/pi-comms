@@ -574,6 +574,21 @@ class IntercomBroker {
           socket.end();
           break;
         }
+        // Import this registered native session's saved F10 *negative* state
+        // before it becomes a reachable target and before any new pair grant.
+        // The broker remembers each original event index so a later explicit
+        // owner reapproval cannot be undone by restarting an old F10 session.
+        let migratedPeers: string[] = [];
+        if (session.pairConsentV1 === true) {
+          try {
+            migratedPeers = this.pairApprovals.importLegacyRefusals(scopeId, id, session.legacyRefusals ?? []);
+          } catch (error) {
+            writeMessage(socket, { type: "error",
+              error: `PAIR_MIGRATION_FAILED: ${String(error)}` });
+            socket.end();
+            break;
+          }
+        }
         if (previous) {
           this.clearMessageReceiptRoutesForSession(key);
           previous.socket.end();
@@ -625,6 +640,9 @@ class IntercomBroker {
           sessionId: id,
           features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, CONTACT_APPROVAL_FEATURE, PAIR_APPROVAL_FEATURE],
         });
+        // Pair updates follow the registered response so the new client can
+        // safely parse them. Other live endpoints are invalidated immediately.
+        for (const peer of migratedPeers) this.publishPair(scopeId, id, peer);
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
         this.recomputeNamespaceOwners();
