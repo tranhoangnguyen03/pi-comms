@@ -4,6 +4,7 @@ export const CONTACT_APPROVAL_FEATURE = "owner-contact-v1";
 export const PAIR_APPROVAL_FEATURE = "pair-consent-v1";
 export type PairMode = "session" | "remembered" | "revoked" | "none";
 export type PairDecision = Exclude<PairMode, "none">;
+export type LegacyRefusal = { peer: string; entryIndex: number };
 export interface PairStatus { peer: string; mode: PairMode; revision: number; context?: string }
 // Runtime-owned routing metadata, never part of the model's message envelope.
 export interface ContactApproval { context: string }
@@ -157,6 +158,8 @@ export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "st
   acknowledgesReceipts?: boolean;
   /** The client sends a frame at least this often, so the broker may drop it after several silent intervals. */
   livenessIntervalMs?: number;
+  /** Final saved F10 negatives, authenticated only as same-owner native-session input. Required for pair-aware peers. */
+  legacyRefusals?: LegacyRefusal[];
 };
 
 export type ClientMessage =
