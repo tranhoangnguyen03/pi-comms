@@ -573,3 +573,25 @@ test('F11: failed local visibility write cannot override an older recorded refus
   assert.equal(reopened.runtime.isApproved(b.id), false);
   assert.equal((reopened.runtime.inspect({ message: held.id }) as any).evidence, 'withheld');
 });
+
+test('F11 F10 migration snapshot reports only final active native refusals and their stable append positions', t => {
+  const f = fixture(t), b = peer();
+  f.runtime.revokeFromOwner(b.id);
+  const first = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  const [refusal] = first.runtime.legacyRefusals();
+  assert.equal(refusal?.peer, b.id);
+  assert.ok(Number.isSafeInteger(refusal.entryIndex) && refusal.entryIndex > 0);
+
+  // A later F10 owner reapproval clears the active historical veto, but it
+  // must not become a remembered F11 pair grant on its own.
+  first.runtime.approveFromOwner(b);
+  const approved = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  assert.deepEqual(approved.runtime.legacyRefusals(), [], 'later native positive clears historical negative');
+  assert.equal(approved.runtime.isApproved(b.id), false, 'old F10 approval is never broker authority');
+
+  approved.runtime.revokeFromOwner(b.id);
+  const again = attach(SessionManager.open(f.manager.getSessionFile()!), f.root);
+  const [newRefusal] = again.runtime.legacyRefusals();
+  assert.equal(newRefusal?.peer, b.id);
+  assert.ok(newRefusal.entryIndex > refusal.entryIndex, 'new native refusal has a later import identity');
+});
