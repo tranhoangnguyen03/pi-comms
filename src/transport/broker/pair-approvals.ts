@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 export type PairMode = 'session' | 'remembered' | 'revoked' | 'none';
 export type PairView = { peer: string; mode: PairMode; context?: string; revision: number };
 type PersistentMode = 'remembered' | 'revoked' | 'none';
-type Record = { a: string; b: string; scope: string | null; mode: PersistentMode; context?: string; revision: number; legacyImportedFrom?: string[] };
+type LegacyImport = { owner: string; entryIndex: number };
+type Record = { a: string; b: string; scope: string | null; mode: PersistentMode; context?: string; revision: number; legacyImports?: LegacyImport[] };
 type Temporary = { a: string; b: string; scope: string | null; context: string; aEpoch: string; bEpoch: string; revision: number };
 type FileData = { formatVersion: 1; revision: number; pairs: Record[]; sha256: string };
 
@@ -39,10 +40,11 @@ export class PairApprovalStore {
             !['remembered', 'revoked', 'none'].includes(value.mode) ||
             (value.context !== undefined && typeof value.context !== 'string') ||
             !Number.isSafeInteger(value.revision) || value.revision > data.revision ||
-            value.a >= value.b || (value.legacyImportedFrom !== undefined && (
-              !Array.isArray(value.legacyImportedFrom) ||
-              value.legacyImportedFrom.some(id => (id !== value.a && id !== value.b)) ||
-              new Set(value.legacyImportedFrom).size !== value.legacyImportedFrom.length
+            value.a >= value.b || (value.legacyImports !== undefined && (
+              !Array.isArray(value.legacyImports) ||
+              value.legacyImports.some(item => !item || (item.owner !== value.a && item.owner !== value.b) ||
+                !Number.isSafeInteger(item.entryIndex) || item.entryIndex < 1) ||
+              new Set(value.legacyImports.map(item => item.owner)).size !== value.legacyImports.length
             ))) throw Error('Malformed pair entry');
         const key = pairKey(value.scope ?? undefined, value.a, value.b);
         if (this.pairs.has(key)) throw Error('Conflicting pair record');
@@ -102,7 +104,7 @@ export class PairApprovalStore {
     const next = new Map(this.pairs);
     next.set(key, { a, b, scope: scope ?? null, mode: mode === 'remembered' ? 'remembered' : mode === 'revoked' ? 'revoked' : 'none',
       ...(mode === 'remembered' ? { context } : {}), revision,
-      ...(this.pairs.get(key)?.legacyImportedFrom ? { legacyImportedFrom: [...this.pairs.get(key)!.legacyImportedFrom!] } : {}) });
+      ...(this.pairs.get(key)?.legacyImports ? { legacyImports: [...this.pairs.get(key)!.legacyImports!] } : {}) });
     this.persist(next, revision);
     this.pairs.clear(); for (const [k, v] of next) this.pairs.set(k, v);
     this.revision = revision;
@@ -110,29 +112,33 @@ export class PairApprovalStore {
     if (mode === 'session') this.temporary.set(key, { a, b, scope: scope ?? null, context, aEpoch: aEpoch!, bEpoch: bEpoch!, revision });
     return this.state(scope, id, peer, epochs);
   }
-  // F10 saved negative controls are imported from the *registering owner*
-  // once per pair. Never import F10 positive grants or transported assertions.
-  // Retain the import marker when a fresh human pair decision later reapproves:
-  // restarting the old native session must not replay its earlier refusal.
-  // This is one broker commit even when several peers were refused.
-  importLegacyRefusals(scope: string | undefined, owner: string, peers: readonly string[]): string[] {
+  // Native F10 negative decisions are numbered by append order in the
+  // original owner's session record. Import each saved refusal at most once.
+  // A later explicit owner pair grant can supersede it, and restarting the
+  // same old session cannot reapply it. A NEW F10 refusal after a downgrade
+  // has a higher native entryIndex and is therefore still honored.
+  importLegacyRefusals(scope: string | undefined, owner: string,
+    refusals: readonly { peer: string; entryIndex: number }[]): string[] {
     this.assertReady();
-    if (!owner || !Array.isArray(peers) || peers.length > 4096 ||
-        peers.some(peer => typeof peer !== 'string' || !peer || peer === owner)) {
+    if (!owner || !Array.isArray(refusals) || refusals.length > 4096 ||
+        refusals.some(item => !item || typeof item.peer !== 'string' || !item.peer || item.peer === owner ||
+          !Number.isSafeInteger(item.entryIndex) || item.entryIndex < 1)) {
       throw Error('PAIR_INVALID_LEGACY_REFUSALS');
     }
-    const unique = [...new Set(peers)].sort();
+    const latest = new Map<string, number>();
+    for (const item of refusals) latest.set(item.peer, Math.max(item.entryIndex, latest.get(item.peer) ?? 0));
     const next = new Map(this.pairs);
     const changed: string[] = [];
     const revision = this.revision + 1;
-    for (const peer of unique) {
+    for (const [peer, entryIndex] of [...latest].sort(([a], [b]) => a.localeCompare(b))) {
       const key = pairKey(scope, owner, peer);
       const previous = next.get(key);
-      if (previous?.legacyImportedFrom?.includes(owner)) continue;
+      const previousIndex = previous?.legacyImports?.find(item => item.owner === owner)?.entryIndex ?? 0;
+      if (entryIndex <= previousIndex) continue;
       const [a, b] = [owner, peer].sort();
-      const imported = [...(previous?.legacyImportedFrom ?? []), owner].sort();
-      next.set(key, { a, b, scope: scope ?? null, mode: 'revoked', revision,
-        legacyImportedFrom: imported });
+      const imports = [...(previous?.legacyImports ?? []).filter(item => item.owner !== owner),
+        { owner, entryIndex }].sort((x, y) => x.owner.localeCompare(y.owner));
+      next.set(key, { a, b, scope: scope ?? null, mode: 'revoked', revision, legacyImports: imports });
       changed.push(peer);
     }
     if (!changed.length) return [];
