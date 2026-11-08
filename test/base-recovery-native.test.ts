@@ -535,3 +535,44 @@ test('F11 native: forking B never grants new A-B_new pair', async () => {
     assert.equal(original.ok, true, JSON.stringify(original));
   } finally { await bNew?.close(); await b.close(); await a.close(); }
 });
+
+test('F11 native: normal unregister expires session-only pair and ends outstanding ask', async () => {
+  let a = await participant('f11-unregister-a');
+  let b = await participant('f11-unregister-b');
+  try {
+    await a.runtime.session.prompt('Saved A'); await b.runtime.session.prompt('Saved B');
+    a.remember(false); a.confirm(true);
+    const subject = 'PENDING_ASK_DURING_NORMAL_UNREGISTER';
+    const pending = a.tool('comms_ask', {
+      requests: [{ to: b.id(), subject, text: 'Please answer after you finish' }],
+      timeoutSeconds: 60,
+    });
+    await waitFor(async () => (await a.tool('comms_inspect', { outbox: 'self' }))
+      .data.items.some((entry: any) => entry.message.subject === subject));
+    const bId = b.id(), bFile = b.file()!;
+    assert.ok((await a.tool('comms_peers', { view: 'known' })).data.items.some((p: any) => p.id === bId));
+
+    // This is the production normal path: client sends 'unregister' before
+    // closing, not an abrupt socket.destroy or process kill.
+    await b.close();
+    const outcome = await Promise.race([pending, new Promise<never>((_, reject) =>
+      setTimeout(() => reject(Error('Normal unregister stranded an active ask')), 1500).unref())]);
+    assert.equal(outcome.data.items[0].outcome, 'disconnected',
+      'expiry event reaches remaining participant and ends its actual ask');
+    await waitFor(async () => !(await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((p: any) => p.id === bId));
+    await a.command('status');
+    assert.ok(!a.notifications.at(-1)!.includes(bId), 'human approval status is no longer stale');
+
+    b = await participant('f11-unregister-b', SessionManager.open(bFile));
+    assert.equal(b.id(), bId);
+    assert.equal((await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((p: any) => p.id === bId), false,
+      'reconnecting the same original session does not revive session-only approval');
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', {
+      to: bId, subject: 'New consent needed', text: 'No silent approval after reconnect',
+    });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+  } finally { await b.close(); await a.close(); }
+});
