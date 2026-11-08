@@ -192,3 +192,50 @@ test('F11 real broker: refusal imported when A registers before B, then B owner 
     await stopBroker(broker);
   }
 });
+
+
+test('F11 real broker: replacing a dead-pid registration with its socket still open expires the session-only pair', async () => {
+  const aId = randomUUID(), bId = randomUUID();
+  let broker: ChildProcess | undefined, pidOwner: ChildProcess | undefined;
+  let a: InstanceType<typeof IntercomClient> | undefined,
+    stale: InstanceType<typeof IntercomClient> | undefined,
+    replacement: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await startBroker();
+    a = await member(aId, 'A remains connected');
+    // The advertised process dies while the registered socket stays open.
+    // This is the broker's stale-holder takeover branch, not socket 'close'.
+    pidOwner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    assert.ok(pidOwner.pid);
+    stale = new IntercomClient(); stale.on('error', () => undefined);
+    await stale.connect({ ...reg('B old holder'), pid: pidOwner.pid! }, bId);
+    const changes: { mode: string; peer: string }[] = [];
+    a.on('pair_update', (update: { mode: string; peer: string }) => changes.push(update));
+    assert.equal((await a.decidePair(bId, 'session', 'One temporary A-B grant')).mode, 'session');
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'session');
+    assert.equal((await send(a, stale)).delivered, true);
+    assert.equal(stale.isConnected(), true);
+
+    const exited = once(pidOwner, 'exit');
+    pidOwner.kill('SIGTERM');
+    await exited;
+    assert.equal(stale.isConnected(), true, 'old socket is still registered despite dead claimed pid');
+
+    replacement = await member(bId, 'B resumes same exact session');
+    await waitFor(() => changes.some(u => u.peer === bId && u.mode === 'none'),
+      () => JSON.stringify(changes), 2500);
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'none',
+      'new registration does not silently inherit old session-only consent');
+    assert.equal((await send(a, replacement)).code, 'E_PAIR_NOT_APPROVED',
+      'broker rejects new delivery after stale takeover');
+    // A late close from the retired socket must not remove the replacement.
+    await stale.disconnect();
+    assert.ok((await a.listSessions()).some(s => s.id === bId),
+      'closing stale socket cannot unregister the new holder');
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'none');
+  } finally {
+    await Promise.all([a, stale, replacement].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
+    if (pidOwner && pidOwner.exitCode === null && pidOwner.signalCode === null) pidOwner.kill('SIGKILL');
+    await stopBroker(broker);
+  }
+});
