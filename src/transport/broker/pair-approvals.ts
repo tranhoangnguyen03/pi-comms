@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 export type PairMode = 'session' | 'remembered' | 'revoked' | 'none';
 export type PairView = { peer: string; mode: PairMode; context?: string; revision: number };
 type PersistentMode = 'remembered' | 'revoked' | 'none';
-type Record = { a: string; b: string; scope: string | null; mode: PersistentMode; context?: string; revision: number };
+type Record = { a: string; b: string; scope: string | null; mode: PersistentMode; context?: string; revision: number; legacyImportedFrom?: string[] };
 type Temporary = { a: string; b: string; scope: string | null; context: string; aEpoch: string; bEpoch: string; revision: number };
 type FileData = { formatVersion: 1; revision: number; pairs: Record[]; sha256: string };
 
@@ -39,7 +39,11 @@ export class PairApprovalStore {
             !['remembered', 'revoked', 'none'].includes(value.mode) ||
             (value.context !== undefined && typeof value.context !== 'string') ||
             !Number.isSafeInteger(value.revision) || value.revision > data.revision ||
-            value.a >= value.b) throw Error('Malformed pair entry');
+            value.a >= value.b || (value.legacyImportedFrom !== undefined && (
+              !Array.isArray(value.legacyImportedFrom) ||
+              value.legacyImportedFrom.some(id => (id !== value.a && id !== value.b)) ||
+              new Set(value.legacyImportedFrom).size !== value.legacyImportedFrom.length
+            ))) throw Error('Malformed pair entry');
         const key = pairKey(value.scope ?? undefined, value.a, value.b);
         if (this.pairs.has(key)) throw Error('Conflicting pair record');
         this.pairs.set(key, value);
@@ -97,7 +101,8 @@ export class PairApprovalStore {
     const revision = this.revision + 1;
     const next = new Map(this.pairs);
     next.set(key, { a, b, scope: scope ?? null, mode: mode === 'remembered' ? 'remembered' : mode === 'revoked' ? 'revoked' : 'none',
-      ...(mode === 'remembered' ? { context } : {}), revision });
+      ...(mode === 'remembered' ? { context } : {}), revision,
+      ...(this.pairs.get(key)?.legacyImportedFrom ? { legacyImportedFrom: [...this.pairs.get(key)!.legacyImportedFrom!] } : {}) });
     this.persist(next, revision);
     this.pairs.clear(); for (const [k, v] of next) this.pairs.set(k, v);
     this.revision = revision;
@@ -105,6 +110,39 @@ export class PairApprovalStore {
     if (mode === 'session') this.temporary.set(key, { a, b, scope: scope ?? null, context, aEpoch: aEpoch!, bEpoch: bEpoch!, revision });
     return this.state(scope, id, peer, epochs);
   }
+  // F10 saved negative controls are imported from the *registering owner*
+  // once per pair. Never import F10 positive grants or transported assertions.
+  // Retain the import marker when a fresh human pair decision later reapproves:
+  // restarting the old native session must not replay its earlier refusal.
+  // This is one broker commit even when several peers were refused.
+  importLegacyRefusals(scope: string | undefined, owner: string, peers: readonly string[]): string[] {
+    this.assertReady();
+    if (!owner || !Array.isArray(peers) || peers.length > 4096 ||
+        peers.some(peer => typeof peer !== 'string' || !peer || peer === owner)) {
+      throw Error('PAIR_INVALID_LEGACY_REFUSALS');
+    }
+    const unique = [...new Set(peers)].sort();
+    const next = new Map(this.pairs);
+    const changed: string[] = [];
+    const revision = this.revision + 1;
+    for (const peer of unique) {
+      const key = pairKey(scope, owner, peer);
+      const previous = next.get(key);
+      if (previous?.legacyImportedFrom?.includes(owner)) continue;
+      const [a, b] = [owner, peer].sort();
+      const imported = [...(previous?.legacyImportedFrom ?? []), owner].sort();
+      next.set(key, { a, b, scope: scope ?? null, mode: 'revoked', revision,
+        legacyImportedFrom: imported });
+      changed.push(peer);
+    }
+    if (!changed.length) return [];
+    this.persist(next, revision);
+    this.pairs.clear(); for (const [key, value] of next) this.pairs.set(key, value);
+    this.revision = revision;
+    for (const peer of changed) this.temporary.delete(pairKey(scope, owner, peer));
+    return changed;
+  }
+
   expireSession(scope: string | undefined, id: string): string[] {
     const affected: string[] = [];
     for (const [key, live] of this.temporary) {
