@@ -590,7 +590,11 @@ class IntercomBroker {
           }
         }
         if (previous) {
-          this.clearMessageReceiptRoutesForSession(key);
+          // A stale holder can be replaced before its socket emits close.
+          // Expire session-only pairs and notify the remaining participant
+          // through the same path as unregister and socket loss, then retire
+          // the old socket. Its later close must not clean up the replacement.
+          this.removeRegisteredSession(previous);
           previous.socket.end();
         }
         setKey(key);
