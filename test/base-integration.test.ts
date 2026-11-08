@@ -868,7 +868,7 @@ test('pair revoke blocks automatic contact, explicit reapproval and Stop stay hu
   } finally { await headless?.close(); await b?.close(); await a?.close(); }
 });
 
-test('F11: B-side owner approval replaces an A-side refusal for one shared pair', async () => {
+test('F11: B-side owner approval works after A declined; one approval covers both directions', async () => {
   let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
   try {
     a = await participant('direction-a'); b = await participant('direction-b');
@@ -899,6 +899,36 @@ test('F11: B-side owner approval replaces an A-side refusal for one shared pair'
     const reply = data(await a.tool('comms_message', { to: b.id(), subject: 'A continues', text: 'BILATERAL_RESTART' }));
     assert.equal(reply.ok, true);
     assert.equal(a.dialogs.length, 1);
+  } finally { await b?.close(); await a?.close(); }
+});
+
+test('F11: Decline is not a block; after the user speaks the agent may ask again, and nothing is stored', async () => {
+  let a: Awaited<ReturnType<typeof participant>> | undefined, b: Awaited<ReturnType<typeof participant>> | undefined;
+  try {
+    a = await participant('decline-a'); b = await participant('decline-b');
+    const input = { to: b.id(), subject: 'Review', text: 'ASK_AFTER_DECLINE' };
+    a.confirm(false);
+    assert.equal(data(await a.tool('comms_message', input)).error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(data(await a.tool('comms_message', input)).error.code, 'CONTACT_NOT_APPROVED');
+    assert.equal(a.dialogs.length, 1, 'no repeated prompt within the same user turn');
+    // B is not blocked either: it can ask, and A's owner can approve.
+    b.confirm(true);
+    const reverse = data(await b.tool('comms_message', { to: a.id(), subject: 'From B', text: 'B_ASKS_AFTER_A_DECLINED' }));
+    assert.equal(reverse.ok, true, JSON.stringify(reverse));
+    assert.equal(b.dialogs.length, 1);
+    a.confirm(false);
+    assert.equal(data(await a.tool('comms_message', input)).ok, true, 'the pair is approved now');
+    assert.equal(a.dialogs.length, 1);
+    // End the pair, then the user's next message lets the agent ask again.
+    a.confirm(true); await a.command(`revoke ${b.id()}`);
+    a.confirm(false);
+    assert.equal(data(await a.tool('comms_message', input)).error.code, 'CONTACT_NOT_APPROVED');
+    const dialogsBefore = a.dialogs.length;
+    a.responses([fauxAssistantMessage('ok')]);
+    await a.runtime.session.prompt('Please try contacting B again.');
+    a.confirm(true);
+    assert.equal(data(await a.tool('comms_message', input)).ok, true);
+    assert.equal(a.dialogs.length, dialogsBefore + 1, 'one new prompt after user input; no stored block');
   } finally { await b?.close(); await a?.close(); }
 });
 

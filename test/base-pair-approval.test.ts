@@ -1,126 +1,95 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PairApprovalStore, pairKey } from '../src/transport/broker/pair-approvals.ts';
 
-test('F11: one unordered A-B grant survives restart and either endpoint can revoke', t => {
-  const root = mkdtempSync(join(tmpdir(), 'pair-store-'));
+const tempRoot = (t: { after: (fn: () => void) => void }, name: string) => {
+  const root = mkdtempSync(join(tmpdir(), name));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const a = randomUUID(), b = randomUUID(), fork = randomUUID(), third = randomUUID();
-  const epochs = new Map([[a, 'a-live'], [b, 'b-live'], [fork, 'fork-live'], [third, 'c-live']]);
-  const epoch = (id: string) => epochs.get(id);
+  return root;
+};
+
+test('F11: one unordered A-B approval survives restart; either endpoint can end it', t => {
+  const root = tempRoot(t, 'pair-store-');
+  const a = randomUUID(), b = randomUUID(), fork = randomUUID();
+  const runtimes = new Map([[a, 'ra'], [b, 'rb'], [fork, 'rf']]);
+  const rt = (id: string) => runtimes.get(id);
   const pairs = new PairApprovalStore(root);
   assert.equal(pairKey(undefined, a, b), pairKey(undefined, b, a));
-  assert.equal(pairs.state(undefined, a, b, epoch).mode, 'none');
-  pairs.decide(undefined, a, b, 'remembered', 'Review', epoch);
-  assert.equal(pairs.state(undefined, b, a, epoch).mode, 'remembered');
-  assert.equal(new PairApprovalStore(root).state(undefined, b, a, epoch).mode, 'remembered');
-  assert.equal(pairs.state(undefined, a, fork, epoch).mode, 'none');
-  assert.equal(pairs.state('different-scope', b, a, epoch).mode, 'none');
-  assert.equal(pairs.state(undefined, a, third, epoch).mode, 'none');
-  pairs.decide(undefined, b, a, 'revoked', '', epoch);
-  assert.equal(pairs.state(undefined, a, b, epoch).mode, 'revoked');
-  assert.equal(new PairApprovalStore(root).state(undefined, b, a, epoch).mode, 'revoked',
-    'revocation from either direction is one durable state');
-  pairs.decide(undefined, a, b, 'remembered', 'Review after reapproval', epoch);
-  assert.equal(new PairApprovalStore(root).state(undefined, b, a, epoch).mode, 'remembered');
+  assert.equal(pairs.state(undefined, a, b).mode, 'none');
+  pairs.decide(undefined, a, b, 'remembered', 'Review', rt);
+  assert.equal(pairs.state(undefined, b, a).mode, 'remembered');
+  assert.equal(new PairApprovalStore(root).state(undefined, b, a).mode, 'remembered');
+  assert.equal(pairs.state(undefined, a, fork).mode, 'none', 'a fork inherits nothing');
+  assert.equal(pairs.state('different-scope', b, a).mode, 'none');
+  pairs.decide(undefined, b, a, 'none', '', rt);
+  assert.equal(new PairApprovalStore(root).state(undefined, a, b).mode, 'none', 'ending is durable from either side');
+  pairs.decide(undefined, a, b, 'remembered', 'Approved again', rt);
+  assert.equal(new PairApprovalStore(root).state(undefined, b, a).mode, 'remembered', 'no stored refusal blocks a new approval');
 });
 
-test('F11: session-only pair ends when either side leaves and never becomes remembered', t => {
-  const root = mkdtempSync(join(tmpdir(), 'pair-session-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+test('F11: session-only approval follows the Pi runtime, not the socket, and never touches disk', t => {
+  const root = tempRoot(t, 'pair-session-');
   const a = randomUUID(), b = randomUUID();
-  const live = new Map([[a, 'a1'], [b, 'b1']]);
-  const epoch = (id: string) => live.get(id);
+  const rt = (id: string) => (id === a ? 'ra' : 'rb');
   const pairs = new PairApprovalStore(root);
-  pairs.decide(undefined, a, b, 'session', 'Review', epoch);
-  assert.equal(pairs.state(undefined, b, a, epoch).mode, 'session');
-  assert.equal(new PairApprovalStore(root).state(undefined, a, b, epoch).mode, 'none',
-    'broker restart must expire a session-only grant');
-  assert.deepEqual(pairs.expireSession(undefined, b), [a]);
-  assert.equal(pairs.state(undefined, a, b, epoch).mode, 'none');
-  pairs.decide(undefined, a, b, 'remembered', 'Old remembered', epoch);
-  pairs.decide(undefined, b, a, 'session', 'Changed to session-only', epoch);
-  assert.equal(new PairApprovalStore(root).state(undefined, a, b, epoch).mode, 'none',
-    'a later session-only choice clears older remembered approval');
+  pairs.decide(undefined, a, b, 'session', 'Review', rt);
+  assert.deepEqual(readdirSync(root), [], 'session-only approval writes nothing');
+  assert.equal(new PairApprovalStore(root).state(undefined, a, b).mode, 'none', 'broker restart ends session-only approval');
+  assert.deepEqual(pairs.expireSession(undefined, b, 'rb'), [], 'same runtime reconnecting keeps it');
+  assert.equal(pairs.state(undefined, a, b).mode, 'session');
+  assert.deepEqual(pairs.expireSession(undefined, b, 'rb-reloaded'), [a], 'a new runtime ends it');
+  assert.equal(pairs.state(undefined, a, b).mode, 'none');
+  pairs.decide(undefined, a, b, 'remembered', 'Remembered', rt);
+  pairs.decide(undefined, b, a, 'session', 'Now session-only', rt);
+  assert.equal(new PairApprovalStore(root).state(undefined, a, b).mode, 'none', 'downgrade to session-only removes the remembered record');
 });
 
-test('F11: invalid latest pair state cannot fall back to an earlier approved backup', t => {
-  const root = mkdtempSync(join(tmpdir(), 'pair-torn-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const a = randomUUID(), b = randomUUID(), epochs = new Map([[a, 'a'], [b, 'b']]);
-  const epoch = (id: string) => epochs.get(id);
+test('F11: ended and session-only pairs leave no records behind', t => {
+  const root = tempRoot(t, 'pair-growth-');
   const pairs = new PairApprovalStore(root);
-  pairs.decide(undefined, a, b, 'remembered', 'Older grant', epoch);
+  const rt = () => 'r';
+  for (let i = 0; i < 20; i++) {
+    const a = randomUUID(), b = randomUUID();
+    pairs.decide(undefined, a, b, 'remembered', 'w', rt);
+    pairs.decide(undefined, a, b, 'none', '', rt);
+    pairs.decide(undefined, a, b, 'session', 'w', rt);
+    pairs.expireSession(undefined, a);
+  }
+  assert.equal(JSON.parse(readFileSync(join(root, 'pair-approvals.json'), 'utf8')).pairs.length, 0);
+});
+
+test('F11: an unreadable file is kept aside and grants nothing; other approvals keep working', t => {
+  const root = tempRoot(t, 'pair-torn-');
+  const a = randomUUID(), b = randomUUID(), c = randomUUID();
+  const rt = () => 'r';
+  new PairApprovalStore(root).decide(undefined, a, b, 'remembered', 'Older grant', rt);
   const file = join(root, 'pair-approvals.json');
-  copyFileSync(file, file + '.bak');
-  pairs.decide(undefined, b, a, 'revoked', '', epoch);
-  assert.equal(new PairApprovalStore(root).state(undefined, a, b, epoch).mode, 'revoked');
-  writeFileSync(file, readFileSync(file, 'utf8').slice(0, 31)); // Torn latest write.
-  const damaged = new PairApprovalStore(root);
-  assert.match(damaged.holdReason() ?? '', /PAIR_STATE_BLOCKED/);
-  assert.throws(() => damaged.state(undefined, a, b, epoch), /PAIR_STATE_BLOCKED/);
-  assert.throws(() => damaged.decide(undefined, a, b, 'remembered', 'retry', epoch), /PAIR_STATE_BLOCKED/);
+  writeFileSync(file, readFileSync(file, 'utf8').slice(0, 31)); // Torn write.
+  const recovered = new PairApprovalStore(root);
+  assert.match(recovered.recovered ?? '', /moved to .*unreadable/);
+  assert.equal(recovered.state(undefined, a, b).mode, 'none');
+  assert.ok(readdirSync(root).some(name => name.startsWith('pair-approvals.json.unreadable-')), 'evidence is preserved');
+  recovered.decide(undefined, a, c, 'remembered', 'New grant', rt);
+  assert.equal(new PairApprovalStore(root).state(undefined, c, a).mode, 'remembered');
 });
 
-test('F11: remembered pair state is scoped and has one serialized revision order', t => {
-  const root = mkdtempSync(join(tmpdir(), 'pair-order-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const a = randomUUID(), b = randomUUID(), epoch = (id: string) => id === a ? 'a' : id === b ? 'b' : undefined;
-  const store = new PairApprovalStore(root);
-  const first = store.decide('local-workspace', a, b, 'remembered', 'first', epoch);
-  const second = store.decide('local-workspace', b, a, 'revoked', '', epoch);
-  assert.ok(second.revision > first.revision);
-  assert.equal(store.state('local-workspace', a, b, epoch).mode, 'revoked');
-  assert.equal(store.state('another-workspace', a, b, epoch).mode, 'none');
-  const reopened = new PairApprovalStore(root);
-  assert.equal(reopened.state('local-workspace', b, a, epoch).revision, second.revision);
-  assert.equal(reopened.state('local-workspace', b, a, epoch).mode, 'revoked');
-});
-
-test('F11 migration: native F10 refusal is shared, imported once, and never replayed after fresh human approval', t => {
-  const root = mkdtempSync(join(tmpdir(), 'pair-f10-migration-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const a = randomUUID(), b = randomUUID();
-  const epochs = new Map([[a, 'a-epoch'], [b, 'b-epoch']]);
-  const epoch = (id: string) => epochs.get(id);
-  const store = new PairApprovalStore(root);
-  assert.deepEqual(store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 4 }]), [a]);
-  assert.equal(store.state(undefined, a, b, epoch).mode, 'revoked', 'B old saved No blocks A and B');
-  assert.equal(new PairApprovalStore(root).state(undefined, b, a, epoch).mode, 'revoked');
-  assert.deepEqual(store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 4 }]), [],
-    'old F10 evidence is not an owner action each time the session restarts');
-
-  // The SAME human can later reapprove the pair from either endpoint.
-  store.decide(undefined, a, b, 'remembered', 'Owner explicitly reapproved', epoch);
-  const restarted = new PairApprovalStore(root);
-  assert.deepEqual(restarted.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 4 }]), [],
-    'reopening the saved F10 file cannot undo later explicit owner approval');
-  assert.equal(restarted.state(undefined, b, a, epoch).mode, 'remembered');
-  assert.deepEqual(restarted.importLegacyRefusals(undefined, a, []), [], 'F10 positives are not imported');
-
-  // If an older F10 build writes a NEW saved refusal after a downgrade,
-  // its later native entry index is distinguishable from the old one.
-  assert.deepEqual(restarted.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 9 }]), [a]);
-  assert.equal(restarted.state(undefined, a, b, epoch).mode, 'revoked');
-  assert.deepEqual(new PairApprovalStore(root).importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 9 }]), []);
-});
-
-test('F11 migration: two F10 refusals from different endpoints preserve one pair state', t => {
-  const root = mkdtempSync(join(tmpdir(), 'pair-f10-dual-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const a = randomUUID(), b = randomUUID(), store = new PairApprovalStore(root);
-  const epoch = (id: string) => id === a ? 'a' : id === b ? 'b' : undefined;
-  store.importLegacyRefusals(undefined, a, [{ peer: b, entryIndex: 2 }]);
-  store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 3 }]);
-  assert.equal(store.list(undefined, a, epoch).filter(p => p.peer === b).length, 1,
-    'both negative owners still control one canonical pair');
-  assert.equal(store.state(undefined, a, b, epoch).mode, 'revoked');
-  store.decide(undefined, b, a, 'session', 'Fresh owner choice', epoch);
-  assert.deepEqual(store.importLegacyRefusals(undefined, a, [{ peer: b, entryIndex: 2 }]), []);
-  assert.deepEqual(store.importLegacyRefusals(undefined, b, [{ peer: a, entryIndex: 3 }]), []);
-  assert.equal(store.state(undefined, b, a, epoch).mode, 'session');
+test('F11: a failed save rejects only that decision and keeps earlier state', { skip: process.getuid?.() === 0 }, t => {
+  const root = tempRoot(t, 'pair-fail-');
+  const a = randomUUID(), b = randomUUID(), c = randomUUID();
+  const rt = () => 'r';
+  const pairs = new PairApprovalStore(root);
+  pairs.decide(undefined, a, b, 'remembered', 'Saved', rt);
+  chmodSync(root, 0o500);
+  assert.throws(() => pairs.decide(undefined, a, c, 'remembered', 'Cannot save', rt));
+  assert.equal(pairs.state(undefined, a, c).mode, 'none');
+  assert.equal(pairs.state(undefined, a, b).mode, 'remembered', 'earlier approval unaffected');
+  pairs.decide(undefined, a, c, 'session', 'Session-only still works', rt);
+  assert.equal(pairs.state(undefined, a, c).mode, 'session');
+  chmodSync(root, 0o700);
+  pairs.decide(undefined, a, c, 'remembered', 'Saved after repair', rt);
+  assert.equal(new PairApprovalStore(root).state(undefined, a, c).mode, 'remembered');
 });

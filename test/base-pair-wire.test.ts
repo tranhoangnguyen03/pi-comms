@@ -13,9 +13,9 @@ process.env.PI_CODING_AGENT_DIR = root;
 after(() => rmSync(root, { recursive: true, force: true }));
 const { IntercomClient } = await import('../src/transport/broker/client.ts');
 const brokerPath = fileURLToPath(new URL('../dist/transport/broker/broker.js', import.meta.url));
-const waitFor = async (check: () => boolean, logs: () => string, ms = 8000) => {
+const waitFor = async (check: () => boolean | Promise<boolean>, logs: () => string, ms = 8000) => {
   const deadline = Date.now() + ms;
-  while (!check()) {
+  while (!await check()) {
     if (Date.now() > deadline) throw Error('F11 broker lifecycle timed out: ' + logs());
     await new Promise(resolve => setTimeout(resolve, 15));
   }
@@ -38,17 +38,14 @@ async function stopBroker(child: ChildProcess | undefined) {
   child.kill('SIGTERM');
   await done;
 }
-const reg = (name: string, pairConsentV1 = true,
-  legacyRefusals: { peer: string; entryIndex: number }[] = []) => ({
+const reg = (name: string, pairConsentV1 = true, runtimeId = randomUUID()) => ({
   name, cwd: root, model: 'fixture', pid: process.pid, startedAt: Date.now(),
-  lastActivity: Date.now(), pairConsentV1,
-  ...(pairConsentV1 ? { legacyRefusals } : {}),
+  lastActivity: Date.now(), pairConsentV1, ...(pairConsentV1 ? { runtimeId } : {}),
 });
-async function member(id: string, name: string, pairConsentV1 = true,
-  legacyRefusals: { peer: string; entryIndex: number }[] = []) {
+async function member(id: string, name: string, pairConsentV1 = true, runtimeId = randomUUID()) {
   const client = new IntercomClient();
   client.on('error', () => undefined);
-  await client.connect(reg(name, pairConsentV1, legacyRefusals), id);
+  await client.connect(reg(name, pairConsentV1, runtimeId), id);
   return client;
 }
 async function send(sender: InstanceType<typeof IntercomClient>, target: InstanceType<typeof IntercomClient>) {
@@ -57,8 +54,10 @@ async function send(sender: InstanceType<typeof IntercomClient>, target: Instanc
   assert.ok(found?.endpointEpoch, 'exact recipient exists');
   return sender.sendExact(id, found.endpointEpoch!, { messageId: randomUUID(), text: 'pair test payload' });
 }
+const mode = async (client: InstanceType<typeof IntercomClient>, peer: string) =>
+  (await client.listPairs()).find(p => p.peer === peer)?.mode ?? 'none';
 
-test('F11 real broker: B-first remembered restart, either-side revoke, session expiry, legacy peer rejection', async () => {
+test('F11 real broker: B-first remembered restart, either-side end, session-only expiry, outdated peer', async () => {
   const aId = randomUUID(), bId = randomUUID(), oldId = randomUUID();
   let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
     b: InstanceType<typeof IntercomClient> | undefined,
@@ -66,133 +65,82 @@ test('F11 real broker: B-first remembered restart, either-side revoke, session e
   try {
     broker = await startBroker();
     a = await member(aId, 'A'); b = await member(bId, 'B');
-    assert.equal((await a.listPairs()).find(p => p.peer === bId), undefined);
-    const approved = await a.decidePair(bId, 'remembered', 'Review');
-    assert.equal(approved.mode, 'remembered');
-    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'remembered');
-    assert.equal((await send(b, a)).delivered, true, 'B may initiate first from the one pair grant');
+    assert.equal(await mode(a, bId), 'none');
+    assert.equal((await a.decidePair(bId, 'remembered', 'Review')).mode, 'remembered');
+    assert.equal(await mode(b, aId), 'remembered');
+    assert.equal((await send(b, a)).delivered, true, 'B may initiate first from the one pair approval');
     assert.equal((await send(a, b)).delivered, true);
 
-    // A revoke from B is the same pair change that A must respect.
-    assert.equal((await b.decidePair(aId, 'revoked', '')).mode, 'revoked');
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked');
+    // Ending from B is the same pair change for A. It is "not approved", not a block.
+    const updates: { mode: string; reason?: string }[] = [];
+    a.on('pair_update', (u: { mode: string; reason?: string }) => updates.push(u));
+    assert.equal((await b.decidePair(aId, 'none', '')).mode, 'none');
+    await waitFor(() => updates.some(u => u.mode === 'none' && u.reason === 'ended'), () => JSON.stringify(updates));
     assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
     assert.equal((await send(b, a)).code, 'E_PAIR_NOT_APPROVED');
     await a.disconnect(); await b.disconnect();
     await stopBroker(broker); broker = await startBroker();
     a = await member(aId, 'A restarted'); b = await member(bId, 'B restarted');
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked');
-    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'revoked');
-    assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED', 'broker restart cannot revive an old grant');
+    assert.equal(await mode(a, bId), 'none', 'broker restart cannot revive an ended approval');
 
-    // One new owner grant is shared; message order is irrelevant after restart.
-    assert.equal((await b.decidePair(aId, 'remembered', 'Reapproved')).mode, 'remembered');
+    // A new approval is shared; send order is irrelevant after restart.
+    assert.equal((await b.decidePair(aId, 'remembered', 'Approved again')).mode, 'remembered');
     await a.disconnect(); await b.disconnect(); await stopBroker(broker);
     broker = await startBroker();
     a = await member(aId, 'A again'); b = await member(bId, 'B again');
     assert.equal((await send(b, a)).delivered, true);
     assert.equal((await send(a, b)).delivered, true);
 
-    // Deliberately shorten lifetime. A session-only grant must end if one
-    // endpoint disconnects, and cannot come back after a broker restart.
+    // Session-only ends when one side's runtime leaves.
     assert.equal((await a.decidePair(bId, 'session', 'Now only')).mode, 'session');
     await b.disconnect();
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'none');
-    b = await member(bId, 'B later');
+    assert.equal(await mode(a, bId), 'none');
+    b = await member(bId, 'B new runtime');
     assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
 
-    // Old clients cannot send through the pair-aware broker boundary.
+    // An older client gets a specific, actionable code in both directions.
     old = await member(oldId, 'Old client', false);
-    await assert.rejects(a.decidePair(oldId, 'remembered', 'Not allowed'), /PAIR_PEER_UNAVAILABLE_OR_UNSUPPORTED/);
-    assert.equal((await send(a, old)).code, 'E_PAIR_UNSUPPORTED');
-    assert.equal((await send(old, a)).code, 'E_PAIR_UNSUPPORTED');
+    await assert.rejects(a.decidePair(oldId, 'remembered', 'Not allowed'), /PEER_OUTDATED/);
+    assert.equal((await send(a, old)).code, 'PEER_OUTDATED');
+    assert.equal((await send(old, a)).code, 'PEER_OUTDATED');
+    await assert.rejects(a.decidePair(randomUUID(), 'session', 'Offline'), /TARGET_UNAVAILABLE/);
   } finally {
-    await Promise.all([a,b,old].filter(Boolean).map(client => client!.disconnect().catch(() => undefined)));
+    await Promise.all([a, b, old].filter(Boolean).map(client => client!.disconnect().catch(() => undefined)));
     await stopBroker(broker);
   }
 });
 
-
-test('F11 real broker: F10 refusal migrates before registration, survives restart and never replays stale evidence', async () => {
-  const aId = randomUUID(), bId = randomUUID(), late = randomUUID();
+test('F11 real broker: a dropped socket of the same runtime keeps session-only approval; a reload ends it', async () => {
+  const aId = randomUUID(), bId = randomUUID(), bRuntime = randomUUID();
   let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
     b: InstanceType<typeof IntercomClient> | undefined;
   try {
     broker = await startBroker();
-    a = await member(aId, 'A with no legacy refusals');
-    b = await member(bId, 'B with saved F10 No', true, [{ peer: aId, entryIndex: 3 }]);
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked',
-      'B F10 refusal imported into shared authority before either peer may send');
-    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'revoked');
+    a = await member(aId, 'A'); b = await member(bId, 'B', true, bRuntime);
+    const updates: { mode: string; reason?: string }[] = [];
+    a.on('pair_update', (u: { mode: string; reason?: string }) => updates.push(u));
+    assert.equal((await a.decidePair(bId, 'session', 'Review')).mode, 'session');
+
+    // Abrupt socket loss (network blip, broker heartbeat miss) is not a runtime exit.
+    (b as any).socket.destroy();
+    await waitFor(async () => !(await a!.listSessions()).some(s => s.id === bId), () => 'B still listed');
+    assert.equal(await mode(a, bId), 'session', 'approval waits for the same runtime');
+    b = await member(bId, 'B reconnects', true, bRuntime);
+    assert.equal((await send(a, b)).delivered, true, 'no new prompt after a reconnect');
+    assert.equal(updates.filter(u => u.mode === 'none').length, 0);
+
+    // A different runtime of the same saved session (reload/restart) ends it.
+    (b as any).socket.destroy();
+    await waitFor(async () => !(await a!.listSessions()).some(s => s.id === bId), () => 'B still listed');
+    b = await member(bId, 'B reloaded', true, randomUUID());
+    await waitFor(() => updates.some(u => u.mode === 'none' && u.reason === 'expired'), () => JSON.stringify(updates));
+    assert.equal(await mode(a, bId), 'none');
     assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
-    assert.equal((await send(b, a)).code, 'E_PAIR_NOT_APPROVED');
-
-    // A NEW explicit owner pair decision can supersede the imported refusal.
-    // Merely restarting the old Pi session with the same F10 entry cannot.
-    const grant = await a.decidePair(bId, 'remembered', 'Fresh owner-approved pair');
-    assert.equal(grant.mode, 'remembered');
-    await b.disconnect();
-    b = await member(bId, 'B restarts with same old native F10 No', true, [{ peer: aId, entryIndex: 3 }]);
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'remembered');
-    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'remembered');
-    assert.equal((await send(b, a)).delivered, true, 'B may send first after remembered reapproval');
-
-    // An old F10 build could add a NEW saved No after a downgrade. Its later
-    // native append position MUST override the previously remembered grant.
-    await b.disconnect();
-    b = await member(bId, 'B with newer F10 No', true, [{ peer: aId, entryIndex: 8 }]);
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked');
-    assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
-    await a.disconnect(); await b.disconnect(); await stopBroker(broker);
-    broker = await startBroker();
-    a = await member(aId, 'A after broker restart');
-    b = await member(bId, 'B after broker restart', true, [{ peer: aId, entryIndex: 8 }]);
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked');
-    assert.equal((await send(b, a)).code, 'E_PAIR_NOT_APPROVED',
-      'broker restart does not resurrect the earlier grant');
-
-    // Older pair-aware clients that omit the F10 snapshot must not register as
-    // if they had inspected native controls.
-    const omitted = new IntercomClient(); omitted.on('error', () => undefined);
-    await assert.rejects(omitted.connect({
-      name: 'Missing mandatory migration evidence', cwd: root, model: 'fixture', pid: process.pid,
-      startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true,
-    }, late), /Connection closed before registration|Invalid register|connection/i);
-    await omitted.disconnect();
   } finally {
     await Promise.all([a, b].filter(Boolean).map(client => client!.disconnect().catch(() => undefined)));
     await stopBroker(broker);
   }
 });
-
-
-test('F11 real broker: refusal imported when A registers before B, then B owner reapproves the same pair', async () => {
-  const aId = randomUUID(), bId = randomUUID();
-  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
-    b: InstanceType<typeof IntercomClient> | undefined;
-  try {
-    broker = await startBroker();
-    a = await member(aId, 'Refusing original A', true, [{ peer: bId, entryIndex: 2 }]);
-    // A's native saved F10 No is imported even before B joins.
-    b = await member(bId, 'Fresh B');
-    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'revoked');
-    assert.equal((await send(b, a)).code, 'E_PAIR_NOT_APPROVED');
-    assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
-
-    // Explicit owner grant at B clears the same pair, not a separate B->A
-    // directional grant. The already-imported A native No cannot replay.
-    assert.equal((await b.decidePair(aId, 'remembered', 'Human allowed A-B')).mode, 'remembered');
-    await a.disconnect();
-    a = await member(aId, 'A restart with same old F10 No', true, [{ peer: bId, entryIndex: 2 }]);
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'remembered');
-    assert.equal((await send(a, b)).delivered, true);
-    assert.equal((await send(b, a)).delivered, true);
-  } finally {
-    await Promise.all([a, b].filter(Boolean).map(client => client!.disconnect().catch(() => undefined)));
-    await stopBroker(broker);
-  }
-});
-
 
 test('F11 real broker: replacing a dead-pid registration with its socket still open expires the session-only pair', async () => {
   const aId = randomUUID(), bId = randomUUID();
@@ -204,7 +152,6 @@ test('F11 real broker: replacing a dead-pid registration with its socket still o
     broker = await startBroker();
     a = await member(aId, 'A remains connected');
     // The advertised process dies while the registered socket stays open.
-    // This is the broker's stale-holder takeover branch, not socket 'close'.
     pidOwner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     assert.ok(pidOwner.pid);
     stale = new IntercomClient(); stale.on('error', () => undefined);
@@ -212,9 +159,7 @@ test('F11 real broker: replacing a dead-pid registration with its socket still o
     const changes: { mode: string; peer: string }[] = [];
     a.on('pair_update', (update: { mode: string; peer: string }) => changes.push(update));
     assert.equal((await a.decidePair(bId, 'session', 'One temporary A-B grant')).mode, 'session');
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'session');
     assert.equal((await send(a, stale)).delivered, true);
-    assert.equal(stale.isConnected(), true);
 
     const exited = once(pidOwner, 'exit');
     pidOwner.kill('SIGTERM');
@@ -224,15 +169,11 @@ test('F11 real broker: replacing a dead-pid registration with its socket still o
     replacement = await member(bId, 'B resumes same exact session');
     await waitFor(() => changes.some(u => u.peer === bId && u.mode === 'none'),
       () => JSON.stringify(changes), 2500);
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'none',
-      'new registration does not silently inherit old session-only consent');
-    assert.equal((await send(a, replacement)).code, 'E_PAIR_NOT_APPROVED',
-      'broker rejects new delivery after stale takeover');
+    assert.equal(await mode(a, bId), 'none', 'new registration does not inherit old session-only approval');
+    assert.equal((await send(a, replacement)).code, 'E_PAIR_NOT_APPROVED');
     // A late close from the retired socket must not remove the replacement.
     await stale.disconnect();
-    assert.ok((await a.listSessions()).some(s => s.id === bId),
-      'closing stale socket cannot unregister the new holder');
-    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'none');
+    assert.ok((await a.listSessions()).some(s => s.id === bId), 'closing stale socket cannot unregister the new holder');
   } finally {
     await Promise.all([a, stale, replacement].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
     if (pidOwner && pidOwner.exitCode === null && pidOwner.signalCode === null) pidOwner.kill('SIGKILL');

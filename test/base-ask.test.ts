@@ -15,7 +15,7 @@ test('ask registers before transport, matches native peer + exact request, and c
     if (immediate) { runtime.receive(peer, envelope(outgoing)); asks.admit(); }
     return { outcome: 'accepted' };
   });
-  runtime.approveFromOwner({ id: peer, name: 'B', context: 'review' }); asks = new Asks(runtime);
+  runtime.approve({ id: peer, name: 'B', context: 'review' }); asks = new Asks(runtime);
   const item: AskItem = {}; asks.open('first', [item]); let waiting: Promise<void> | undefined;
   const sent = await runtime.send({ to: peer, subject: 'Review', text: 'question' }, entry => { waiting = asks.register('first', item, entry, .1); });
   asks.sent(sent.message.id, sent.state); await waiting;
@@ -40,7 +40,7 @@ test('overlapping waits have independent rejection, timeout, late replies, relea
   const peer = randomUUID();
   let outcome: 'accepted' | 'rejected' | 'unknown' = 'accepted';
   const runtime = new Runtime(randomUUID(), async () => ({ outcome }));
-  runtime.approveFromOwner({ id: peer, name: 'B', context: 'review' });
+  runtime.approve({ id: peer, name: 'B', context: 'review' });
   const asks = new Asks(runtime);
   const start = async (call: string) => {
     const item: AskItem = {}; asks.open(call, [item]); let waiting!: Promise<void>;
@@ -60,7 +60,7 @@ test('overlapping waits have independent rejection, timeout, late replies, relea
   outcome = 'unknown'; const unknown = await start('unknown'); await unknown.waiting; assert.equal(unknown.item.outcome, 'unknown');
   outcome = 'accepted'; const revoked = await start('revoked');
   runtime.receive(peer, envelope(revoked.sent.message, 'PRIVATE')); asks.admit(); await revoked.waiting;
-  runtime.revokeFromOwner(peer); asks.end('revoked', undefined, peer);
+  runtime.unapprove(peer); asks.end('revoked', undefined, peer);
   assert.equal(revoked.item.outcome, 'revoked'); assert.doesNotMatch(JSON.stringify(asks.project('revoked', .1)), /PRIVATE/);
   const progress = runtime.inspect({ requests: [revoked.sent.message.id] });
   assert.match(modelView(progress, () => 'B'), /PRIVATE/, 'inspection retains history authorized before revoke');
@@ -72,7 +72,7 @@ test('overlapping waits have independent rejection, timeout, late replies, relea
 test('reply clock starts after acceptance; all local endings clear outstanding waits', async () => {
   for (const reason of ['paused', 'interrupted', 'context-lost', 'disconnected'] as const) {
     const peer = randomUUID(); const runtime = new Runtime(randomUUID(), async () => ({ outcome: 'accepted' }));
-    runtime.approveFromOwner({ id: peer, name: 'B', context: 'review' });
+    runtime.approve({ id: peer, name: 'B', context: 'review' });
     const asks = new Asks(runtime); const item: AskItem = {}; asks.open('call', [item]);
     let waiting!: Promise<void>;
     const sent = await runtime.send({ to: peer, subject: 'Review', text: 'question' }, entry => { waiting = asks.register('call', item, entry, .1); });
@@ -87,7 +87,7 @@ test('bounded ask schema, response selection and lean projections retain handles
   validate(AskInput, { requests: [{ to, subject: 'Review', text: 'question' }] });
   for (const input of [{ requests: [] }, { requests: [{ to, text: 'missing subject' }] }, { requests: [{ to, subject: 's', text: 'q' }], timeoutSeconds: 601 }]) assert.throws(() => validate(AskInput, input));
   assert.throws(() => validate(InspectInput, { requests: [to], cursor: to }));
-  const runtime = new Runtime(randomUUID(), async () => ({ outcome: 'accepted' })); runtime.approveFromOwner({ id: to, name: 'B', context: 'review' });
+  const runtime = new Runtime(randomUUID(), async () => ({ outcome: 'accepted' })); runtime.approve({ id: to, name: 'B', context: 'review' });
   const first = await runtime.send({ to, subject: 'Review', text: 'first' });
   const incoming = envelope(first.message, 'Substantive thanks are allowed.\nFULL PAYLOAD'); runtime.receive(to, incoming);
   const followup = await runtime.send({ respondTo: runtime.entry(incoming.id)!.returnHandle!, text: 'second' });

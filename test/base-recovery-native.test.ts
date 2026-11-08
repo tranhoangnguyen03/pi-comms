@@ -581,22 +581,15 @@ test('F11 native: normal unregister expires session-only pair and ends outstandi
   } finally { await b.close(); await a.close(); }
 });
 
-test('F11 native migration: saved F10 refusal at B cancels A remembered grant, until explicit reapproval', async () => {
-  let a = await participant('f11-migrate-a'), b = await participant('f11-migrate-b');
+test('F11 native upgrade: a saved 0.1.9 refusal is history only and does not cancel a remembered pair', async () => {
+  let a = await participant('f11-upgrade-a'), b = await participant('f11-upgrade-b');
   try {
     await a.runtime.session.prompt('A existing saved session');
     await b.runtime.session.prompt('B existing saved session');
     a.confirm(true); a.remember(true);
-    const before = await a.tool('comms_message', {
-      to: b.id(), subject: 'Old collaboration', text: 'BEFORE_F10_UPGRADE',
-    });
+    const before = await a.tool('comms_message', { to: b.id(), subject: 'Old collaboration', text: 'BEFORE_UPGRADE' });
     assert.equal(before.ok, true, JSON.stringify(before));
-    await waitFor(async () => (await b.tool('comms_inspect', { message: before.data.message.id })).ok === true);
-    assert.ok((await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === b.id()));
-
-    // Model an actual saved refusal left by a prior F10 build at B.
-    // B joins with its original native ID. It must import this negative
-    // before the broker permits the old remembered grant from A.
+    // A refusal record written by 0.1.9 at B. It is not a block in this version.
     const bId = b.id(), bFile = b.file()!, aId = a.id();
     await b.close();
     const bSaved = SessionManager.open(bFile);
@@ -604,42 +597,15 @@ test('F11 native migration: saved F10 refusal at B cancels A remembered grant, u
       version: 1, owner: bId, scope: root, writeId: randomUUID(),
       event: { kind: 'contact', peer: aId, revoked: true },
     });
-    b = await participant('f11-migrate-b', bSaved);
+    b = await participant('f11-upgrade-b', bSaved);
     assert.equal(b.id(), bId);
-    await waitFor(async () => !(await a.tool('comms_peers', { view: 'known' }))
-      .data.items.some((peer: any) => peer.id === bId));
-    assert.equal((await b.tool('comms_peers', { view: 'known' }))
-      .data.items.some((peer: any) => peer.id === aId), false);
-    assert.equal((await a.tool('comms_message', {
-      to: bId, subject: 'Do not bypass refusal', text: 'MUST_NOT_SEND_WITH_OLD_GRANT',
-    })).error.code, 'CONTACT_NOT_APPROVED', 'an old remembered A grant cannot cancel B saved No');
-
-    // One fresh explicit owner choice can restore the same unordered pair.
-    a.confirm(true); a.remember(true);
-    await a.command(`approve ${bId}`);
-    assert.ok((await a.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === bId));
-    assert.ok((await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === aId));
+    await waitFor(async () => (await b.tool('comms_peers', { view: 'known' })).data.items.some((peer: any) => peer.id === aId));
     b.confirm(false);
-    const reverse = await b.tool('comms_message', {
-      to: aId, subject: 'B first after reapproval', text: 'MIGRATION_OWNER_REAPPROVED',
-    });
+    const reverse = await b.tool('comms_message', { to: aId, subject: 'B first after upgrade', text: 'REMEMBERED_PAIR_STILL_ACTIVE' });
     assert.equal(reverse.ok, true, JSON.stringify(reverse));
-    assert.equal(b.dialogs.length, 0, 'one shared owner decision is enough for either direction');
-
-    // Restart B with the exact same old F10 refusal still in its file:
-    // importing its already-seen native entry must NOT revoke anew.
-    const savedAgain = b.file()!;
-    await b.close();
-    b = await participant('f11-migrate-b', SessionManager.open(savedAgain));
-    assert.equal(b.id(), bId);
-    assert.ok((await b.tool('comms_peers', { view: 'known' }))
-      .data.items.some((peer: any) => peer.id === aId),
-      'the older native refusal is already imported, not replayed over new approval');
-    assert.ok((await a.tool('comms_peers', { view: 'known' }))
-      .data.items.some((peer: any) => peer.id === bId));
+    assert.equal(b.dialogs.length, 0);
   } finally { await b.close(); await a.close(); }
 });
-
 
 test('F11 native: stale same-ID broker replacement expires pair and ends the remaining Pi ask', async () => {
   const a = await participant('f11-stale-replacement-a');
@@ -656,7 +622,7 @@ test('F11 native: stale same-ID broker replacement expires pair and ends the rem
     const registration = (pid: number, name: string) => ({
       name, cwd: root, model: 'native-fixture', pid,
       startedAt: Date.now(), lastActivity: Date.now(),
-      pairConsentV1: true, legacyRefusals: [],
+      pairConsentV1: true, runtimeId: randomUUID(),
     });
     await stale.connect(registration(claimedPid.pid!, 'Old B holder'), bId);
     a.confirm(true); a.remember(false);
