@@ -76,7 +76,7 @@ export function requestNextAction(outcome?: string): string | undefined {
     case 'timeout': case 'no-reply-yet': return 'A later reply can still arrive; inspect this request when needed.';
     case 'interrupted': return 'The local wait ended; inspect any later reply before asking again.';
     case 'paused': return 'Resume reception when ready; held replies may then arrive.';
-    case 'revoked': return 'Contact is revoked; only the owner can approve it again.';
+    case 'revoked': return 'Contact ended; it needs a new owner approval before further messages.';
     case 'disconnected': return 'Check the exact colleague’s presence; do not assume the remote work stopped.';
     case 'unknown': return 'Inspect the outbox and evidence before considering a resend.';
     case 'context-lost': return 'The runtime lost its link; inspect available records before starting a new exchange.';
