@@ -1,6 +1,8 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +18,7 @@ after(async () => {
   try { process.kill(Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8')), 'SIGTERM'); } catch {}
   await new Promise(resolve => setTimeout(resolve, 100)); rmSync(root, { recursive: true, force: true });
 });
+const { IntercomClient } = await import('../src/transport/broker/client.ts');
 const waitFor = async (predicate: () => boolean | Promise<boolean>) => {
   const until = Date.now() + 8000;
   while (!await predicate()) { if (Date.now() >= until) throw new Error('F10 native fixture timed out'); await new Promise(resolve => setTimeout(resolve, 15)); }
@@ -635,4 +638,68 @@ test('F11 native migration: saved F10 refusal at B cancels A remembered grant, u
     assert.ok((await a.tool('comms_peers', { view: 'known' }))
       .data.items.some((peer: any) => peer.id === bId));
   } finally { await b.close(); await a.close(); }
+});
+
+
+test('F11 native: stale same-ID broker replacement expires pair and ends the remaining Pi ask', async () => {
+  const a = await participant('f11-stale-replacement-a');
+  const bId = randomUUID();
+  let claimedPid: ChildProcess | undefined;
+  const stale = new IntercomClient(); stale.on('error', () => undefined);
+  const replacement = new IntercomClient(); replacement.on('error', () => undefined);
+  try {
+    await a.runtime.session.prompt('Saved A');
+    // A real child PID dies without closing the *registered* broker socket,
+    // which this test deliberately keeps open in the test process.
+    claimedPid = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    assert.ok(claimedPid.pid);
+    const registration = (pid: number, name: string) => ({
+      name, cwd: root, model: 'native-fixture', pid,
+      startedAt: Date.now(), lastActivity: Date.now(),
+      pairConsentV1: true, legacyRefusals: [],
+    });
+    await stale.connect(registration(claimedPid.pid!, 'Old B holder'), bId);
+    a.confirm(true); a.remember(false);
+    const subject = 'STALLED_ASK_BEFORE_STALE_REPLACEMENT';
+    const pending = a.tool('comms_ask', {
+      requests: [{ to: bId, subject, text: 'Please reply' }], timeoutSeconds: 60,
+    });
+    await waitFor(async () => (await a.tool('comms_inspect', { outbox: 'self' }))
+      .data.items.some((item: any) => item.message.subject === subject));
+    await waitFor(async () => (await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((peer: any) => peer.id === bId));
+    assert.equal(stale.isConnected(), true, 'stale holder socket remains live before PID exit');
+
+    const exited = once(claimedPid, 'exit');
+    claimedPid.kill('SIGTERM'); await exited;
+    assert.equal(stale.isConnected(), true, 'server has not yet observed socket close');
+
+    await replacement.connect(registration(process.pid, 'B reclaims same session'), bId);
+    const ended = await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(Error('Stale replacement stranded A pending ask')), 2000).unref();
+      }),
+    ]);
+    assert.equal(ended.data.items[0].outcome, 'disconnected',
+      'A receives pair-expiry notification rather than retaining the ask');
+    await waitFor(async () => !(await a.tool('comms_peers', { view: 'known' }))
+      .data.items.some((peer: any) => peer.id === bId));
+    const peer = (await a.tool('comms_peers', { view: 'all' }))
+      .data.items.find((item: any) => item.id === bId);
+    assert.ok(peer && !peer.approved, 'replacement is visible but not approved');
+    a.confirm(false);
+    const blocked = await a.tool('comms_message', {
+      to: bId, subject: 'No silent reuse', text: 'NO_REAPPROVAL_AFTER_STALE_TAKEOVER',
+    });
+    assert.equal(blocked.error.code, 'CONTACT_NOT_APPROVED');
+
+    await stale.disconnect(); // Its late socket close must not remove B replacement.
+    assert.ok((await a.tool('comms_peers', { view: 'all' }))
+      .data.items.some((item: any) => item.id === bId && item.presence === 'online'));
+  } finally {
+    await Promise.all([stale, replacement].map(client => client.disconnect().catch(() => undefined)));
+    if (claimedPid && claimedPid.exitCode === null && claimedPid.signalCode === null) claimedPid.kill('SIGKILL');
+    await a.close();
+  }
 });
