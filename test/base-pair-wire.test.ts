@@ -164,3 +164,31 @@ test('F11 real broker: F10 refusal migrates before registration, survives restar
     await stopBroker(broker);
   }
 });
+
+
+test('F11 real broker: refusal imported when A registers before B, then B owner reapproves the same pair', async () => {
+  const aId = randomUUID(), bId = randomUUID();
+  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
+    b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await startBroker();
+    a = await member(aId, 'Refusing original A', true, [{ peer: bId, entryIndex: 2 }]);
+    // A's native saved F10 No is imported even before B joins.
+    b = await member(bId, 'Fresh B');
+    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'revoked');
+    assert.equal((await send(b, a)).code, 'E_PAIR_NOT_APPROVED');
+    assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
+
+    // Explicit owner grant at B clears the same pair, not a separate B->A
+    // directional grant. The already-imported A native No cannot replay.
+    assert.equal((await b.decidePair(aId, 'remembered', 'Human allowed A-B')).mode, 'remembered');
+    await a.disconnect();
+    a = await member(aId, 'A restart with same old F10 No', true, [{ peer: bId, entryIndex: 2 }]);
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'remembered');
+    assert.equal((await send(a, b)).delivered, true);
+    assert.equal((await send(b, a)).delivered, true);
+  } finally {
+    await Promise.all([a, b].filter(Boolean).map(client => client!.disconnect().catch(() => undefined)));
+    await stopBroker(broker);
+  }
+});
