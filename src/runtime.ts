@@ -18,6 +18,9 @@ export class Runtime {
   private rememberedApprovals = new Map<string, Approval>();
   private pairVersions = new Map<string, number>();
   private revoked = new Set<string>();
+  // Snapshot the FINAL negative decisions from old native F10 entries before
+  // broker sync. New pair grants/revokes do not rewrite this migration source.
+  private restoredLegacyRefusals: string[] = [];
   private records = new Map<string, Entry>();
   private returns = new Map<string, Message>();
   private saveStates = new Map<string, SaveState | 'partial'>();
@@ -115,6 +118,8 @@ export class Runtime {
         this.holdRecovery(`Saved communication is incomplete: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    // Only the final saved F10 negative state is submitted for one-time pair migration.
+    this.restoredLegacyRefusals = [...this.revoked].sort();
     // Positive contact authority always comes from the broker after reconnect.
     this.approvals.clear(); this.rememberedApprovals.clear();
     for (const entry of this.records.values()) {
@@ -205,6 +210,7 @@ export class Runtime {
     this.rememberedApprovals.clear();
     this.pairVersions.clear();
   }
+  legacyRefusals = () => [...this.restoredLegacyRefusals];
   isRevoked = (id: string) => this.revoked.has(id);
   isRemembered = (id: string) => this.rememberedApprovals.has(id);
   approval(id: string) { const peer = this.approvals.get(id); return peer ? { ...peer } : undefined; }
