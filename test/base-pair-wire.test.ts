@@ -44,10 +44,11 @@ const reg = (name: string, pairConsentV1 = true,
   lastActivity: Date.now(), pairConsentV1,
   ...(pairConsentV1 ? { legacyRefusals } : {}),
 });
-async function member(id: string, name: string, pairConsentV1 = true) {
+async function member(id: string, name: string, pairConsentV1 = true,
+  legacyRefusals: { peer: string; entryIndex: number }[] = []) {
   const client = new IntercomClient();
   client.on('error', () => undefined);
-  await client.connect(reg(name, pairConsentV1), id);
+  await client.connect(reg(name, pairConsentV1, legacyRefusals), id);
   return client;
 }
 async function send(sender: InstanceType<typeof IntercomClient>, target: InstanceType<typeof IntercomClient>) {
@@ -107,6 +108,59 @@ test('F11 real broker: B-first remembered restart, either-side revoke, session e
     assert.equal((await send(old, a)).code, 'E_PAIR_UNSUPPORTED');
   } finally {
     await Promise.all([a,b,old].filter(Boolean).map(client => client!.disconnect().catch(() => undefined)));
+    await stopBroker(broker);
+  }
+});
+
+
+test('F11 real broker: F10 refusal migrates before registration, survives restart and never replays stale evidence', async () => {
+  const aId = randomUUID(), bId = randomUUID(), late = randomUUID();
+  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
+    b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await startBroker();
+    a = await member(aId, 'A with no legacy refusals');
+    b = await member(bId, 'B with saved F10 No', true, [{ peer: aId, entryIndex: 3 }]);
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked',
+      'B F10 refusal imported into shared authority before either peer may send');
+    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'revoked');
+    assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
+    assert.equal((await send(b, a)).code, 'E_PAIR_NOT_APPROVED');
+
+    // A NEW explicit owner pair decision can supersede the imported refusal.
+    // Merely restarting the old Pi session with the same F10 entry cannot.
+    const grant = await a.decidePair(bId, 'remembered', 'Fresh owner-approved pair');
+    assert.equal(grant.mode, 'remembered');
+    await b.disconnect();
+    b = await member(bId, 'B restarts with same old native F10 No', true, [{ peer: aId, entryIndex: 3 }]);
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'remembered');
+    assert.equal((await b.listPairs()).find(p => p.peer === aId)?.mode, 'remembered');
+    assert.equal((await send(b, a)).delivered, true, 'B may send first after remembered reapproval');
+
+    // An old F10 build could add a NEW saved No after a downgrade. Its later
+    // native append position MUST override the previously remembered grant.
+    await b.disconnect();
+    b = await member(bId, 'B with newer F10 No', true, [{ peer: aId, entryIndex: 8 }]);
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked');
+    assert.equal((await send(a, b)).code, 'E_PAIR_NOT_APPROVED');
+    await a.disconnect(); await b.disconnect(); await stopBroker(broker);
+    broker = await startBroker();
+    a = await member(aId, 'A after broker restart');
+    b = await member(bId, 'B after broker restart', true, [{ peer: aId, entryIndex: 8 }]);
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'revoked');
+    assert.equal((await send(b, a)).code, 'E_PAIR_NOT_APPROVED',
+      'broker restart does not resurrect the earlier grant');
+
+    // Older pair-aware clients that omit the F10 snapshot must not register as
+    // if they had inspected native controls.
+    const omitted = new IntercomClient(); omitted.on('error', () => undefined);
+    await assert.rejects(omitted.connect({
+      name: 'Missing mandatory migration evidence', cwd: root, model: 'fixture', pid: process.pid,
+      startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true,
+    }, late), /Connection closed before registration|Invalid register|connection/i);
+    await omitted.disconnect();
+  } finally {
+    await Promise.all([a, b].filter(Boolean).map(client => client!.disconnect().catch(() => undefined)));
     await stopBroker(broker);
   }
 });
