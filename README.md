@@ -112,7 +112,9 @@ The contact prompt shows **who**, a short **topic and request preview**, and the
 - **Allow & remember:** the same single A–B pair approval survives restart of those original sessions and the broker. Either session can initiate first.
 - **Decline:** denies that pair. **Either side can revoke** an existing pair with `/comms revoke`. A later fresh owner approval can restore it.
 
-The broker stores **one canonical pair decision**, keyed by the shared comms scope and the two sorted native Pi session IDs. It commits remembered grants and revocations before reporting success. Local session records retain message history, visibility, Pause and recovery evidence—not competing positive grants. A fork (`B_new`) has a different ID, so `A–B_new` needs fresh approval. Rename does not change a pair.
+The broker stores **one canonical pair decision**, keyed by the shared comms scope and the two sorted native Pi session IDs. It commits remembered grants and revocations before reporting success. Local session records retain message history, visibility, Pause and recovery evidence—not competing positive grants. A fork (`B_new`) has a different ID, so `A–B_new` needs fresh approval. Rename does not change a pair. **Both normal unregister and abrupt disconnect** end session-only approval, notify the remaining participant and end affected asks as disconnected.
+
+**Upgrading F10:** When an original saved Pi session joins the F11 broker, it reports its final active F10 refusals from native records. The broker imports them as one shared **revoked** pair state *before the session becomes reachable*. Old positive approvals and transported assertions are never imported. A refusal remains until a fresh explicit owner approval from either original endpoint. Import markers prevent the same old native No from being replayed on restart; a newer F10 refusal after downgrade is still respected.
 
 The explicit `/comms approve` command only grants/edits approval and sends no message. Cancel/Esc keeps the existing decision and active asks. Both sides must run a compatible pair-aware pi-comms client and broker; mixed F10/F11 pairs cannot enforce shared revocation and are rejected rather than silently downgraded. If pair storage is corrupt or the broker is unreachable, new communication is held rather than pretending approval is known.
 
@@ -146,7 +148,7 @@ Ask your agent to work with the colleague, for example:
 
 > Have Reviewer review the current implementation and return supported findings. Do not edit.
 
-The agent discovers the exact colleague and attempts the send. **First contact opens one native human choice**: Approve this session (default), Approve and remember the exact saved session pair, or Refuse. The same send continues when approved—no setup command, ID relay or second prompt. Choosing No/Esc is a refusal; a tool abort/Stop only cancels the pending choice.
+The agent discovers the exact colleague and attempts the send. **First contact opens one short human choice**: Allow this session (default), Allow & remember, or Decline. The same send continues when approved; a real human refusal remains controlling until fresh owner approval. Stop/abort cancels the attempt, not the pair.
 
 **One decision per unordered pair.** In this same-owner local workflow, approving A–B enables messages and asks in **both directions**, whichever session initiates first. The broker binds the exact original session IDs and scope. Runtime-only consent ends when either endpoint disconnects; remembered consent survives the original pair's restarts until either side revokes. It never grants work authority or native tool permissions, and it never transfers to a fork or a different peer.
 
