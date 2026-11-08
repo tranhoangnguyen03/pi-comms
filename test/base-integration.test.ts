@@ -1032,9 +1032,15 @@ test('installed Base model tools: Pause holds delivery, human inspection and two
     await a.command('resume'); await waitFor(() => a!.runtime.session.isIdle && a!.runtime.session.sessionManager.getEntries().some(e => e.type === 'custom_message' && (e.details as any)?.messages?.some((m: any) => m.id === correctedY.id)));
     const correctionCard = a.runtime.session.sessionManager.getEntries().flatMap(e => e.type === 'custom_message' ? (e.details as any)?.messages ?? [] : []).find((m: any) => m.id === correctedY.id);
     assert.equal(correctionCard.corrects, answerY.id);
-    // Local broker connectivity is not counterpart presence.
+    // Native replacement unregisters the original session: session-only
+    // consent expires and the old peer is absent or shown as offline, never
+    // implicitly approved through a new session ID.
     await b.runtime.newSession();
-    assert.equal(data(await a.tool('comms_peers', {})).data.items.find((p: any) => p.id === sent.message.to).presence, 'offline');
+    await waitFor(async () => !data(await a!.tool('comms_peers', { view: 'known' }))
+      .data.items.some((p: any) => p.id === sent.message.to));
+    const oldPeer = data(await a.tool('comms_peers', {})).data.items.find((p: any) => p.id === sent.message.to);
+    assert.ok(!oldPeer || (oldPeer.presence === 'offline' && oldPeer.approved === false),
+      'the prior exact session is unavailable, never a current approved contact');
     const inspected = data(await a.tool('comms_inspect', { message: sent.message.id })).data;
     assert.equal(inspected.localTransport.connectivity, 'online');
     assert.equal(inspected.current, undefined);
