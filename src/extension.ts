@@ -244,7 +244,7 @@ export default function comms(pi: ExtensionAPI) {
         try { current.syncPairStatus(state, name(state.peer)); }
         catch (error) { context.ui.notify(`Pair contact state could not be applied: ${String(error)}`, 'warning'); return; }
         if (state.mode === 'revoked' || (wasApproved && state.mode === 'none')) {
-          endAsks('revoked', state.peer);
+          endAsks(state.mode === 'revoked' ? 'revoked' : 'disconnected', state.peer);
           if (!localPairDecisions.has(state.peer)) cancelContact(state.peer);
           declined.add(state.peer);
           prompted.add(state.peer);
@@ -267,7 +267,7 @@ export default function comms(pi: ExtensionAPI) {
         } catch (error) { context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning'); status(); }
       });
       try {
-        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true }, candidate, new URL('./transport/broker/broker.js', import.meta.url));
+        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, legacyRefusals: current.legacyRefusals() }, candidate, new URL('./transport/broker/broker.js', import.meta.url));
         if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE)) throw Error('PAIR_UNSUPPORTED_BROKER');
         const pairSnapshot = await candidate.listPairs();
         for (const item of pairSnapshot) current.syncPairStatus(item, name(item.peer));
