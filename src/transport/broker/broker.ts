@@ -393,18 +393,7 @@ class IntercomBroker {
       this.settlePendingReceiptsForSocket(socket);
       if (sessionKey) {
         const existing = this.sessions.get(sessionKey);
-        if (existing?.socket === socket) {
-          this.rememberDisconnectedSession(existing);
-          this.sessions.delete(sessionKey);
-          this.clearMessageReceiptRoutesForSession(sessionKey);
-          if (!this.pairApprovals.holdReason()) {
-            for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id))
-              this.publishPair(existing.scopeId, existing.info.id, peer);
-          }
-          this.broadcast({ type: "session_left", sessionId: existing.info.id }, sessionKey, existing.scopeId);
-          this.recomputeNamespaceOwners();
-          this.scheduleShutdownCheck();
-        }
+        if (existing?.socket === socket) this.removeRegisteredSession(existing);
       }
     });
 
@@ -441,6 +430,23 @@ class IntercomBroker {
     }
     connection.tokens -= 1;
     return true;
+  }
+
+  // Both normal unregister and socket loss must produce the same peer
+  // notifications. A non-remembered pair ends on *either* endpoint exit.
+  private removeRegisteredSession(existing: ConnectedSession): void {
+    if (this.sessions.get(existing.key)?.socket !== existing.socket) return;
+    this.rememberDisconnectedSession(existing);
+    this.sessions.delete(existing.key);
+    this.clearMessageReceiptRoutesForSession(existing.key);
+    if (!this.pairApprovals.holdReason()) {
+      for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id)) {
+        this.publishPair(existing.scopeId, existing.info.id, peer);
+      }
+    }
+    this.broadcast({ type: "session_left", sessionId: existing.info.id }, existing.key, existing.scopeId);
+    this.recomputeNamespaceOwners();
+    this.scheduleShutdownCheck();
   }
 
   private scheduleShutdownCheck(delayMs = 5000): void {
@@ -647,19 +653,10 @@ class IntercomBroker {
       }
 
       case "unregister": {
-        if (!currentKey) {
-          throw new Error("Received unregister before register");
-        }
+        if (!currentKey) throw new Error("Received unregister before register");
         const existing = this.sessions.get(currentKey);
-        if (existing?.socket === socket) {
-          this.rememberDisconnectedSession(existing);
-          this.sessions.delete(currentKey);
-          this.clearMessageReceiptRoutesForSession(currentKey);
-          this.broadcast({ type: "session_left", sessionId: existing.info.id }, currentKey, existing.scopeId);
-          this.recomputeNamespaceOwners();
-          this.scheduleShutdownCheck();
-        }
-        setKey(null);
+        if (existing?.socket === socket) this.removeRegisteredSession(existing);
+        setKey(null); // A later socket close must not expire the same pair twice.
         break;
       }
 
