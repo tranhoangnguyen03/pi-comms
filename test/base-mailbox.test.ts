@@ -422,3 +422,27 @@ test('F12: unknown offline peer version after broker restart ends as peer_outdat
     await stop(broker);
   }
 });
+
+test('F12: receiver_recorded also completes an ordinary live send that waits for a receipt', async () => {
+  const aId = randomUUID(), bId = randomUUID();
+  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
+    b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await start(); a = await peer(aId, 'Live sender A');
+    b = new IntercomClient(); b.on('error', () => undefined);
+    b.on('message', (_: unknown, msg: { id: string }) => {
+      b!.sendMessageReceipt({ messageId: msg.id, status: 'receiver_recorded', timestamp: Date.now() });
+    });
+    await b.connect({ ...reg('Live receiver B'), acknowledgesReceipts: true }, bId);
+    await a.decidePair(bId, 'remembered', 'live acknowledgement');
+    const found = (await a.listSessions()).find(x => x.id === bId)!;
+    const sent = await a.sendExact(bId, found.endpointEpoch,
+      { messageId: randomUUID(), text: 'live receipt should not time out' }, 'live_only');
+    assert.equal(sent.delivered, true);
+    assert.equal(sent.delivery, 'socket_delivered');
+    assert.equal(sent.outcomeKnown, true);
+  } finally {
+    await Promise.all([a,b].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
+    await stop(broker);
+  }
+});
