@@ -785,7 +785,7 @@ class IntercomBroker {
             } catch (error) {
               const code = String(error).includes("MAILBOX_FULL") ? "MAILBOX_FULL"
                 : String(error).includes("MAILBOX_UNREADABLE") ? "MAILBOX_UNREADABLE" : "MAILBOX_SAVE_FAILED";
-              this.writeDeliveryFailure(socket, message.id, "Offline mail was not confirmed saved: " + String(error), code);
+              this.writeDeliveryFailure(socket, message.id, "Offline mail was not confirmed saved: " + String(error), code, false, code !== "MAILBOX_SAVE_FAILED");
             }
             break;
           }
@@ -1218,8 +1218,8 @@ class IntercomBroker {
     writeMessage(socket, { type: "delivered", messageId, delivery, retryable: false, outcomeKnown: true });
   }
 
-  private writeDeliveryFailure(socket: net.Socket, messageId: string, reason: string, code: string, retryable = false): void {
-    writeMessage(socket, { type: "delivery_failed", messageId, reason, delivery: "failed", code, retryable, outcomeKnown: true });
+  private writeDeliveryFailure(socket: net.Socket, messageId: string, reason: string, code: string, retryable = false, outcomeKnown = true): void {
+    writeMessage(socket, { type: "delivery_failed", messageId, reason, delivery: outcomeKnown ? "failed" : "unknown", code, retryable, outcomeKnown });
   }
 
   private releaseReplyEdge(replyTo: string | undefined, scopeId: string | undefined): void {
