@@ -23,6 +23,7 @@ import { PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSI
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { PairApprovalStore } from "./pair-approvals.ts";
+import { DurableMailbox, MAIL_TTL_MS, type MailItem } from "./mailbox-store.ts";
 import { assertNoLiveBroker, INTERCOM_PACKAGE_VERSION, isProcessAlive } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
@@ -45,8 +46,6 @@ const MAX_EXTENSION_MESSAGE_BYTES = 16 * 1024;
 const MAX_EXTENSION_STATE_BYTES = 64 * 1024;
 const MESSAGE_RECEIPT_ROUTE_RETENTION_MS = 60 * 60 * 1000;
 const DISCONNECTED_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000;
-const MAILBOX_MESSAGE_RETENTION_MS = 24 * 60 * 60 * 1000;
-const MAX_MAILBOX_MESSAGES = 256;
 const DELIVERY_RECORD_RETENTION_MS = 60 * 60 * 1000;
 const MAX_DELIVERY_RECORDS = 4096;
 // Must stay below the client's 10s send timeout, so an unconfirmed send resolves as unknown instead of throwing.
@@ -239,7 +238,8 @@ class IntercomBroker {
   private askEdges = new Map<string, AskEdge>();
   private messageReceiptRoutes = new Map<string, MessageReceiptRoute>();
   private disconnectedSessions = new Map<string, DisconnectedSession>();
-  private mailboxMessages: MailboxMessage[] = [];
+  private readonly mailbox: DurableMailbox;
+  private readonly offeredMail = new Set<string>();
   private deliveryRecords = new Map<string, DeliveryRecord>();
   private pendingReceipts = new Map<string, PendingReceipt>();
   private connections = new Set<net.Socket>();
@@ -261,6 +261,8 @@ class IntercomBroker {
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
     this.pairApprovals = new PairApprovalStore(INTERCOM_DIR);
     if (this.pairApprovals.recovered) console.log(this.pairApprovals.recovered);
+    this.mailbox = new DurableMailbox(INTERCOM_DIR);
+    if (this.mailbox.blocked) console.error(this.mailbox.blocked);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);
@@ -451,12 +453,7 @@ class IntercomBroker {
       if (this.sessions.size > 0) return;
       const now = Date.now();
       this.pruneMailboxMessages(now);
-      // Queued mail keeps the broker up until it is delivered or expires; recheck at the next expiry.
-      if (this.mailboxMessages.length > 0) {
-        const oldestQueuedAt = Math.min(...this.mailboxMessages.map(entry => entry.queuedAt));
-        this.scheduleShutdownCheck(Math.max(oldestQueuedAt + MAILBOX_MESSAGE_RETENTION_MS - now + 1, 1000));
-        return;
-      }
+      // F12 mail is on disk; it does not need an idle broker process to survive.
       console.log("No sessions connected, shutting down");
       this.shutdown();
     }, delayMs);
@@ -633,7 +630,7 @@ class IntercomBroker {
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
         this.recomputeNamespaceOwners();
-        this.flushMailboxForSession(connectedSession);
+        // Mail is offered after the client applies the pair snapshot in wire order.
 
         if (extensions) {
           for (const ext of extensions) {
@@ -725,6 +722,7 @@ class IntercomBroker {
         if (!currentKey) {
           throw new Error("Received send before register");
         }
+        const policy = clientMessage.dispatchPolicy ?? "live_only";
         const message = clientMessage.message;
         const messageId = isMessage(message) ? message.id : "unknown";
 
@@ -745,28 +743,52 @@ class IntercomBroker {
 
         const hasTargetId = clientMessage.targetId !== undefined;
         const hasTargetEpoch = clientMessage.targetEpoch !== undefined;
-        if (
-          hasTargetId !== hasTargetEpoch
-          || (hasTargetId && (typeof clientMessage.targetId !== "string" || clientMessage.targetId.length === 0))
-          || (hasTargetEpoch && (typeof clientMessage.targetEpoch !== "string" || clientMessage.targetEpoch.length === 0))
-        ) {
-          this.writeDeliveryFailure(socket, message.id, "Exact target requires an id and endpoint epoch", "E_INVALID_TARGET");
+        if (policy !== "async" && policy !== "live_only") {
+          this.writeDeliveryFailure(socket, message.id, "Invalid dispatch policy", "E_INVALID_TARGET");
           break;
         }
-        if (hasTargetId && hasTargetEpoch) {
+        if ((hasTargetEpoch && !hasTargetId) ||
+            (hasTargetId && (!isSessionId(clientMessage.targetId) || (!hasTargetEpoch && policy !== "async"))) ||
+            (hasTargetEpoch && (typeof clientMessage.targetEpoch !== "string" || !clientMessage.targetEpoch.length))) {
+          this.writeDeliveryFailure(socket, message.id, "Invalid exact destination", "E_INVALID_TARGET");
+          break;
+        }
+        if (hasTargetId) {
           const targetId = clientMessage.targetId as string;
-          const targetEpoch = clientMessage.targetEpoch as string;
           const fingerprint = messageDeliveryFingerprint(message, targetId);
-          if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
-            break;
-          }
+          if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) break;
           const exactTarget = this.sessions.get(scopedSessionKey(fromSession.scopeId, targetId));
           if (!exactTarget) {
-            this.recordDelivery(currentKey, message.id, fingerprint, "failed", "Session not found", "E_TARGET_NOT_FOUND");
-            this.writeDeliveryFailure(socket, message.id, "Session not found", "E_TARGET_NOT_FOUND");
+            if (policy !== "async" || !fromSession.info.durableMailboxV1) {
+              this.writeDeliveryFailure(socket, message.id, "Exact peer is offline; live asks are never queued", "E_TARGET_DISCONNECTED");
+              break;
+            }
+            const approval = this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, targetId);
+            if (approval.mode === "none") {
+              this.writeDeliveryFailure(socket, message.id, "This exact session pair is not approved", "E_PAIR_NOT_APPROVED");
+              break;
+            }
+            const known = this.disconnectedSessions.get(scopedSessionKey(fromSession.scopeId, targetId));
+            if (known && !known.info.durableMailboxV1) {
+              this.writeDeliveryFailure(socket, message.id, "The exact peer uses an older pi-comms", "PEER_OUTDATED");
+              break;
+            }
+            if (message.expectsReply) {
+              this.writeDeliveryFailure(socket, message.id, "Live asks cannot enter the offline mailbox", "E_TARGET_DISCONNECTED");
+              break;
+            }
+            try {
+              this.queueMailboxMessage(fromSession, targetId, message, brokerReceivedAt);
+              this.recordDelivery(currentKey, message.id, fingerprint, "queued");
+              this.writeDeliverySuccess(socket, message.id, "queued");
+            } catch (error) {
+              const code = String(error).includes("MAILBOX_FULL") ? "MAILBOX_FULL"
+                : String(error).includes("MAILBOX_UNREADABLE") ? "MAILBOX_UNREADABLE" : "MAILBOX_SAVE_FAILED";
+              this.writeDeliveryFailure(socket, message.id, "Offline mail was not confirmed saved: " + String(error), code);
+            }
             break;
           }
-          if (exactTarget.info.endpointEpoch !== targetEpoch) {
+          if (hasTargetEpoch && exactTarget.info.endpointEpoch !== clientMessage.targetEpoch) {
             this.recordDelivery(currentKey, message.id, fingerprint, "failed", "Target endpoint changed before delivery", "E_TARGET_REBOUND", true);
             this.writeDeliveryFailure(socket, message.id, "Target endpoint changed before delivery", "E_TARGET_REBOUND", true);
             break;
@@ -781,6 +803,10 @@ class IntercomBroker {
             break;
           }
           const target = targets[0];
+          if (fromSession.info.durableMailboxV1 !== target.info.durableMailboxV1) {
+            this.writeDeliveryFailure(socket, message.id, "The exact peer runs a different pi-comms mail protocol", "PEER_OUTDATED");
+            break;
+          }
           if (fromSession.info.pairConsentV1 || target.info.pairConsentV1) {
             if (!fromSession.info.pairConsentV1 || !target.info.pairConsentV1) {
               this.writeDeliveryFailure(socket, message.id, "One session runs an older pi-comms without shared pair approval", "PEER_OUTDATED");
@@ -854,57 +880,8 @@ class IntercomBroker {
           break;
         }
 
-        const disconnectedTargets = this.findDisconnectedSessions(clientMessage.to, fromSession.scopeId);
-        if (disconnectedTargets.length === 1) {
-          if (message.replyTo && !replyEdge) {
-            this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
-            break;
-          }
-          const disconnectedTarget = disconnectedTargets[0]!;
-          const target = disconnectedTarget.info;
-          const fingerprint = messageDeliveryFingerprint(message, target.id);
-          if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
-            break;
-          }
-          if (message.supersedes) {
-            this.writeDeliveryFailure(socket, message.id, "Supersede target is not connected", "E_SUPERSEDE_TARGET");
-            break;
-          }
-          if (replyEdge && (replyEdge.to !== currentKey || replyEdge.from !== disconnectedTarget.key)) {
-            this.writeDeliveryFailure(socket, message.id, "Reply target does not match the pending ask", "E_REPLY_TARGET");
-            break;
-          }
-          if (message.expectsReply) {
-            this.writeDeliveryFailure(socket, message.id, "Target session is not currently connected; blocking asks are not queued", "E_TARGET_DISCONNECTED");
-            break;
-          }
-          const liveMailboxTarget = this.findUniqueLiveSessionForDisconnectedSession(disconnectedTarget, currentKey);
-          if (liveMailboxTarget) {
-            const deliveredMessage: Message = {
-              ...message,
-              brokerReceivedAt,
-              brokerDeliveredAt: Date.now(),
-            };
-            this.messageReceiptRoutes.set(message.id, { from: currentKey, to: liveMailboxTarget.key, createdAt: brokerReceivedAt });
-            writeMessage(liveMailboxTarget.socket, {
-              type: "message",
-              from: fromSession.info,
-              message: deliveredMessage,
-            });
-            this.completeSocketDelivery(socket, currentKey, fromSession.scopeId, liveMailboxTarget, message, fingerprint);
-            break;
-          }
-          this.queueMailboxMessage(fromSession, disconnectedTarget, message, brokerReceivedAt);
-          this.releaseReplyEdge(message.replyTo, fromSession.scopeId);
-          this.recordDelivery(currentKey, message.id, fingerprint, "queued");
-          this.writeDeliverySuccess(socket, message.id, "queued");
-          break;
-        }
-
-        if (disconnectedTargets.length > 1) {
-          this.writeDeliveryFailure(socket, message.id, `Multiple disconnected sessions named \"${clientMessage.to}\" can receive queued mail. Use the session ID instead.`, "E_AMBIGUOUS_TARGET");
-          break;
-        }
+        // No name/cwd/prefix offline routing. F12 queues only an exact, approved
+        // targetId on the async policy path above. Never substitute a successor.
 
         this.writeDeliveryFailure(socket, message.id, "Session not found", "E_TARGET_NOT_FOUND");
         break;
@@ -918,6 +895,22 @@ class IntercomBroker {
           throw new Error("Invalid message_receipt message");
         }
         this.pruneMessageReceiptRoutes();
+        // Only a receiver with a verified native-session write may release the
+        // broker's durable copy. "queued" and socket receipt are not proof.
+        if (clientMessage.receipt.status === "receiver_recorded") {
+          const receiver = this.sessions.get(currentKey);
+          const mail = this.mailbox.pending.find(item => item.message.id === clientMessage.receipt.messageId && item.targetKey === currentKey);
+          if (receiver?.socket === socket && receiver.info.durableMailboxV1 && mail) {
+            try {
+              if (this.mailbox.settle(mail.fromKey, mail.message.id, "receiver_recorded")) {
+                this.offeredMail.delete(mail.fromKey + ":" + mail.message.id + ":" + receiver.info.endpointEpoch);
+                const sender = this.sessions.get(mail.fromKey);
+                if (sender) writeMessage(sender.socket, { type: "message_receipt", from: receiver.info, receipt: clientMessage.receipt });
+              }
+            } catch (error) { console.error("Durable receipt could not be saved:", error); }
+          }
+          break;
+        }
         const route = this.messageReceiptRoutes.get(clientMessage.receipt.messageId);
         const receiver = this.sessions.get(currentKey);
         const sender = route ? this.sessions.get(route.from) : undefined;
@@ -944,16 +937,15 @@ class IntercomBroker {
         this.pruneMessageReceiptRoutes();
         this.pruneMailboxMessages();
         const sender = this.sessions.get(currentKey);
-        const queuedIndex = this.mailboxMessages.findIndex(entry => entry.message.id === clientMessage.messageId && entry.fromKey === currentKey);
-        if (queuedIndex >= 0 && sender?.socket === socket) {
-          this.mailboxMessages.splice(queuedIndex, 1);
-          this.updateDeliveryRecord(currentKey, clientMessage.messageId, "failed", "Sender cancelled the queued delivery", "E_DELIVERY_CANCELLED");
-          const edge = this.askEdges.get(clientMessage.messageId);
-          if (edge?.from === currentKey) {
-            this.askEdges.delete(clientMessage.messageId);
-            this.removePendingAskRecord(clientMessage.messageId, sender.scopeId);
+        const mail = this.mailbox.pending.find(x => x.message.id === clientMessage.messageId && x.fromKey === currentKey);
+        if (mail && sender?.socket === socket) {
+          try {
+            this.mailbox.settle(mail.fromKey, mail.message.id, "cancelled");
+            this.updateDeliveryRecord(currentKey, clientMessage.messageId, "failed", "Sender cancelled the queued delivery", "E_DELIVERY_CANCELLED");
+            writeMessage(socket, { type: "delivered", messageId: clientMessage.messageId });
+          } catch (error) {
+            this.writeDeliveryFailure(socket, clientMessage.messageId, String(error), "MAILBOX_SAVE_FAILED");
           }
-          writeMessage(socket, { type: "delivered", messageId: clientMessage.messageId });
           break;
         }
         const route = this.messageReceiptRoutes.get(clientMessage.messageId);
@@ -1096,6 +1088,7 @@ class IntercomBroker {
           throw Error("Invalid pair list request");
         }
         writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, items: this.pairApprovals.list(session.scopeId, session.info.id) });
+        if (session.info.durableMailboxV1) this.flushMailboxForSession(session);
         break;
       }
 
@@ -1127,6 +1120,7 @@ class IntercomBroker {
         try {
           const status = this.pairApprovals.decide(session.scopeId, session.info.id, peerId, mode, context,
             id => this.pairRuntime(session.scopeId, id));
+          this.pruneMailboxMessages(); // revocation ends undelivered mail before acknowledgment
           this.publishPair(session.scopeId, session.info.id, peerId, "ended");
           writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, status });
         } catch (error) {
@@ -1171,45 +1165,28 @@ class IntercomBroker {
   }
 
   private pruneMailboxMessages(now = Date.now()): void {
-    for (let index = this.mailboxMessages.length - 1; index >= 0; index -= 1) {
-      const entry = this.mailboxMessages[index]!;
-      if (now - entry.queuedAt > MAILBOX_MESSAGE_RETENTION_MS) {
-        if (entry.message.expectsReply) {
-          this.askEdges.delete(entry.message.id);
-          this.removePendingAskRecord(entry.message.id, entry.fromScopeId);
-        }
-        this.messageReceiptRoutes.delete(entry.message.id);
-        this.updateDeliveryRecord(entry.fromKey, entry.message.id, "failed", "Mailbox delivery expired", "E_DELIVERY_EXPIRED");
-        this.mailboxMessages.splice(index, 1);
+    try {
+      const ended = this.mailbox.expire(now, item =>
+        this.pairApprovals.state(item.scope ?? undefined, item.from.id, item.targetId).mode !== "none");
+      for (const outcome of ended) {
+        const code = outcome.outcome === "expired" ? "E_DELIVERY_EXPIRED" : "E_PAIR_NOT_APPROVED";
+        this.updateDeliveryRecord(outcome.fromKey, outcome.id, "failed", outcome.outcome, code);
       }
-    }
+    } catch (error) { console.error("Mailbox expiry could not be committed:", error); }
   }
 
-  private queueMailboxMessage(from: ConnectedSession, target: DisconnectedSession, message: Message, brokerReceivedAt: number): void {
+  private queueMailboxMessage(from: ConnectedSession, targetId: string, message: Message, brokerReceivedAt: number): void {
     this.pruneMailboxMessages(brokerReceivedAt);
-    while (this.mailboxMessages.length >= MAX_MAILBOX_MESSAGES) {
-      const evicted = this.mailboxMessages.shift();
-      if (!evicted) break;
-      if (evicted.message.expectsReply) {
-        this.askEdges.delete(evicted.message.id);
-        this.removePendingAskRecord(evicted.message.id, evicted.fromScopeId);
-      }
-      this.messageReceiptRoutes.delete(evicted.message.id);
-      this.updateDeliveryRecord(evicted.fromKey, evicted.message.id, "failed", "Mailbox capacity evicted the delivery", "E_DELIVERY_EVICTED");
-    }
-    this.mailboxMessages.push({
-      from: { ...from.info },
-      fromKey: from.key,
-      ...(from.scopeId ? { fromScopeId: from.scopeId } : {}),
-      target: { ...target.info },
-      targetKey: target.key,
-      ...(target.scopeId ? { targetScopeId: target.scopeId } : {}),
-      message: { ...message, brokerReceivedAt },
-      queuedAt: brokerReceivedAt,
-    });
+    const item: MailItem = {
+      from: { ...from.info }, fromKey: from.key, targetKey: scopedSessionKey(from.scopeId, targetId),
+      targetId, scope: from.scopeId ?? null, message: { ...message },
+      queuedAt: brokerReceivedAt, expiresAt: brokerReceivedAt + MAIL_TTL_MS,
+      fingerprint: messageDeliveryFingerprint(message, targetId),
+    };
+    this.mailbox.enqueue(item); // atomic commit happens before "queued" is acknowledged
   }
 
-  private writeDeliverySuccess(socket: net.Socket, messageId: string, delivery: "socket_delivered" | "queued"): void {
+  private writeDeliverySuccess(socket: net.Socket, messageId: string, delivery: "socket_delivered" | "queued" | "receiver_recorded"): void {
     writeMessage(socket, { type: "delivered", messageId, delivery, retryable: false, outcomeKnown: true });
   }
 
@@ -1291,6 +1268,22 @@ class IntercomBroker {
   private replayOrReject(socket: net.Socket, fromSessionId: string, messageId: string, fingerprint: string): boolean {
     this.pruneDeliveryRecords();
     const key = this.deliveryRecordKey(fromSessionId, messageId);
+    const persisted = this.mailbox.lookup(fromSessionId, messageId);
+    if (persisted) {
+      if (persisted.fingerprint !== fingerprint) {
+        this.writeDeliveryFailure(socket, messageId, "Message ID reused with different content", "E_MESSAGE_ID_REUSE");
+      } else if ("message" in persisted) {
+        this.writeDeliverySuccess(socket, messageId, "queued");
+      } else if (persisted.outcome === "receiver_recorded") {
+        this.writeDeliverySuccess(socket, messageId, "receiver_recorded");
+      } else {
+        const code = persisted.outcome === "expired" ? "E_DELIVERY_EXPIRED" :
+          persisted.outcome === "contact_ended" ? "E_PAIR_NOT_APPROVED" :
+          persisted.outcome === "peer_outdated" ? "PEER_OUTDATED" : "E_DELIVERY_CANCELLED";
+        this.writeDeliveryFailure(socket, messageId, "Prior queued mail ended: " + persisted.outcome, code);
+      }
+      return true;
+    }
     const record = this.deliveryRecords.get(key);
     if (!record) return false;
     if (record.fingerprint !== fingerprint) {
@@ -1353,61 +1346,34 @@ class IntercomBroker {
 
   private flushMailboxForSession(session: ConnectedSession, now = Date.now()): void {
     this.pruneMailboxMessages(now);
-    const sessionName = session.info.name?.toLowerCase();
-    const uniqueMailboxIdentity = this.findLiveSessionsSharingMailboxIdentity(session).length === 1;
-
-    for (let index = 0; index < this.mailboxMessages.length;) {
-      const entry = this.mailboxMessages[index]!;
-      if (!sameScope(entry.targetScopeId, session.scopeId)) {
-        index += 1;
+    if (this.mailbox.blocked || this.sessions.get(session.key) !== session) return;
+    for (const item of this.mailbox.pending) {
+      if (item.targetKey !== session.key || item.targetId !== session.info.id ||
+          item.scope !== (session.scopeId ?? null)) continue;
+      const permission = this.pairApprovals.state(session.scopeId, item.from.id, session.info.id);
+      if (permission.mode === "none" || !session.info.durableMailboxV1) {
+        try { this.mailbox.settle(item.fromKey, item.message.id, permission.mode === "none" ? "contact_ended" : "peer_outdated"); }
+        catch (error) { console.error("Mailbox terminal save failed:", error); }
         continue;
       }
-      const matchesId = entry.targetKey === session.key;
-      const matchesSenderIdentity = Boolean(
-        sessionName
-        && sameScope(entry.fromScopeId, session.scopeId)
-        && entry.from.name?.toLowerCase() === sessionName
-        && sameCwd(entry.from.cwd, session.info.cwd),
-      );
-      const matchesUniqueName = Boolean(
-        uniqueMailboxIdentity
-        && sessionName
-        && !matchesSenderIdentity
-        && entry.target.name?.toLowerCase() === sessionName
-        && sameCwd(entry.target.cwd, session.info.cwd),
-      );
-      if (!matchesId && !matchesUniqueName) {
-        index += 1;
-        continue;
-      }
-      // The only bulk write to one socket: pace it so a large mailbox cannot trip writeMessage's queue cap.
+      const offerKey = item.fromKey + ":" + item.message.id + ":" + session.info.endpointEpoch;
+      if (this.offeredMail.has(offerKey)) continue;
       if (session.socket.writableLength >= MAX_FRAME_BYTES) {
         session.socket.once("drain", () => {
           if (this.sessions.get(session.key) === session) this.flushMailboxForSession(session);
         });
         return;
       }
-
-      this.mailboxMessages.splice(index, 1);
-      const edge = this.askEdges.get(entry.message.id);
-      if (edge?.to === entry.targetKey) {
-        edge.to = session.key;
-      }
-      const deliveredMessage: Message = {
-        ...entry.message,
-        brokerDeliveredAt: Date.now(),
-      };
+      this.offeredMail.add(offerKey);
+      this.messageReceiptRoutes.set(item.message.id, {
+        from: item.fromKey, to: session.key, createdAt: now,
+      });
       writeMessage(session.socket, {
-        type: "message",
-        from: entry.from,
-        message: deliveredMessage,
+        type: "message", from: item.from,
+        message: { ...item.message, brokerReceivedAt: item.queuedAt, brokerDeliveredAt: Date.now() },
       });
-      this.messageReceiptRoutes.set(entry.message.id, {
-        from: entry.fromKey,
-        to: session.key,
-        createdAt: entry.message.brokerReceivedAt ?? entry.queuedAt,
-      });
-      this.updateDeliveryRecord(entry.fromKey, entry.message.id, "socket_delivered");
+      // Keep the payload until the receiver confirms an actual saved native
+      // entry. A dropped socket can reoffer the SAME ID on its next registration.
     }
   }
 
@@ -1942,7 +1908,7 @@ class IntercomBroker {
     this.askEdges.clear();
     this.messageReceiptRoutes.clear();
     this.disconnectedSessions.clear();
-    this.mailboxMessages.length = 0;
+    this.offeredMail.clear();
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
         unlinkSync(LISTEN_TARGET);
