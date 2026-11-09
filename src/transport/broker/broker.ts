@@ -1370,7 +1370,8 @@ class IntercomBroker {
     if (this.mailbox.blocked || this.sessions.get(session.key) !== session) return;
     for (const item of this.mailbox.pending) {
       if (item.targetKey !== session.key || item.targetId !== session.info.id ||
-          item.scope !== (session.scopeId ?? null)) continue;
+          item.scope !== (session.scopeId ?? null) || item.expiresAt <= now) continue;
+      // An expired payload is held if its terminal outcome could not be saved.
       const permission = this.pairApprovals.state(session.scopeId, item.from.id, session.info.id);
       if (permission.mode === "none" || !session.info.durableMailboxV1) {
         try { this.mailbox.settle(item.fromKey, item.message.id, permission.mode === "none" ? "contact_ended" : "peer_outdated"); }
