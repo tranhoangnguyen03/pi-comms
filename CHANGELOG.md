@@ -5,6 +5,7 @@
 - M4-C / F12: accept asynchronous messages to an exact previously approved offline saved session, and save the broker mailbox before returning `queued`. No name, cwd or successor fallback. Ordinary `comms_message` and M3 organizer send share this path; `comms_ask` remains live-only.
 - Persist bounded pending mail and outcome/fingerprint evidence in `comms/mailbox.json`, with checksum and atomic fsync/rename. Use seven-day expiry, 256 messages / 32 MiB of pending mail, and fourteen-day terminal evidence (4,096 records / 4 MiB); reject new work when full, without evicting accepted mail.
 - Keep broker responsibility until the receiver has saved the native Pi arrival and sends `receiver_recorded`; a live `queued` receipt is not a disk receipt. Recheck pair approval and exact session on delivery; same-ID broker offers are deduplicated by native Pi records. Never automatically resend with a new ID.
+- On revoke, never let later reapproval revive an earlier queued message, even if the earlier terminal write failed; hold reapproval until that mail is safely ended. Treat uncertain mailbox writes as unknown, not definitely unsent. Reject offline payloads that cannot fit the later delivery frame and clear stale socket-offer markers on reconnect.
 - Gate the durable mailbox protocol for older brokers/peers, maintain F11 snapshot-before-queue wire order, and preserve broker-upgrade and restart evidence without adding new agent tools or a second inbox.
 
 
