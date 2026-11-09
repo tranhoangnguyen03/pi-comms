@@ -40,7 +40,7 @@ function validItem(x: any): x is MailItem {
 function validEvidence(x: any): x is MailEvidence {
   return x && typeof x === 'object' && !Array.isArray(x) &&
     typeof x.fromKey === 'string' && isSessionId(x.id) && isSessionId(x.targetId) &&
-    typeof x.fingerprint === 'string' &&
+    typeof x.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(x.fingerprint) &&
     ['receiver_recorded','expired','contact_ended','peer_outdated','cancelled'].includes(x.outcome) &&
     Number.isSafeInteger(x.at) && x.at > 0;
 }
