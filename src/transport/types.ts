@@ -19,7 +19,7 @@ export type DeliveryState = "socket_delivered" | "queued" | "receiver_recorded" 
 export type BrokerMailEvidence = {
   id: string;
   state: "queued" | "receiver_recorded" | "expired" | "contact_ended" | "peer_outdated" | "cancelled" | "unknown";
-  targetId?: string; at?: number; fingerprint?: string;
+  targetId?: string; at?: number; fingerprint?: string; reason?: string;
 };
 
 export interface DeliveryDetails {
