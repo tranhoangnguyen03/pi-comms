@@ -5,7 +5,7 @@ import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
 import { getIntercomScopeId } from "../config.ts";
-import { PAIR_APPROVAL_FEATURE, type PairStatus, type PairMode, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
+import { PAIR_APPROVAL_FEATURE, type PairStatus, type PairMode, type BrokerRuntimeInfo, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -89,6 +89,7 @@ export class IntercomClient extends EventEmitter {
   private socket: net.Socket | null = null;
   private _sessionId: string | null = null;
   private _features = new Set<string>();
+  private _brokerInfo: BrokerRuntimeInfo = {};
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private pendingPairLists = new Map<string, { resolve: (items: PairStatus[]) => void; reject: (e: Error) => void }>();
@@ -120,6 +121,10 @@ export class IntercomClient extends EventEmitter {
 
   supportsFeature(feature: string): boolean {
     return this._features.has(feature);
+  }
+
+  get brokerInfo(): Readonly<BrokerRuntimeInfo> {
+    return this._brokerInfo;
   }
 
   isConnected(): boolean {
@@ -253,6 +258,7 @@ export class IntercomClient extends EventEmitter {
         }
         this._sessionId = null;
         this._features.clear();
+        this._brokerInfo = {};
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -362,13 +368,26 @@ export class IntercomClient extends EventEmitter {
         ) {
           throw new Error("Invalid registered features");
         }
+        if (
+          (brokerMessage.packageVersion !== undefined && typeof brokerMessage.packageVersion !== "string")
+          || (brokerMessage.pid !== undefined && (!Number.isSafeInteger(brokerMessage.pid) || Number(brokerMessage.pid) <= 0))
+          || (brokerMessage.startedAt !== undefined && (!Number.isSafeInteger(brokerMessage.startedAt) || Number(brokerMessage.startedAt) <= 0))
+        ) {
+          throw new Error("Invalid registered broker metadata");
+        }
 
         this._sessionId = brokerMessage.sessionId;
         this._features = new Set((brokerMessage.features as string[] | undefined) ?? []);
+        this._brokerInfo = {
+          ...(typeof brokerMessage.packageVersion === "string" ? { packageVersion: brokerMessage.packageVersion } : {}),
+          ...(typeof brokerMessage.pid === "number" ? { pid: brokerMessage.pid } : {}),
+          ...(typeof brokerMessage.startedAt === "number" ? { startedAt: brokerMessage.startedAt } : {}),
+        };
         const registered: BrokerMessage = {
           type: "registered",
           sessionId: brokerMessage.sessionId,
           ...(this._features.size > 0 ? { features: [...this._features] } : {}),
+          ...this._brokerInfo,
         };
         this.emit("broker_message", registered);
         this.emit("_registered", registered);

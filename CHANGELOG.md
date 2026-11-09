@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.11] - 2026-11-09
+
+- Automatically retire and replace an older running `pi-comms` broker under `BROKER_SPAWN_LOCK` when a connecting session has a newer broker artifact on disk (#37). Verify that the target PID runs `transport/broker/broker.(js|ts)` for the current comms directory before sending `SIGTERM`—a stale or unverified `broker.pid` is never terminated.
+- Stamp the package version into built bundles and include `{ packageVersion, pid, startedAt }` on broker `health_ok` and `registered` responses, surfaced in `/comms status`. Raise the broker's unregistered-connection cap to `2 × MAX_SESSIONS` (`256`) so simultaneous health probes and registrations during a broker-upgrade reconnect burst do not evict each other.
+- Keep version replacement monotonic (`runningBrokerVersion < diskBrokerVersion`, including SemVer prerelease precedence) and protect `BROKER_SPAWN_LOCK` with per-acquisition tokens, live-owner preservation, and atomic stale-lock reclamation when a starter exits early.
+- Document broker-replacement interruption limits: remembered pair approvals in `pair-approvals.json` survive, while in-memory session-only approvals, active `comms_ask` waits, and any RAM-only mail in a pre-F12 broker end on replacement. Record the F12 automatic-upgrade offline-mail survival regression in the M4 contract.
+- Include broker version (`unreported (pre-0.1.11)` when absent), start/PID-file timestamp, and verified-versus-unverified PID guidance in `BROKER_OUTDATED` and `/comms status` when a pre-F11 broker cannot be replaced automatically, without advising users or agents to blindly kill an unverified PID.
+
 ## [0.1.10] - 2026-11-08
 
 - M4-B / F11: one owner approval for an **unordered exact A–B pair**, valid in either direction. **Allow this session** (default) lasts until either Pi session reloads or is replaced, or the broker restarts; a dropped connection that reconnects in the same Pi session keeps it. **Allow & remember** survives restart of both original sessions and the broker.

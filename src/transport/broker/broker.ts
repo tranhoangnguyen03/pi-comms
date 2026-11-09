@@ -7,6 +7,7 @@ import { isMessage, isMessageReceipt, isSessionId, isSessionRegistration, messag
 import {
   ensureIntercomRuntimeDir,
   getBrokerListenTarget,
+  getBrokerPidFilePath,
   getBrokerPortFilePath,
   getIntercomDirPath,
   INTERCOM_DIR_MODE,
@@ -22,16 +23,19 @@ import { PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSI
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { PairApprovalStore } from "./pair-approvals.ts";
-import { assertNoLiveBroker } from "./runtime-claim.ts";
+import { assertNoLiveBroker, INTERCOM_PACKAGE_VERSION, isProcessAlive } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
 const LISTEN_TARGET = getBrokerListenTarget();
-const PID_PATH = join(INTERCOM_DIR, "broker.pid");
+const PID_PATH = getBrokerPidFilePath(INTERCOM_DIR);
 const PORT_PATH = getBrokerPortFilePath(INTERCOM_DIR);
 const PENDING_ASKS_DIR = join(INTERCOM_DIR, "pending-asks");
 const BROKER_STATE_ID = randomUUID();
+const BROKER_STARTED_AT = Date.now();
 const MAX_SESSIONS = 128;
-const MAX_UNREGISTERED_CONNECTIONS = 32;
+// During a broker upgrade, up to MAX_SESSIONS connected clients can probe health
+// and re-register concurrently within the 1s reconnect window.
+const MAX_UNREGISTERED_CONNECTIONS = MAX_SESSIONS * 2;
 const REGISTRATION_TIMEOUT_MS = 1000;
 const RATE_LIMIT_CAPACITY = 240;
 const RATE_LIMIT_REFILL_PER_SECOND = 120;
@@ -170,18 +174,6 @@ function normalizeScopeId(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
-}
-
-// Clients share this host, so a signal-0 probe tells whether a claimed pid still runs.
-// EPERM means it exists under another user.
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return isRecord(error) && error.code === "EPERM";
-  }
 }
 
 function sameScope(a: string | undefined, b: string | undefined): boolean {
@@ -511,6 +503,9 @@ class IntercomBroker {
         requestId: clientMessage.requestId,
         protocol: INTERCOM_PROTOCOL_NAME,
         version: INTERCOM_PROTOCOL_VERSION,
+        packageVersion: INTERCOM_PACKAGE_VERSION,
+        pid: process.pid,
+        startedAt: BROKER_STARTED_AT,
       });
       return;
     }
@@ -631,6 +626,9 @@ class IntercomBroker {
           type: "registered",
           sessionId: id,
           features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PAIR_APPROVAL_FEATURE],
+          packageVersion: INTERCOM_PACKAGE_VERSION,
+          pid: process.pid,
+          startedAt: BROKER_STARTED_AT,
         });
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 

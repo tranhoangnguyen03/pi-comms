@@ -62,6 +62,10 @@ export function getBrokerPortFilePath(intercomDir: string = getIntercomDirPath()
   return join(intercomDir, "broker.port.json");
 }
 
+export function getBrokerPidFilePath(intercomDir: string = getIntercomDirPath()): string {
+  return join(intercomDir, "broker.pid");
+}
+
 export function getBrokerSocketPath(
   platform: NodeJS.Platform = process.platform,
   agentDir: string = getAgentDirPath(),

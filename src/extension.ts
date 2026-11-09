@@ -10,19 +10,53 @@ import { sendExactSession } from './transport/send.ts';
 import { connect } from './transport/start.ts';
 import { IntercomClient } from './transport/broker/client.ts';
 import { randomUUID } from 'node:crypto';
-import { PAIR_APPROVAL_FEATURE, type SessionInfo, type PairStatus, type Message as WireMessage } from './transport/types.ts';
+import { PAIR_APPROVAL_FEATURE, type BrokerRuntimeInfo, type SessionInfo, type PairStatus, type Message as WireMessage } from './transport/types.ts';
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
 import { approvalPrompt, contactDecisionTitle, explicitApprovalTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CHOICES, CONTACT_GRANT_CHOICES, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
-import { getAgentDirPath, getBrokerConnectTarget } from './transport/broker/paths.ts';
+import { getAgentDirPath, getBrokerConnectTarget, getBrokerPidFilePath, getIntercomDirPath } from './transport/broker/paths.ts';
+import { INTERCOM_PACKAGE_VERSION, isBrokerVersionOlder, readBrokerArtifactVersion, readBrokerPidMetadata, verifyBrokerProcess } from './transport/broker/runtime-claim.ts';
 import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
 const RESET = 'One approval covers both directions of an exact session pair. "This session" lasts until either Pi session reloads or the broker restarts; "remember" survives restarts until either side runs /comms revoke. Native Pi records retain communication history and Pause. No offline mail or automatic resend.';
 const HELP = 'Stop ends the current run; later peers may wake it. Pause holds peer admission/wakes, not current work or already-posted content. /comms approve | revoke | pause | resume | status | inspect | requests';
+const errorCode = (error: unknown, fallback = 'TARGET_UNAVAILABLE') =>
+  (error instanceof Error ? error.message : String(error)).split(':')[0]?.trim() || fallback;
+
+export function formatBrokerOutdatedError(
+  info: BrokerRuntimeInfo | undefined,
+  sessionVersion: string = INTERCOM_PACKAGE_VERSION,
+  diskVersion?: string,
+  intercomDir: string = getIntercomDirPath(),
+): string {
+  const pidPath = getBrokerPidFilePath(intercomDir);
+  const fallback = readBrokerPidMetadata(pidPath);
+  const candidatePid = info?.pid !== undefined && (fallback.pid === undefined || info.pid === fallback.pid)
+    ? info.pid
+    : info?.pid === undefined
+      ? fallback.pid
+      : undefined;
+  const verifiedPid = candidatePid !== undefined && verifyBrokerProcess(candidatePid, intercomDir) ? candidatePid : undefined;
+  const versionText = info?.packageVersion ? `v${info.packageVersion}` : 'version unreported (pre-0.1.11)';
+  const startedText = info?.startedAt
+    ? `started ${new Date(info.startedAt).toISOString()}`
+    : fallback.mtimeMs
+      ? `pid-file timestamp ${new Date(fallback.mtimeMs).toISOString()}`
+      : 'start time unknown';
+  if (verifiedPid !== undefined) {
+    if (diskVersion && isBrokerVersionOlder(diskVersion, sessionVersion)) {
+      return `BROKER_OUTDATED: running broker (pid ${verifiedPid}, ${versionText}, ${startedText}) and on-disk broker (v${diskVersion}) are older than this session (v${sessionVersion}); ask the user to update the installed pi-comms package and then stop broker pid ${verifiedPid} (kill ${verifiedPid}) so sessions reconnect to the updated broker`;
+    }
+    return `BROKER_OUTDATED: running broker (pid ${verifiedPid}, ${versionText}, ${startedText}) is older than this session (v${sessionVersion}); ask the user to stop broker pid ${verifiedPid} (kill ${verifiedPid}) so connected sessions reconnect and start the${diskVersion ? ` v${diskVersion}` : ' current'} broker`;
+  }
+  const unverifiedText = fallback.pid !== undefined ? `unverified broker.pid ${fallback.pid}` : `no verified broker.pid at ${pidPath}`;
+  return `BROKER_OUTDATED: running broker (${unverifiedText}, ${versionText}, ${startedText}) is older than this session (v${sessionVersion}); broker.pid could not be verified as this pi-comms broker, so do not kill it blindly — ask the user to inspect the process holding ${JSON.stringify(getBrokerConnectTarget())} or reload older Pi sessions`;
+}
+
 const recovery: Record<string, string> = {
   CONTACT_NOT_APPROVED: 'Contact is not approved. Nothing was sent. Do not retry in this turn; if the contact is still needed, tell the user. You may ask again after their next message, or they can use /comms approve.',
   CONTACT_APPROVAL_REQUIRED: 'No message was sent. Contact needs a human confirmation UI; open /comms approve in an interactive session.',
   AMBIGUOUS_PEER: 'Choose one of the listed native IDs; no message was sent. Exact names must be unique.',
-  BROKER_OUTDATED: 'Other Pi sessions still run an older pi-comms broker. Nothing was sent. Ask the user to reload or close those sessions; the old broker exits when they leave and this session reconnects automatically.',
+  BROKER_OUTDATED: 'The shared pi-comms broker process predates shared pair approval. Nothing was sent. Restarting this session alone will not replace a broker held open by other sessions. Ask the user to follow the broker details in the error message above (stop a verified broker PID so connected sessions reconnect and start the updated broker, or inspect the endpoint holder when broker.pid is unverified).',
   PEER_OUTDATED: 'The colleague runs an older pi-comms without shared pair approval. Nothing was sent. Ask the user to update pi-comms in that session and reload it, then try again.',
   E_PAIR_NOT_APPROVED: 'The contact approval ended before delivery. Nothing was delivered. Ask again only if the user still wants this contact.',
   PAIR_SAVE_FAILED: 'The broker could not save the remembered approval; nothing changed. Choose "Allow this session", or free disk space / fix permissions in the Pi agent directory and try again.',
@@ -48,6 +82,7 @@ export default function comms(pi: ExtensionAPI) {
   let wakeReserved = false;
   let connecting: Promise<void> | undefined;
   let connectionError: string | undefined;
+  let connectionErrorDetail: string | undefined;
   let approvalDialog = false;
   let stopped = true;
   let nextReconnect = 0;
@@ -236,7 +271,7 @@ export default function comms(pi: ExtensionAPI) {
     connecting = (async () => {
       const candidate = new IntercomClient();
       candidate.on('error', () => undefined);
-      candidate.on('disconnected', () => { if (client === candidate) { endAsks('disconnected'); connectionError = 'offline; reconnecting'; nextReconnect = Date.now() + 1000; status(); } });
+      candidate.on('disconnected', () => { if (client === candidate) { endAsks('disconnected'); connectionError = 'offline; reconnecting'; connectionErrorDetail = undefined; nextReconnect = Date.now() + 1000; status(); } });
       candidate.on('presence_update', (peer: SessionInfo) => { if (runtime === current && !stopped) peerNames.set(peer.id, peer.name ?? peer.id); });
       candidate.on('pair_update', (state: PairStatus) => {
         if (runtime !== current || stopped) return;
@@ -272,20 +307,25 @@ export default function comms(pi: ExtensionAPI) {
         } catch (error) { context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning'); status(); }
       });
       try {
-        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, runtimeId }, candidate, new URL('./transport/broker/broker.js', import.meta.url));
-        if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE)) throw Error('BROKER_OUTDATED');
+        const brokerURL = new URL('./transport/broker/broker.js', import.meta.url);
+        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, runtimeId }, candidate, brokerURL);
+        if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE)) {
+          throw Error(formatBrokerOutdatedError(candidate.brokerInfo, INTERCOM_PACKAGE_VERSION, readBrokerArtifactVersion(brokerURL)));
+        }
         // The pair_snapshot handler replaces the cache: approvals may have ended while offline.
         await candidate.listPairs();
         if (runtime !== current || stopped) { await candidate.disconnect(); return; }
         client = candidate; candidate.updatePresence({ name: context.sessionManager.getSessionName() ?? current.self, status: active ? 'working' : 'idle' }); lastPresenceSentAt = Date.now();
-        connectionError = undefined; reconnectDelay = 1000; status();
+        connectionError = undefined; connectionErrorDetail = undefined; reconnectDelay = 1000; status();
       } catch (error) {
         await candidate.disconnect();
         if (runtime !== current || stopped) throw new Error('CONTEXT_LOST');
         const reason = error instanceof Error ? error.message : String(error);
-        connectionError = (error as { code?: string }).code === 'E_SESSION_HELD' ? 'IDENTITY_CONFLICT' : reason === 'BROKER_OUTDATED' ? reason : 'TARGET_UNAVAILABLE';
+        const isOutdated = errorCode(error) === 'BROKER_OUTDATED';
+        connectionError = (error as { code?: string }).code === 'E_SESSION_HELD' ? 'IDENTITY_CONFLICT' : isOutdated ? 'BROKER_OUTDATED' : 'TARGET_UNAVAILABLE';
+        connectionErrorDetail = isOutdated ? reason : undefined;
         nextReconnect = Date.now() + reconnectDelay; reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
-        status(); throw new Error(connectionError);
+        status(); throw new Error(isOutdated ? reason : connectionError);
       }
     })().finally(() => { if (runtime === current) connecting = undefined; });
     return connecting;
@@ -333,7 +373,7 @@ export default function comms(pi: ExtensionAPI) {
     const old = client; client = undefined; runtime = undefined; records = undefined; asks = undefined; ctx = undefined; connecting = undefined;
     active = false; wakeReserved = false; approvalDialog = false; lastPresenceSentAt = 0;
     askStops.clear(); contactStops.clear(); declined.clear(); localPairDecisions.clear(); prompted.clear(); peerNames.clear(); dialogTail = Promise.resolve();
-    lastWidget = null; lastStatus = undefined; connectionError = undefined; nextReconnect = 0; reconnectDelay = 1000;
+    lastWidget = null; lastStatus = undefined; connectionError = undefined; connectionErrorDetail = undefined; nextReconnect = 0; reconnectDelay = 1000;
     await old?.disconnect();
   }
   pi.on('session_start', async (_event, context) => {
@@ -349,7 +389,7 @@ export default function comms(pi: ExtensionAPI) {
     const current = new Runtime(self, async (id, envelope) => {
       if (runtime !== current || stopped) return { outcome: 'rejected', code: 'CONTEXT_LOST' };
       try { await ensureConnection(); }
-      catch (error) { return { outcome: 'rejected', code: error instanceof Error ? error.message : 'TARGET_UNAVAILABLE' }; }
+      catch (error) { return { outcome: 'rejected', code: errorCode(error) }; }
       if (runtime !== current || stopped || !client) return { outcome: 'rejected', code: 'CONTEXT_LOST' };
       return sendExactSession(client, current.isApproved, id, envelope);
     }, log.append);
@@ -550,7 +590,13 @@ export default function comms(pi: ExtensionAPI) {
       catch (error) { commandCtx.ui.notify(String(error), 'info'); }
       return;
     }
-    commandCtx.ui.notify(`${HELP}\n${runtime.pendingCounts().waiting} waiting · ${runtime.pendingCounts().uncertain} uncertain · ${hold() ?? 'ready'}\n${runtime.known().map(p => `${name(p.id)} · ${p.id} · ${p.context} · ${p.remembered ? 'remembered until revoked' : 'this runtime only'}`).join('\n')}\n${RESET}\nRecord storage: ${records?.info().state ?? 'volatile'}${runtime.holdReason() ? ` · ${runtime.holdReason()}` : ''}\nBroker: ${JSON.stringify(getBrokerConnectTarget())}`, 'info');
+    const connectedInfo = client?.isConnected() ? client.brokerInfo : undefined;
+    const brokerDetails = connectedInfo ? [
+      connectedInfo.pid ? `pid ${connectedInfo.pid}` : '',
+      connectedInfo.packageVersion ? `v${connectedInfo.packageVersion}` : '',
+      connectedInfo.startedAt ? `started ${new Date(connectedInfo.startedAt).toISOString()}` : '',
+    ].filter(Boolean).join(' · ') : '';
+    commandCtx.ui.notify(`${HELP}\n${runtime.pendingCounts().waiting} waiting · ${runtime.pendingCounts().uncertain} uncertain · ${runtime.holdReason() ? 'recovery hold' : connectionError ?? hold() ?? 'ready'}\n${runtime.known().map(p => `${name(p.id)} · ${p.id} · ${p.context} · ${p.remembered ? 'remembered until revoked' : 'this runtime only'}`).join('\n')}\n${RESET}\nRecord storage: ${records?.info().state ?? 'volatile'}${runtime.holdReason() ? ` · ${runtime.holdReason()}` : ''}\nBroker: ${JSON.stringify(getBrokerConnectTarget())}${brokerDetails ? ` (${brokerDetails})` : ''}${connectionErrorDetail ? `\n${connectionErrorDetail}` : ''}`, 'info');
   } });
   const result = (data: unknown, error?: { code: string; message: string; nextAction: string }) => {
     const body = { ok: !error, ...(error ? { error, ...(data ? { data } : {}) } : { data }), observedAt: new Date().toISOString() };
@@ -566,7 +612,7 @@ export default function comms(pi: ExtensionAPI) {
       }
       return output;
     } catch (error) {
-      status(); const message = error instanceof Error ? error.message : String(error); const code = message.split(':')[0];
+      status(); const message = error instanceof Error ? error.message : String(error); const code = errorCode(error);
       return result(undefined, { code, message, nextAction: recovery[code] ?? 'Inspect current runtime status with /comms; do not infer delivery or retry an uncertain send.' });
     }
   };
@@ -634,14 +680,14 @@ export default function comms(pi: ExtensionAPI) {
             const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds); });
             const dispatched = sending.then(sent => { pending.sent(sent.message.id, sent.state, sent.code); if (runtime === current) admitAsks(); });
             if (waiting) { void dispatched.catch(() => pending.end('unknown', call)); await waiting; } else await dispatched;
-          } catch (error) { item.outcome = pending.ended(call) ?? 'not-sent'; item.code = error instanceof Error ? error.message : String(error); }
+          } catch (error) { item.outcome = pending.ended(call) ?? 'not-sent'; item.code = errorCode(error); }
         }));
         return pending.project(call, seconds);
       } finally { abort.removeEventListener('abort', interrupted); if (askStops.get(call) === stop) askStops.delete(call); }
     }), renderResult });
   const admissionFailure = (error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    const code = message.split(':')[0];
+    const code = errorCode(error, 'PERSISTENCE_FAILED');
     status();
     return result(undefined, { code, message, nextAction: recovery[code] ?? recovery.PERSISTENCE_FAILED });
   };

@@ -8,6 +8,12 @@ export interface PairStatus { peer: string; mode: PairMode; revision: number; co
 /** Broker refused a register because another live process holds the session id. */
 export const SESSION_HELD_ERROR_CODE = "E_SESSION_HELD";
 
+export interface BrokerRuntimeInfo {
+  packageVersion?: string;
+  pid?: number;
+  startedAt?: number;
+}
+
 export type DeliveryState = "socket_delivered" | "queued" | "failed" | "unknown";
 
 export interface DeliveryDetails {
@@ -188,7 +194,7 @@ export type ClientMessage =
     };
 
 export type BrokerMessage =
-  | { type: "registered"; sessionId: string; features?: string[] }
+  | ({ type: "registered"; sessionId: string; features?: string[] } & BrokerRuntimeInfo)
   | { type: "pair_list_result"; requestId: string; items?: PairStatus[]; error?: string }
   | { type: "pair_decision_result"; requestId: string; status?: PairStatus; error?: string }
   | { type: "pair_update"; status: PairStatus }
