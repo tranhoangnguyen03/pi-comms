@@ -1566,3 +1566,51 @@ test('Issue #37 native extension: unreplaceable outdated broker preserves unveri
     await a?.close();
   }
 });
+
+
+test('F12 installed Pi: remembered exact offline mail survives broker restart and stays held by saved Pause', async () => {
+  const a = await participant('f12-installed-sender'), b = await participant('f12-installed-receiver');
+  try {
+    await a.runtime.session.prompt('Initialize saved sender');
+    await b.runtime.session.prompt('Initialize saved receiver');
+    const originalId = b.id(), originalFile = b.runtime.session.sessionFile!;
+    assert.ok(originalFile, 'receiver has a real saved session file');
+    a.confirm(true); a.remember(true);
+    const warm = data(await a.tool('comms_message', { to: originalId, subject: 'Warm pair', text: 'F12_WARM' }));
+    assert.equal(warm.ok, true);
+    await waitFor(() => b.observed.some(messages => text(messages).includes('F12_WARM')));
+    await b.command('pause');
+    const modelCallsBefore = b.observed.length;
+    await b.runtime.newSession();
+    assert.notEqual(b.id(), originalId);
+    const sent = data(await a.tool('comms_message', {
+      to: originalId, subject: 'Offline review result', text: 'F12_EXACT_SAVED_MAIL',
+    }));
+    assert.equal(sent.ok, true, JSON.stringify(sent.error));
+    assert.equal(sent.data.delivery, 'queued');
+    const mid = sent.data.message.id;
+    assert.equal(b.observed.length, modelCallsBefore, 'replacement session does not receive old exact-ID mail');
+
+    const brokerPid = Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8'));
+    process.kill(brokerPid, 'SIGTERM');
+    await b.runtime.switchSession(originalFile);
+    assert.equal(b.id(), originalId, 'returns to original saved session');
+    await waitFor(async () => {
+      const item = data(await b.tool('comms_inspect', { message: mid }));
+      return item.ok && item.data.record.state === 'saved';
+    });
+    const incoming = data(await b.tool('comms_inspect', { message: mid })).data;
+    assert.equal(incoming.intake, 'waiting', 'saved Pause holds native model admission');
+    assert.equal(b.observed.length, modelCallsBefore, 'no model wake while paused');
+    await waitFor(async () => {
+      const item = data(await a.tool('comms_inspect', { message: mid }));
+      return item.ok && item.data.brokerDelivery?.state === 'receiver_recorded';
+    });
+    await b.command('resume');
+    await waitFor(() => b.observed.some(messages => text(messages).includes('F12_EXACT_SAVED_MAIL')));
+    const inspected = data(await b.tool('comms_inspect', { message: mid })).data;
+    assert.ok(inspected.facts.some((f: any) => f.kind === 'saved'), 'native save is distinct from model posting');
+  } finally {
+    await b.close(); await a.close();
+  }
+});
