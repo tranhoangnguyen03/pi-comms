@@ -924,12 +924,12 @@ class IntercomBroker {
             try {
               if (this.mailbox.settle(mail.fromKey, mail.message.id, "receiver_recorded")) {
                 this.offeredMail.delete(mail.fromKey + ":" + mail.message.id + ":" + receiver.info.endpointEpoch);
-                const sender = this.sessions.get(mail.fromKey);
-                if (sender) writeMessage(sender.socket, { type: "message_receipt", from: receiver.info, receipt: clientMessage.receipt });
               }
             } catch (error) { console.error("Durable receipt could not be saved:", error); }
           }
-          break;
+          // Continue through the original live-receipt route too. A sender
+          // waiting for a receipt must not time out merely because a saved Pi
+          // receiver used the new receiver_recorded status instead of queued.
         }
         const route = this.messageReceiptRoutes.get(clientMessage.receipt.messageId);
         const receiver = this.sessions.get(currentKey);
