@@ -305,6 +305,10 @@ test('F12: a revoked pair cannot revive queued mail when terminal storage fails 
     renameSync(mail, backup);
     mkdirSync(mail);
     assert.equal((await a.decidePair(bId, 'none', '')).mode, 'none');
+    const oldReplay = await a.sendExact(bId, undefined, { messageId: mid, text: 'do not revive this' }, 'async');
+    assert.equal(oldReplay.delivered, false);
+    assert.equal(oldReplay.code, 'E_PAIR_NOT_APPROVED',
+      'a same-ID retry cannot pretend old queued mail is still authorized after revocation');
     b = await peer(bId, 'B returns');
     const arrivals: string[] = [];
     b.on('message', (_: unknown, msg: { id: string }) => arrivals.push(msg.id));
