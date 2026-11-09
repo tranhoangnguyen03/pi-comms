@@ -23,7 +23,7 @@ import { PAIR_APPROVAL_FEATURE, DURABLE_MAILBOX_FEATURE, EXACT_SEND_FEATURE, EXT
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { PairApprovalStore } from "./pair-approvals.ts";
-import { DurableMailbox, MAIL_TTL_MS, type MailItem } from "./mailbox-store.ts";
+import { DurableMailbox, MAIL_TTL_MS, mailFingerprint, type MailItem } from "./mailbox-store.ts";
 import { assertNoLiveBroker, INTERCOM_PACKAGE_VERSION, isProcessAlive } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
@@ -1202,7 +1202,7 @@ class IntercomBroker {
       from: { ...from.info }, fromKey: from.key, targetKey: scopedSessionKey(from.scopeId, targetId),
       targetId, scope: from.scopeId ?? null, message: { ...message },
       queuedAt: brokerReceivedAt, expiresAt: brokerReceivedAt + MAIL_TTL_MS,
-      fingerprint: messageDeliveryFingerprint(message, targetId),
+      fingerprint: mailFingerprint(message, targetId),
     };
     this.mailbox.enqueue(item); // atomic commit happens before "queued" is acknowledged
   }
@@ -1291,7 +1291,7 @@ class IntercomBroker {
     const key = this.deliveryRecordKey(fromSessionId, messageId);
     const persisted = this.mailbox.lookup(fromSessionId, messageId);
     if (persisted) {
-      if (persisted.fingerprint !== fingerprint) {
+      if (persisted.fingerprint !== createHash('sha256').update(fingerprint).digest('hex')) {
         this.writeDeliveryFailure(socket, messageId, "Message ID reused with different content", "E_MESSAGE_ID_REUSE");
       } else if ("message" in persisted) {
         this.writeDeliverySuccess(socket, messageId, "queued");
