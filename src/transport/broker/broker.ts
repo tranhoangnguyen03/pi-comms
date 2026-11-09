@@ -637,7 +637,10 @@ class IntercomBroker {
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
         this.recomputeNamespaceOwners();
-        // Mail is offered after the client applies the pair snapshot in wire order.
+        // A capable recipient receives mail only after its pair snapshot.
+        // An older recipient cannot receive the new mailbox frames at all;
+        // settle incompatible pending items immediately on registration.
+        if (!connectedSession.info.durableMailboxV1) this.flushMailboxForSession(connectedSession);
 
         if (extensions) {
           for (const ext of extensions) {
@@ -1125,7 +1128,7 @@ class IntercomBroker {
           throw Error("Invalid pair list request");
         }
         writeMessage(socket, { type: "pair_list_result", requestId: clientMessage.requestId, items: this.pairApprovals.list(session.scopeId, session.info.id) });
-        if (session.info.durableMailboxV1) this.flushMailboxForSession(session);
+        this.flushMailboxForSession(session);
         break;
       }
 
