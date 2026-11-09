@@ -1161,7 +1161,7 @@ class IntercomBroker {
         } catch (error) {
           // Only this decision fails; earlier approvals and other pairs are unchanged.
           const text = error instanceof Error ? error.message : String(error);
-          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: /^[A-Z_]+:/.test(text) ? text : `PAIR_SAVE_FAILED: ${text}` });
+          writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: text.startsWith("MAILBOX_UNREADABLE:") || text.startsWith("PAIR_SAVE_FAILED:") ? text : `PAIR_SAVE_FAILED: ${text}` });
         }
         break;
       }
