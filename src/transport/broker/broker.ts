@@ -1114,6 +1114,10 @@ class IntercomBroker {
         const items = clientMessage.ids.map(id => {
           const item = this.mailbox.lookup(currentKey!, id);
           if (!item) return { id, state: "unknown" as const, ...(this.mailbox.blocked ? { reason: "broker mailbox unreadable; delivery evidence cannot be checked" } : {}) };
+          if ("message" in item && item.expiresAt <= Date.now()) {
+            return { id, state: "unknown" as const, reason: "mail is past expiry but its terminal outcome was not saved",
+              targetId: item.targetId, at: item.queuedAt };
+          }
           return { id, state: ("message" in item ? "queued" : item.outcome),
             targetId: item.targetId, at: "message" in item ? item.queuedAt : item.at,
             fingerprint: item.fingerprint };
