@@ -171,7 +171,9 @@ test('F12 real broker: committed expiry remains visible after restart', async ()
     assert.equal((await a.mailboxEvidence([mid]))[0].state, 'expired');
     const duplicate = await a.sendExact(targetId, undefined, { messageId: mid, text: 'expired body' }, 'async');
     assert.equal(duplicate.delivered, false, 'expired ID must not be re-accepted');
-    assert.equal(duplicate.code, 'E_MESSAGE_ID_REUSE', 'different fingerprint is not replay');
+    assert.equal(duplicate.code, 'E_DELIVERY_EXPIRED', 'same content keeps the saved terminal outcome');
+    const changed = await a.sendExact(targetId, undefined, { messageId: mid, text: 'changed expired body' }, 'async');
+    assert.equal(changed.code, 'E_MESSAGE_ID_REUSE', 'changed content cannot reuse an expired ID');
   } finally {
     await a?.disconnect().catch(() => undefined); await stop(broker);
   }
