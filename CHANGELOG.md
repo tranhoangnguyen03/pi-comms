@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.12] - 2026-11-09
+
+- M4-C / F12: accept asynchronous messages to an exact previously approved offline saved session, and save the broker mailbox before returning `queued`. No name, cwd or successor fallback. Ordinary `comms_message` and M3 organizer send share this path; `comms_ask` remains live-only.
+- Persist bounded pending mail and outcome/fingerprint evidence in `comms/mailbox.json`, with checksum and atomic fsync/rename. Use seven-day expiry, 256 messages / 32 MiB of pending mail, and fourteen-day terminal evidence (4,096 records / 4 MiB); reject new work when full, without evicting accepted mail.
+- Keep broker responsibility until the receiver has saved the native Pi arrival and sends `receiver_recorded`; a live `queued` receipt is not a disk receipt. Recheck pair approval and exact session on delivery; same-ID broker offers are deduplicated by native Pi records. Never automatically resend with a new ID.
+- Gate the durable mailbox protocol for older brokers/peers, maintain F11 snapshot-before-queue wire order, and preserve broker-upgrade and restart evidence without adding new agent tools or a second inbox.
+
+
 ## [0.1.11] - 2026-11-09
 
 - Automatically retire and replace an older running `pi-comms` broker under `BROKER_SPAWN_LOCK` when a connecting session has a newer broker artifact on disk (#37). Verify that the target PID runs `transport/broker/broker.(js|ts)` for the current comms directory before sending `SIGTERM`—a stale or unverified `broker.pid` is never terminated.
