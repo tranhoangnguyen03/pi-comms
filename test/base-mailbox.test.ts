@@ -388,3 +388,32 @@ test('F12: uncertain mailbox filesystem write never reports a definite unsent ou
     await stop(broker);
   }
 });
+
+test('F12: unknown offline peer version after broker restart ends as peer_outdated on old peer return', async () => {
+  const aId = randomUUID(), bId = randomUUID(), mid = randomUUID();
+  let broker: ChildProcess | undefined;
+  let a: InstanceType<typeof IntercomClient> | undefined, b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await start(); a = await peer(aId, 'F12 sender'); b = await peer(bId, 'Older F11 peer', false);
+    await a.decidePair(bId, 'remembered', 'An existing F11 pair');
+    await b.disconnect(); b = undefined;
+    await a.disconnect(); a = undefined;
+    await stop(broker); broker = await start();
+    a = await peer(aId, 'F12 sender after broker restart');
+    // The broker knows the saved pair but cannot truthfully know the offline
+    // receiver's old version after restarting without a durable peer registry.
+    const queued = await a.sendExact(bId, undefined, { messageId: mid, text: 'version unknown until receiver returns' }, 'async');
+    assert.equal(queued.delivery, 'queued', 'queued proves broker persistence, not peer compatibility');
+    const arrivals: string[] = [];
+    b = new IntercomClient(); b.on('error', () => undefined);
+    b.on('message', (_: unknown, message: { id: string }) => arrivals.push(message.id));
+    await b.connect(reg('Older F11 peer returned', false), bId);
+    await b.listPairs();
+    await waitFor(async () => (await a!.mailboxEvidence([mid]))[0].state === 'peer_outdated',
+      'incompatible recipient must become an explicit terminal outcome');
+    assert.deepEqual(arrivals, [], 'old peer never receives a downgraded F12 payload');
+  } finally {
+    await Promise.all([a,b].filter(Boolean).map(x => x!.disconnect().catch(() => undefined)));
+    await stop(broker);
+  }
+});
