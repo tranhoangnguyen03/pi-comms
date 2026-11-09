@@ -129,7 +129,10 @@ test('F12: bounded queue rejects instead of evicting; expiry, identity and corru
   const corrupt = new DurableMailbox(corruptDir);
   assert.match(corrupt.blocked ?? '', /MAILBOX_UNREADABLE/);
   assert.throws(() => corrupt.enqueue(item(randomUUID())), /MAILBOX_UNREADABLE/);
-  assert.ok(readdirSync(corruptDir).some(name => name.startsWith('mailbox.json.unreadable-')));
+  assert.equal(readFileSync(join(corruptDir, 'mailbox.json'), 'utf8'), '{broken',
+    'corrupt acknowledged-mail state stays at the canonical path, not silently reset');
+  assert.match(new DurableMailbox(corruptDir).blocked ?? '', /MAILBOX_UNREADABLE/,
+    'a second broker process must not accept new mail after the corrupt first startup');
   const obsoleteDir = join(root, 'old-format'); mkdirSync(obsoleteDir, { recursive: true });
   writeFileSync(join(obsoleteDir, 'mailbox.json'), JSON.stringify({ formatVersion: 999, pending: [], terminal: [], sha256: 'old' }));
   assert.match(new DurableMailbox(obsoleteDir).blocked ?? '', /MAILBOX_UNREADABLE/, 'unknown disk versions cannot accept new mail');
