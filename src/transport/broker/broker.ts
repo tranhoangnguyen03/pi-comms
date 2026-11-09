@@ -50,7 +50,7 @@ const DELIVERY_RECORD_RETENTION_MS = 60 * 60 * 1000;
 const MAX_DELIVERY_RECORDS = 4096;
 // Must stay below the client's 10s send timeout, so an unconfirmed send resolves as unknown instead of throwing.
 const RECEIPT_TIMEOUT_MS = readPositiveIntEnv(process.env.PI_COMMS_RECEIPT_TIMEOUT_MS, 5000, 10_000);
-const RECEIPT_PROOF_STATUSES = new Set<MessageReceiptStatus>(["receiver_received", "acknowledged", "queued", "injected"]);
+const RECEIPT_PROOF_STATUSES = new Set<MessageReceiptStatus>(["receiver_received", "receiver_recorded", "acknowledged", "queued", "injected"]);
 const LIVENESS_MISSED_INTERVALS = 3;
 const LIVENESS_SWEEP_MS = readPositiveIntEnv(process.env.PI_COMMS_LIVENESS_SWEEP_MS, 10_000);
 const TCP_KEEPALIVE_DELAY_MS = 30_000;
