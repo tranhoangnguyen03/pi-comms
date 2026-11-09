@@ -1139,6 +1139,13 @@ class IntercomBroker {
           }
         }
         try {
+          // A revoke can commit to pair-approvals.json while its mailbox
+          // terminal write fails. On a later approval, finish that prior mail
+          // first or refuse the grant: reapproval must not revive old payloads.
+          if (mode !== "none" &&
+              this.pairApprovals.state(session.scopeId, session.info.id, peerId).mode === "none") {
+            this.mailbox.endPendingPair(session.scopeId ?? null, session.info.id, peerId);
+          }
           const status = this.pairApprovals.decide(session.scopeId, session.info.id, peerId, mode, context,
             id => this.pairRuntime(session.scopeId, id));
           this.pruneMailboxMessages(); // revocation ends undelivered mail before acknowledgment
