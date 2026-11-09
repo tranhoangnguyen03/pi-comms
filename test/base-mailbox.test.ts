@@ -130,6 +130,16 @@ test('F12: bounded queue rejects instead of evicting; expiry, identity and corru
   assert.match(corrupt.blocked ?? '', /MAILBOX_UNREADABLE/);
   assert.throws(() => corrupt.enqueue(item(randomUUID())), /MAILBOX_UNREADABLE/);
   assert.ok(readdirSync(corruptDir).some(name => name.startsWith('mailbox.json.unreadable-')));
+  const obsoleteDir = join(root, 'old-format'); mkdirSync(obsoleteDir, { recursive: true });
+  writeFileSync(join(obsoleteDir, 'mailbox.json'), JSON.stringify({ formatVersion: 999, pending: [], terminal: [], sha256: 'old' }));
+  assert.match(new DurableMailbox(obsoleteDir).blocked ?? '', /MAILBOX_UNREADABLE/, 'unknown disk versions cannot accept new mail');
+  store.pruneEvidence(expiredAt + 14 * 24 * 60 * 60 * 1000 + 1);
+  assert.equal(store.lookup(fromId, first), undefined, 'old outcome evidence has a bounded lifetime');
+  const bytesDir = join(root, 'byte-limit'); mkdirSync(bytesDir, { recursive: true });
+  const bytesStore = new DurableMailbox(bytesDir);
+  const huge = item(randomUUID()); huge.message.content.text = 'x'.repeat(32 * 1024 * 1024);
+  huge.fingerprint = mailFingerprint(huge.message, targetId);
+  assert.throws(() => bytesStore.enqueue(huge), /MAILBOX_FULL/, 'byte limit rejects before durable acceptance');
 });
 
 test('F12: ending approval before reconnect saves a terminal result, not a new delivery', async () => {
