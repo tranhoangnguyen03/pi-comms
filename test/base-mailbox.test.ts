@@ -258,3 +258,29 @@ test('F12 real broker: session-only approval expires before queued mail is offer
     await stop(broker);
   }
 });
+
+
+test('F12 real broker: 0.1.10 pair-aware peer cannot silently downgrade live or offline mail', async () => {
+  const aId = randomUUID(), bId = randomUUID();
+  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
+    b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await start();
+    a = await peer(aId, 'New F12 sender');
+    b = await peer(bId, 'Old pair-aware peer', false);
+    await a.decidePair(bId, 'remembered', 'Previously approved exact pair');
+    const fresh = (await a.listSessions()).find(x => x.id === bId)!;
+    assert.equal((await a.sendExact(bId, fresh.endpointEpoch, { messageId: randomUUID(), text: 'no live downgrade' }, 'async')).code,
+      'PEER_OUTDATED');
+    const reverse = (await b.listSessions()).find(x => x.id === aId)!;
+    assert.equal((await b.sendExact(aId, reverse.endpointEpoch, { messageId: randomUUID(), text: 'no reverse downgrade' }, 'live_only')).code,
+      'PEER_OUTDATED');
+    await b.disconnect(); b = undefined;
+    assert.equal((await a.sendExact(bId, undefined, { messageId: randomUUID(), text: 'no offline downgrade' }, 'async')).code,
+      'PEER_OUTDATED');
+    assert.equal(new DurableMailbox(join(root, 'comms')).pending.length, 0);
+  } finally {
+    await Promise.all([a,b].filter(Boolean).map(x => x!.disconnect().catch(() => undefined)));
+    await stop(broker);
+  }
+});
