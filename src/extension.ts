@@ -77,6 +77,8 @@ export default function comms(pi: ExtensionAPI) {
   let records: NativeSessionRecords | undefined;
   let asks: Asks | undefined;
   const askStops = new Map<string, AbortController>();
+  const pendingSavedReceipts = new Set<string>();
+  let lastReceiptScanAt = 0;
   let timer: NodeJS.Timeout | undefined;
   let active = false;
   let wakeReserved = false;
@@ -300,8 +302,12 @@ export default function comms(pi: ExtensionAPI) {
           // Modern pair consent is a broker decision, never transported message metadata.
           peerNames.set(from.id, from.name ?? from.id);
           if (fresh && !current.isApproved(from.id)) context.ui.notify(`Contact request from ${from.name ?? from.id}: ${envelope.subject}. Held for you, not the agent. Approval appears when idle; /comms requests to review.`, 'info');
-          // A durable receipt requires a verified native disk entry, not live intake.
-          candidate.sendMessageReceipt({ messageId: wire.id, status: current.isSavedIncoming(wire.id) ? 'receiver_recorded' : 'queued', timestamp: Date.now() });
+          // Native Pi may buffer a fresh session's custom entry before its
+          // first conversation. Keep broker responsibility until it really saves.
+          const saved = current.isSavedIncoming(wire.id);
+          if (saved) pendingSavedReceipts.delete(wire.id);
+          else pendingSavedReceipts.add(wire.id);
+          candidate.sendMessageReceipt({ messageId: wire.id, status: saved ? 'receiver_recorded' : 'queued', timestamp: Date.now() });
           admitAsks(); status();
         } catch (error) { context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning'); status(); }
       });
@@ -366,11 +372,28 @@ export default function comms(pi: ExtensionAPI) {
       owner.observedNative(ids, entry.id, 'batch', false);
     }
   }
+  // When Pi later flushes an initially volatile session, upgrade the receipt
+  // without another broker offer, user prompt, or message ID.
+  function flushSavedReceipts(now = Date.now()) {
+    const owner = runtime, log = records, currentClient = client;
+    if (!pendingSavedReceipts.size || !owner || !log || !currentClient?.isConnected() ||
+        now - lastReceiptScanAt < 1000) return;
+    lastReceiptScanAt = now;
+    observeSaved(owner, log);
+    for (const id of pendingSavedReceipts) {
+      if (!owner.isSavedIncoming(id)) continue;
+      try {
+        currentClient.sendMessageReceipt({ messageId: id, status: 'receiver_recorded', timestamp: now });
+        pendingSavedReceipts.delete(id);
+      } catch { /* Same-ID broker reoffer on reconnect remains safe. */ }
+    }
+  }
   async function stopRuntime() {
     stopped = true; endAsks('context-lost'); lifetime.abort(); records?.close();
     if (timer) clearInterval(timer); timer = undefined;
     const old = client; client = undefined; runtime = undefined; records = undefined; asks = undefined; ctx = undefined; connecting = undefined;
     active = false; wakeReserved = false; approvalDialog = false; lastPresenceSentAt = 0;
+    pendingSavedReceipts.clear(); lastReceiptScanAt = 0;
     askStops.clear(); contactStops.clear(); declined.clear(); localPairDecisions.clear(); prompted.clear(); peerNames.clear(); dialogTail = Promise.resolve();
     lastWidget = null; lastStatus = undefined; connectionError = undefined; connectionErrorDetail = undefined; nextReconnect = 0; reconnectDelay = 1000;
     await old?.disconnect();
@@ -404,7 +427,7 @@ export default function comms(pi: ExtensionAPI) {
     timer = setInterval(() => {
       if (runtime !== current || stopped) return;
       if (!current.holdReason() && !client?.isConnected() && !connecting && Date.now() >= nextReconnect) void ensureConnection().catch(() => undefined);
-      try { publishActivity(); offerIncoming(); admitAsks(); pump(); status(); }
+      try { publishActivity(); flushSavedReceipts(); offerIncoming(); admitAsks(); pump(); status(); }
       catch (error) { current.holdRecovery(String(error)); status(); }
     }, 150); timer.unref();
     status();
