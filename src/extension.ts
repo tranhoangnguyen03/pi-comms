@@ -614,6 +614,7 @@ export default function comms(pi: ExtensionAPI) {
       }
       observeSaved();
       if (id) await refreshMailEvidence([id]);
+      if (stopped || runtime !== current) return;
       try { await withDialog(signal => showInspection(commandCtx, cursor => id !== undefined ? current.inspect({ message: id }, 'human') : current.inspect({ queue: 'self', ...(cursor ? { cursor } : {}) }, 'human'), { self: current.self, name, approved: current.isApproved }, signal)); }
       catch (error) { commandCtx.ui.notify(String(error), 'info'); }
       return;
@@ -755,10 +756,14 @@ export default function comms(pi: ExtensionAPI) {
     }) };
   });
   async function refreshMailEvidence(ids: string[]) {
-    if (!runtime || !client?.isConnected() || !client.supportsFeature(DURABLE_MAILBOX_FEATURE)) return;
+    const owner = runtime, transport = client;
+    if (!owner || !transport?.isConnected() || !transport.supportsFeature(DURABLE_MAILBOX_FEATURE)) return;
     for (let i = 0; i < ids.length; i += 30) {
-      try { runtime.updateBrokerEvidence(await client.mailboxEvidence(ids.slice(i, i + 30))); }
-      catch { /* No new broker evidence; saved sender observations remain. */ }
+      try {
+        const evidence = await transport.mailboxEvidence(ids.slice(i, i + 30));
+        if (stopped || runtime !== owner || client !== transport) return;
+        owner.updateBrokerEvidence(evidence);
+      } catch { /* No new broker evidence; saved sender observations remain. */ }
     }
   }
   async function inspectCommunication(input: InspectInput, guard: () => void = () => {}) {
@@ -779,6 +784,7 @@ export default function comms(pi: ExtensionAPI) {
     visit(projected);
     await refreshMailEvidence([...ids].slice(0, 30));
     guard();
+    if (stopped || runtime !== owner) throw Error('CONTEXT_LOST: inspection belongs to an earlier Pi session');
     return { ...owner.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' }, recovery: records?.info() };
   }
   pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {requests:[messageId,...]} reply progress and current peer report; {workRef:"TICKET"}, {peer}, {exchange}, {message}, {queue:"self"}, {outbox:"self"}. One selector. Saved authorized history remains readable after approval expires; previously withheld content stays hidden. Historical access is not current contact permission. Peer reports are claims, not acceptance.', parameters: InspectInput, outputSchema: Output,
