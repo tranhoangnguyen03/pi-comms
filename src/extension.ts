@@ -585,6 +585,7 @@ export default function comms(pi: ExtensionAPI) {
         if (!current.entry(id)) { commandCtx.ui.notify('That message is not available in this saved session. Older memory-only records cannot be reconstructed. /comms inspect with no ID shows waiting messages.', 'info'); return; }
       }
       observeSaved();
+      if (id) await refreshMailEvidence([id]);
       try { await withDialog(signal => showInspection(commandCtx, cursor => id !== undefined ? current.inspect({ message: id }, 'human') : current.inspect({ queue: 'self', ...(cursor ? { cursor } : {}) }, 'human'), { self: current.self, name, approved: current.isApproved }, signal)); }
       catch (error) { commandCtx.ui.notify(String(error), 'info'); }
       return;
@@ -725,12 +726,31 @@ export default function comms(pi: ExtensionAPI) {
       }
     }) };
   });
+  async function refreshMailEvidence(ids: string[]) {
+    if (!runtime || !client?.isConnected() || !client.supportsFeature(DURABLE_MAILBOX_FEATURE)) return;
+    for (let i = 0; i < ids.length; i += 30) {
+      try { runtime.updateBrokerEvidence(await client.mailboxEvidence(ids.slice(i, i + 30))); }
+      catch { /* No new broker evidence; saved sender observations remain. */ }
+    }
+  }
   async function inspectCommunication(input: InspectInput, guard: () => void = () => {}) {
     guard(); validate(InspectInput, input);
     const owner = runtime; if (!owner || stopped) throw new Error('CONTEXT_LOST');
     const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input;
     guard(); if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
     observeSaved();
+    const projected = owner.inspect(resolved);
+    const ids = new Set<string>();
+    if (input.requests) for (const id of input.requests) if (owner.entry(id)?.message.from === owner.self) ids.add(id);
+    const visit = (value: any, depth = 0) => {
+      if (!value || typeof value !== 'object' || depth > 5) return;
+      if (value.message?.from === owner.self && typeof value.message.id === 'string') ids.add(value.message.id);
+      if (Array.isArray(value)) for (const item of value) visit(item, depth + 1);
+      else if (depth < 5) for (const [key, item] of Object.entries(value)) if (key !== 'message' && key !== 'text' && key !== 'structured') visit(item, depth + 1);
+    };
+    visit(projected);
+    await refreshMailEvidence([...ids].slice(0, 30));
+    guard();
     return { ...owner.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' }, recovery: records?.info() };
   }
   pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {requests:[messageId,...]} reply progress and current peer report; {workRef:"TICKET"}, {peer}, {exchange}, {message}, {queue:"self"}, {outbox:"self"}. One selector. Saved authorized history remains readable after approval expires; previously withheld content stays hidden. Historical access is not current contact permission. Peer reports are claims, not acceptance.', parameters: InspectInput, outputSchema: Output,
