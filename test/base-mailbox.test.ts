@@ -232,3 +232,29 @@ test('F12 broker auto-upgrade leaves previously acknowledged offline message int
     try { process.kill(Number(readFileSync(join(root,'comms','broker.pid'),'utf8')), 'SIGTERM'); } catch {}
   }
 });
+
+
+test('F12 real broker: session-only approval expires before queued mail is offered to restarted runtime', async () => {
+  const aId = randomUUID(), bId = randomUUID(), mid = randomUUID();
+  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
+    b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await start(); a = await peer(aId, 'A kept running'); b = await peer(bId, 'B first runtime');
+    await a.decidePair(bId, 'session', 'Review while a peer briefly disconnects');
+    (b as any).socket.destroy(); // same-runtime socket loss is not session expiry
+    await waitFor(async () => !(await a!.listSessions()).some(s => s.id === bId), 'B socket drop');
+    assert.equal((await a.listPairs()).find(s => s.peer === bId)?.mode, 'session');
+    assert.equal((await a.sendExact(bId, undefined, { messageId: mid, text: 'must not reach a restarted runtime' }, 'async')).delivery, 'queued');
+    const arrivals: string[] = [];
+    b = new IntercomClient(); b.on('error', () => undefined);
+    b.on('message', (_: unknown, msg: { id: string }) => arrivals.push(msg.id));
+    await b.connect(reg('B after restart'), bId); // new runtimeId expires A-B session-only approval
+    await b.listPairs();
+    await waitFor(async () => (await a!.mailboxEvidence([mid]))[0].state === 'contact_ended',
+      'queued item must reach terminal consent outcome');
+    assert.deepEqual(arrivals, [], 'no mailbox payload reaches a restarted runtime after temporary approval expired');
+  } finally {
+    await Promise.all([a,b].filter(Boolean).map(x => x!.disconnect().catch(() => undefined)));
+    await stop(broker);
+  }
+});
