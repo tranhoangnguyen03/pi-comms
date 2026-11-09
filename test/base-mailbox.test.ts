@@ -174,7 +174,7 @@ test('F12 real broker: committed expiry remains visible after restart', async ()
   new DurableMailbox(join(root, 'comms')).enqueue({ from, fromKey: JSON.stringify([null, fromId]),
     targetId, targetKey: JSON.stringify([null, targetId]), scope: null, message, queuedAt: staleAt,
     expiresAt: staleAt + MAIL_TTL_MS,
-    fingerprint: messageDeliveryFingerprint(message, targetId) });
+    fingerprint: mailFingerprint(message, targetId) });
   let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined;
   try {
     broker = await start(); a = await peer(fromId, 'Expired mail sender');
