@@ -1,6 +1,6 @@
 # M4 — native-session recovery and a small durable mailbox
 
-**Status: design contract; F10 is merged, F11 unordered-pair implementation is under test, F12 remains proposed.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
+**Status: F10 and F11 are merged; F12 implementation is under review in a separate PR. Combined M4 real-agent acceptance remains outstanding.** This is the simplification review for [issue #20](https://github.com/tranhoangnguyen03/pi-comms/issues/20) and PR #32. It replaces the earlier requirement for a separate participant journal and an authenticated offline-identity registry. It does **not** remove F10–F12 or weaken historical access, current consent, human priority or exact-recipient routing. The [README](../README.md) remains the shipped contract.
 
 ## Decision
 
@@ -104,7 +104,7 @@ A write failure must stop the affected operation and report that persistence fai
 
 Use the same exact native session ID, broker/agent-directory boundary and existing scope checks as live communication. Keep live endpoint epochs and live-holder rejection. Names may help a user discover a peer, but routing remains pinned to the resolved ID. No name/cwd/prefix fallback and no successor substitution.
 
-For an offline async send, the sender uses the exact previously resolved/approved peer in **its own recovered records**, checking current owner authority. The trusted local extension supplies that target through the same send path. If the target is not known or approval is absent, use the existing unavailable/consent result; do not create an arbitrary offline address from a model's guess.
+For an offline async send, the sender uses an exact previously approved session ID and the broker's **current unordered A–B decision**, never native message history as authority. An existing pair decision proves earlier contact; the broker rechecks consent at both queue acceptance and delivery. The trusted local extension supplies that target through the same send path. If the target is not known or approval is absent, use the existing unavailable/consent result; do not create an arbitrary offline address from a model's guess.
 
 The queue record already carries the exact target and scope. After broker restart, a matching normal registration is enough to route it under the existing trust model. There is **no separate durable offline recipient registry, identity certificate, credential exchange, liveness database or scan of other sessions' transcripts**. A peer that never returns simply reaches expiry. Do not claim to detect deletion of a remote saved-session file before it reconnects.
 
@@ -116,7 +116,7 @@ Persist the current mailbox and the bounded delivery facts needed to reconcile i
 
 The broker is the sole writer. Use a versioned atomic replacement of this bounded state, adapting the existing temp-write/fsync/rename utility pattern. Do not route it through extension-state owner election, inherit the unrelated 64 KiB cap or automatically treat an older backup as proof that the newest acceptance never happened. No new database dependency for the currently bounded workload; revisit only with measured evidence.
 
-Commit before acknowledging `queued`. Remove a pending payload only after a supported persistent receiver receipt or a committed terminal expiry/rejection. On full capacity, **reject the new item before acceptance**, rather than silently evicting an acknowledged message. Specify time, count and byte bounds with realistic fixtures before F12 ships; the inherited 24-hour/256-message values are not already accepted promises.
+Commit before acknowledging `queued`. Remove a pending payload only after a supported persistent receiver receipt or a committed terminal expiry/rejection. On full capacity, **reject the new item before acceptance**, rather than silently evicting an acknowledged message. Approved bounds: seven days to expiry, 256 pending messages, 32 MiB of pending payloads, 4,096 outcome records / 4 MiB retained fourteen days after outcome, and 40 MiB maximum mailbox file. Reserve terminal evidence capacity at acceptance; reject new work when full.
 
 Persist terminal outcomes long enough for the declared queue/reconnect window, then clean up under a documented policy. Dedup retention must cover every supported same-ID reoffer. If the required evidence is older than retention or storage is missing/corrupt, report **unknown**, not definitely unsent. A sender's saved queued-acceptance record remains evidence even when broker evidence is unavailable. Complete disk loss cannot magically produce a trustworthy detailed loss receipt.
 
