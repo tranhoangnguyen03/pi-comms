@@ -315,11 +315,18 @@ test('F12: a revoked pair cannot revive queued mail when terminal storage fails 
 
     rmSync(mail, { recursive: true, force: true });
     renameSync(backup, mail);
+    // A broker restart must not forget that this older queued message belongs
+    // to a revoked grant. Both native session IDs remain unchanged.
+    await a.disconnect(); await b.disconnect(); a = undefined; b = undefined;
+    await stop(broker); broker = await start();
+    a = await peer(aId, 'A after broker restart'); b = await peer(bId, 'B after broker restart');
+    b.on('message', (_: unknown, msg: { id: string }) => arrivals.push(msg.id));
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode ?? 'none', 'none');
     assert.equal((await a.decidePair(bId, 'remembered', 'approved again')).mode, 'remembered');
     assert.equal((await a.mailboxEvidence([mid]))[0].state, 'contact_ended');
     await b.listPairs();
     await new Promise(resolve => setTimeout(resolve, 100));
-    assert.deepEqual(arrivals, [], 'new approval must not revive mail accepted under the revoked grant');
+    assert.deepEqual(arrivals, [], 'reapproval after restart must not revive revoked queued mail');
   } finally {
     if (readFileSyncSafe(backup) !== undefined) {
       rmSync(mail, { recursive: true, force: true }); renameSync(backup, mail);
