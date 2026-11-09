@@ -55,7 +55,8 @@ export function inspectionText(data: Inspection, labels: Labels, technical = fal
     if (!('facts' in entry)) return [...lines, 'Content withheld: contact approval required.'].join('\n');
     const m = entry.message;
     lines.push(`Subject: ${m.subject}`, `Contact: ${labels.approved(m.from === labels.self ? m.to : m.from) ? 'approved' : 'not approved'}`,
-      `Latest observation: ${observationLabel(entry)}`,\n      ...(entry.brokerDelivery ? [`Broker mail: ${entry.brokerDelivery.state} (separate from native posting or peer work completion)`] : []),
+      `Latest observation: ${observationLabel(entry)}`,
+      ...(entry.brokerDelivery ? [`Broker mail: ${entry.brokerDelivery.state} (separate from native posting or peer work completion)`] : []),
       `${entry.responses.length} linked response(s) — not proof of completed work.`);
     lines.push(...messageContextLines(m));
     if (entry.reportLinkage) lines.push('Reported request unavailable: link unverified.');
