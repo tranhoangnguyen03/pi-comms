@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -287,3 +287,48 @@ test('F12 real broker: 0.1.10 pair-aware peer cannot silently downgrade live or 
     await stop(broker);
   }
 });
+
+test('F12: a revoked pair cannot revive queued mail when terminal storage fails and the owner reapproves', async () => {
+  const aId = randomUUID(), bId = randomUUID(), mid = randomUUID();
+  let broker: ChildProcess | undefined;
+  let a: InstanceType<typeof IntercomClient> | undefined, b: InstanceType<typeof IntercomClient> | undefined;
+  const mail = join(root, 'comms', 'mailbox.json');
+  const backup = mail + '.review-backup';
+  try {
+    broker = await start(); a = await peer(aId, 'Revoker A'); b = await peer(bId, 'Offline B');
+    assert.equal((await a.decidePair(bId, 'remembered', 'review')).mode, 'remembered');
+    await b.disconnect(); b = undefined;
+    assert.equal((await a.sendExact(bId, undefined, { messageId: mid, text: 'do not revive this' }, 'async')).delivery, 'queued');
+
+    // Force writes to the mailbox to fail without affecting pair-approvals.json.
+    // The pair revocation commits, but its queued-message terminal write cannot.
+    renameSync(mail, backup);
+    mkdirSync(mail);
+    assert.equal((await a.decidePair(bId, 'none', '')).mode, 'none');
+    b = await peer(bId, 'B returns');
+    const arrivals: string[] = [];
+    b.on('message', (_: unknown, msg: { id: string }) => arrivals.push(msg.id));
+    await b.listPairs();
+    await assert.rejects(a.decidePair(bId, 'remembered', 'approved again'), /PAIR_SAVE_FAILED/,
+      'the old queued payload must be settled before the new grant');
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode ?? 'none', 'none');
+
+    rmSync(mail, { recursive: true, force: true });
+    renameSync(backup, mail);
+    assert.equal((await a.decidePair(bId, 'remembered', 'approved again')).mode, 'remembered');
+    assert.equal((await a.mailboxEvidence([mid]))[0].state, 'contact_ended');
+    await b.listPairs();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(arrivals, [], 'new approval must not revive mail accepted under the revoked grant');
+  } finally {
+    if (readFileSyncSafe(backup) !== undefined) {
+      rmSync(mail, { recursive: true, force: true }); renameSync(backup, mail);
+    }
+    await Promise.all([a,b].filter(Boolean).map(x => x!.disconnect().catch(() => undefined)));
+    await stop(broker);
+  }
+});
+
+function readFileSyncSafe(path: string): string | undefined {
+  try { return readFileSync(path, 'utf8'); } catch { return undefined; }
+}
