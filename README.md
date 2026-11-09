@@ -102,7 +102,7 @@ A saved Pi session retains communication records, original request/reply/report/
 
 **Limits:** A fresh, unused or `--no-session` run continues with live-only records until Pi writes a real saved session. We do not fabricate turns or force Pi's file flush. Storage outcomes show `saved`, `volatile` or `partial` evidence. Corrupt or unknown saved controls hold unsafe communication while verified history remains inspectable; recovery does not block unrelated Pi work. Native session persistence does not promise protection from disk loss or an interrupted host write.
 
-**Still pending:** F12's durable offline queue. The public exact-session send still rejects unavailable recipients. See [M4 recovery design and limits](docs/M4-RECOVERY-CONTRACT.md). The separate M3 real-agent handover evaluation is not an F10 recovery test.
+**F12 (0.1.12):** Ordinary asynchronous sends to a previously approved exact offline peer can be saved in the broker mailbox. See below. Saved-session recovery, historical readability and Pause remain unchanged. The separate M3 real-agent handover evaluation is not an F10 recovery test.
 
 ## Contact approval (M4-B / F11 — 0.1.10)
 
@@ -120,7 +120,17 @@ The broker stores remembered approvals only, keyed by the shared comms scope and
 
 The explicit `/comms approve` command only grants/edits approval and sends no message. Cancel/Esc keeps the existing approval and active asks. If the broker cannot save a remembered approval, that one choice fails with `PAIR_SAVE_FAILED` and nothing else changes; an unreadable approvals file is moved aside (`pair-approvals.json.unreadable-*`) and remembered approvals must be granted again.
 
-**Limit:** This is the same-owner local workflow, not cross-user authentication. F12 broker-restart-durable offline messages are not included; remembered contact does not make an offline peer reachable.
+**Limit:** This is the same-owner local workflow, not cross-user authentication. F12 may save async mail for this exact pair while the receiver is offline; it still requires current approval at acceptance and delivery.
+
+## Durable offline mail (M4-C / F12 — 0.1.12)
+
+`comms_message` and the existing M3 organizer `send` may send to an **exact native session ID** whose A–B pair was already approved, even when that peer is offline. A name is only resolved against **currently online** peers; the broker never sends offline mail by name, cwd, prefix or successor identity. Broker acceptance means `queued` **only after the original payload is on disk**. A send does not imply the receiver read it, Pi admitted it to context, or the colleague finished the work.
+
+The broker rechecks exact identity and current pair approval on the receiver's return. A remembered approval survives runtime/broker restarts; session-only approval survives a same-runtime socket reconnect, but a runtime or broker restart ends it. If approval ended before delivery, the broker saves `contact_ended` and removes the pending copy. Later reapproval does not silently revive that old message. Pause and pending human input still hold model admission, although an actual saved native receipt can end broker responsibility. A fresh/ephemeral receiver may use live mail, but cannot confirm a **saved** receipt until its Pi session really writes the entry.
+
+The broker keeps mail for **7 days**, up to **256 pending messages / 32 MiB**, and saves small outcome/fingerprint evidence for **14 days** (max **4,096 records / 4 MiB**, total mailbox file max 40 MiB). If full or unable to save, it rejects new mail; it never silently evicts an accepted item. A corrupt or unknown mailbox version blocks new durable acceptance, preserving the unreadable file for inspection. Missing broker evidence is **unknown**, not proof of an unsent or unseen message. Same-ID broker reoffers are possible; the receiver deduplicates from native records, and the sender must never automatically retry with a different ID. Disk loss and native Pi's unsaved initial-session records remain outside the durability promise.
+
+`comms_ask` stays **live-only** and returns an unavailable result for an offline item, even within a batch whose other requests succeed. It never creates an offline ask or resurrects a waiter after restart. The four agent tools, organizer API, and existing inspection and contact controls are unchanged. Both peers need the F12-capable package for durable receipt support; older combinations report `PEER_OUTDATED` or `BROKER_OUTDATED`, not a best-effort downgrade.
 
 ## Build and try in isolation
 
@@ -128,7 +138,7 @@ The explicit `/comms approve` command only grants/edits approval and sends no me
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.11.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.12.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -142,7 +152,7 @@ PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.10`, which is published). The `0.1.11` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.10`, which is published). The `0.1.12` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 
@@ -202,7 +212,7 @@ Same-ID reconnect refresh is internal: after a definite stale-epoch rejection, r
 ## Facts and volatile state
 
 - **Accepted:** broker/socket transport accepted it. Not proof the recipient model saw it.
-- **Queued:** receiver memory holds it.
+- **Queued:** the broker saved an offline payload before acknowledging acceptance, or the receiver holds live incoming content. Consult source evidence; neither proves native posting.
 - **Offered:** pi-comms asked Pi to handle the batch; a busy-session steer can still be cleared before admission. The item is **uncertain**, not normally waiting, until native evidence or an explicit owner choice resolves it. `/comms inspect` shows the original message; `/comms requests` offers a deliberate retry or dismissal. Retry may cause duplicate model work and never creates a fresh message ID. Dismissal stops pi-comms reoffers but cannot retract a steer that Pi already holds.
 - **Posted:** the matching message appears in Pi's native session history, or a direct ask result was admitted to context; evidence is scoped to the actual host boundary, not proof the model did useful work.
 - **Handed off:** a nested ask reply reached its calling tool. This is complete for that handoff, but does not prove model consumption or a saved child transcript; recovery must not queue it again.
@@ -210,7 +220,7 @@ Same-ID reconnect refresh is internal: after a definite stale-epoch rejection, r
 - **Saved:** a native session entry was actually observed on disk, distinct from an in-memory native entry.
 - **Response:** a linked peer message exists. None of these means work completed.
 
-F10 restores saved-session message/outbox records, authorized historical visibility, reply handles, Pause and explicit negative controls after reload or restart. F11 asks the broker for the one current A–B pair decision; native records and transported approval cannot recreate a superseded grant. Fresh unused or in-memory sessions remain live-only until Pi saves them; an interrupted native write does not establish durability. Local ask waiters never resume automatically. Inspect unknown outgoing results before attempting new work. The broker's inherited mailbox remains memory-only; the public exact-send path still rejects unavailable peers until F12.
+F10 restores saved-session message/outbox records, authorized historical visibility, reply handles, Pause and explicit negative controls after reload or restart. F11 asks the broker for the one current A–B pair decision; native records and transported approval cannot recreate a superseded grant. Fresh unused or in-memory sessions remain live-only until Pi saves them; an interrupted native write does not establish durability. Local ask waiters never resume automatically. Inspect unknown outgoing results before attempting new work. The broker mailbox is disk-backed for eligible exact async sends; live-only asks remain unavailable offline.
 
 ## Update and rollback
 
