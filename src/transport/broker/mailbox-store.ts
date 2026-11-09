@@ -24,6 +24,7 @@ export type MailEvidence = {
 type Disk = { formatVersion: 1; pending: MailItem[]; terminal: MailEvidence[]; sha256: string };
 const json = (x: unknown) => JSON.stringify(x);
 const digest = (x: unknown) => createHash('sha256').update(json(x)).digest('hex');
+export const mailFingerprint = (message: Message, targetId: string) => createHash('sha256').update(messageDeliveryFingerprint(message, targetId)).digest('hex');
 const bytes = (x: unknown) => Buffer.byteLength(json(x), 'utf8');
 const key = (fromKey: string, id: string) => json([fromKey, id]);
 function validItem(x: any): x is MailItem {
@@ -34,7 +35,7 @@ function validItem(x: any): x is MailItem {
     x.from && isSessionId(x.from.id) && isMessage(x.message) && isSessionId(x.message.id) &&
     Number.isSafeInteger(x.queuedAt) && Number.isSafeInteger(x.expiresAt) &&
     x.expiresAt === x.queuedAt + MAIL_TTL_MS &&
-    typeof x.fingerprint === 'string' && x.fingerprint === messageDeliveryFingerprint(x.message, x.targetId);
+    typeof x.fingerprint === 'string' && x.fingerprint === mailFingerprint(x.message, x.targetId);
 }
 function validEvidence(x: any): x is MailEvidence {
   return x && typeof x === 'object' && !Array.isArray(x) &&
