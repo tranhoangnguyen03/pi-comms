@@ -354,3 +354,26 @@ test('F12: broker refuses offline mail that would exceed its delivery-frame limi
     await stop(broker);
   }
 });
+
+test('F12: uncertain mailbox filesystem write never reports a definite unsent outcome', async () => {
+  const aId = randomUUID(), bId = randomUUID();
+  let broker: ChildProcess | undefined;
+  let a: InstanceType<typeof IntercomClient> | undefined, b: InstanceType<typeof IntercomClient> | undefined;
+  const mailPath = join(root, 'comms', 'mailbox.json');
+  try {
+    broker = await start(); a = await peer(aId, 'A storage test'); b = await peer(bId, 'B offline');
+    await a.decidePair(bId, 'remembered', 'mail storage failure');
+    await b.disconnect(); b = undefined;
+    // An unexpected failure in atomic rename is not a proven "nothing sent".
+    mkdirSync(mailPath);
+    const attempt = await a.sendExact(bId, undefined, { messageId: randomUUID(), text: 'save must be confirmed' }, 'async');
+    assert.equal(attempt.delivered, false);
+    assert.equal(attempt.code, 'MAILBOX_SAVE_FAILED');
+    assert.equal(attempt.outcomeKnown, false);
+    assert.equal(attempt.delivery, 'unknown');
+  } finally {
+    rmSync(mailPath, { recursive: true, force: true });
+    await Promise.all([a,b].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
+    await stop(broker);
+  }
+});
