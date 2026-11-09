@@ -18,6 +18,7 @@ import type {
   SessionInfo,
   SessionHolder,
   SessionRegistration,
+  BrokerMailEvidence,
 } from "../types.ts";
 
 interface SendOptions {
@@ -94,6 +95,7 @@ export class IntercomClient extends EventEmitter {
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private pendingPairLists = new Map<string, { resolve: (items: PairStatus[]) => void; reject: (e: Error) => void }>();
   private pendingPairDecisions = new Map<string, { resolve: (status: PairStatus) => void; reject: (e: Error) => void }>();
+  private pendingMailEvidence = new Map<string, { resolve: (items: BrokerMailEvidence[]) => void; reject: (e: Error) => void }>();
   private nextSenderSequence = 1;
   private disconnecting = false;
   private disconnectError: Error | null = null;
@@ -113,6 +115,8 @@ export class IntercomClient extends EventEmitter {
     this.pendingPairLists.clear();
     for (const pending of this.pendingPairDecisions.values()) pending.reject(error);
     this.pendingPairDecisions.clear();
+    for (const pending of this.pendingMailEvidence.values()) pending.reject(error);
+    this.pendingMailEvidence.clear();
   }
 
   get sessionId(): string | null {
@@ -437,6 +441,17 @@ export class IntercomClient extends EventEmitter {
         catch (error) { pending.reject(toError(error)); }
         break;
       }
+      case "mailbox_evidence_result": {
+        const { requestId, items } = brokerMessage;
+        if (typeof requestId !== "string" || !Array.isArray(items) ||
+            items.some(item => !item || typeof item.id !== "string" || typeof item.state !== "string"))
+          throw Error("Invalid mailbox evidence response");
+        const pending = this.pendingMailEvidence.get(requestId);
+        if (!pending) break;
+        this.pendingMailEvidence.delete(requestId);
+        pending.resolve(items);
+        break;
+      }
       case "pair_update": {
         this.emit("pair_update", parsePairStatus(brokerMessage.status));
         break;
@@ -731,6 +746,12 @@ export class IntercomClient extends EventEmitter {
 
   decidePair(peerId: string, mode: PairMode, context: string): Promise<PairStatus> {
     return this.requestPair(id => ({ type: "pair_decide", requestId: id, peerId, mode, context }), this.pendingPairDecisions);
+  }
+
+  mailboxEvidence(ids: string[]): Promise<BrokerMailEvidence[]> {
+    if (!ids.length) return Promise.resolve([]);
+    if (ids.length > 30) return Promise.reject(Error("MAILBOX_QUERY_LIMIT"));
+    return this.requestPair(id => ({ type: "mailbox_evidence", requestId: id, ids }), this.pendingMailEvidence);
   }
 
   async sendExact(to: string, epoch: string | undefined, options: SendOptions, dispatchPolicy: "async" | "live_only" = "live_only"): Promise<SendResult> {
