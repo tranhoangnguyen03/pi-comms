@@ -13,7 +13,8 @@ function communicationView(data: any, name: (id: string) => string): string {
   const message = (entry: any, detailed = true) => {
     const m = entry.message;
     if (entry.evidence === 'withheld') return `${name(m.from)} — content withheld (contact not approved).`;
-    const mail = entry.brokerDelivery ? `\nBroker mail: ${entry.brokerDelivery.state}${entry.brokerDelivery.at ? ` at ${new Date(entry.brokerDelivery.at).toISOString()}` : ''} (not native model admission or peer work completion)` : entry.delivery === 'queued' ? '\nBroker accepted queued mail; later outcome unverified.' : '';\n    const recovery = [
+    const mail = entry.brokerDelivery ? `\nBroker mail: ${entry.brokerDelivery.state}${entry.brokerDelivery.at ? ` at ${new Date(entry.brokerDelivery.at).toISOString()}` : ''} (not native model admission or peer work completion)` : entry.delivery === 'queued' ? '\nBroker accepted queued mail; later outcome unverified.' : '';
+    const recovery = [
       entry.admission === 'uncertain' ? 'Native admission is uncertain; this message is held, not automatically posted again. The owner can choose deliver again (possible duplicate) or dismiss via /comms requests.' : '',
       entry.record?.state === 'partial' ? 'The latest observation was not saved. Inspect the known outcome; do not resend because of this save failure.' : '',
     ].filter(Boolean).join('\n');
@@ -30,7 +31,8 @@ function communicationView(data: any, name: (id: string) => string): string {
   if (data.responses) return `Responses\n${data.responses.map((row: any) => {
     const current = row.currentReport ?? row.latestReport;
     const heading = `${row.peer ? name(row.peer) : row.request} — ${requestOutcomeLabel(row.outcome)}${row.code ? ` · ${row.code}` : ''}\nRequest: ${row.request}${row.subject ? ` · ${row.subject}` : ''}${row.workRef ? ` · Work: ${row.workRef}` : ''}`;
-    const transport = row.brokerDelivery ? `\nBroker mail: ${row.brokerDelivery.state} (not task completion)` : '';\n    const replies = row.replies?.length ? `\n${row.replies.map((entry: any) => message(entry)).join('\n\n')}` : '';
+    const transport = row.brokerDelivery ? `\nBroker mail: ${row.brokerDelivery.state} (not task completion)` : '';
+    const replies = row.replies?.length ? `\n${row.replies.map((entry: any) => message(entry)).join('\n\n')}` : '';
     const reported = current ? `\nPeer reports ${current.message.report.state} (current reported state) (${row.reportCount} report${row.reportCount === 1 ? '' : 's'} received; not requester acceptance)${row.laterProgressCount ? `\n${row.laterProgressCount} later progress update(s) retained in inspection, not treated as a new outcome.` : ''}${row.replies?.some((entry: any) => entry.message.id === current.message.id) ? '' : `\n${message(current)}`}` : '';
     return heading + transport + replies + reported;
   }).join('\n\n')}`;
