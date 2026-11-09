@@ -454,7 +454,7 @@ export class IntercomClient extends EventEmitter {
 
       case "delivered": {
         const { messageId, delivery, retryable, outcomeKnown } = brokerMessage;
-        if (typeof messageId !== "string" || (delivery !== undefined && delivery !== "socket_delivered" && delivery !== "queued") || (retryable !== undefined && typeof retryable !== "boolean") || (outcomeKnown !== undefined && typeof outcomeKnown !== "boolean")) {
+        if (typeof messageId !== "string" || (delivery !== undefined && delivery !== "socket_delivered" && delivery !== "queued" && delivery !== "receiver_recorded") || (retryable !== undefined && typeof retryable !== "boolean") || (outcomeKnown !== undefined && typeof outcomeKnown !== "boolean")) {
           throw new Error("Invalid delivered message");
         }
 
@@ -465,7 +465,7 @@ export class IntercomClient extends EventEmitter {
         }
 
         this.pendingSends.delete(messageId);
-        pending.resolve({ id: messageId, delivered: true, delivery: delivery === "queued" ? "queued" : "socket_delivered", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
+        pending.resolve({ id: messageId, delivered: true, delivery: delivery === "queued" ? "queued" : delivery === "receiver_recorded" ? "receiver_recorded" : "socket_delivered", retryable: retryable === true, outcomeKnown: outcomeKnown !== false, ...(typeof brokerMessage.code === "string" ? { code: brokerMessage.code } : {}) });
         break;
       }
 
@@ -733,7 +733,7 @@ export class IntercomClient extends EventEmitter {
     return this.requestPair(id => ({ type: "pair_decide", requestId: id, peerId, mode, context }), this.pendingPairDecisions);
   }
 
-  async sendExact(to: string, epoch: string, options: SendOptions): Promise<SendResult> {
+  async sendExact(to: string, epoch: string | undefined, options: SendOptions, dispatchPolicy: "async" | "live_only" = "live_only"): Promise<SendResult> {
     let socket: net.Socket;
     try {
       socket = this.requireActiveSocket();
@@ -776,7 +776,7 @@ export class IntercomClient extends EventEmitter {
       this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
 
       try {
-        writeMessage(socket, { type: "send", to, message, ...(targetId && targetEpoch ? { targetId, targetEpoch } : {}) });
+        writeMessage(socket, { type: "send", to, message, ...(targetId ? { targetId } : {}), ...(targetEpoch ? { targetEpoch } : {}), dispatchPolicy });
       } catch (error) {
         clearTimeout(timeout);
         this.pendingSends.delete(messageId);
