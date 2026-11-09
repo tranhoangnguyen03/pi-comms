@@ -783,7 +783,8 @@ class IntercomBroker {
               this.recordDelivery(currentKey, message.id, fingerprint, "queued");
               this.writeDeliverySuccess(socket, message.id, "queued");
             } catch (error) {
-              const code = String(error).includes("MAILBOX_FULL") ? "MAILBOX_FULL"
+              const code = String(error).includes("MAILBOX_MESSAGE_TOO_LARGE") ? "E_MESSAGE_TOO_LARGE"
+                : String(error).includes("MAILBOX_FULL") ? "MAILBOX_FULL"
                 : String(error).includes("MAILBOX_UNREADABLE") ? "MAILBOX_UNREADABLE" : "MAILBOX_SAVE_FAILED";
               this.writeDeliveryFailure(socket, message.id, "Offline mail was not confirmed saved: " + String(error), code, false, code !== "MAILBOX_SAVE_FAILED");
             }
@@ -1204,6 +1205,13 @@ class IntercomBroker {
   }
 
   private queueMailboxMessage(from: ConnectedSession, targetId: string, message: Message, brokerReceivedAt: number): void {
+    // An accepted payload must remain deliverable through the existing 1 MiB
+    // frame, including the broker's delivery metadata and sender identity.
+    const deliveryFrame = { type: "message", from: from.info,
+      message: { ...message, brokerReceivedAt, brokerDeliveredAt: brokerReceivedAt } };
+    if (Buffer.byteLength(JSON.stringify(message), "utf8") > 900_000 ||
+        Buffer.byteLength(JSON.stringify(deliveryFrame), "utf8") > MAX_FRAME_BYTES)
+      throw Error("MAILBOX_MESSAGE_TOO_LARGE");
     this.pruneMailboxMessages(brokerReceivedAt);
     const item: MailItem = {
       from: { ...from.info }, fromKey: from.key, targetKey: scopedSessionKey(from.scopeId, targetId),
