@@ -16,6 +16,11 @@ export interface BrokerRuntimeInfo {
 }
 
 export type DeliveryState = "socket_delivered" | "queued" | "receiver_recorded" | "failed" | "unknown";
+export type BrokerMailEvidence = {
+  id: string;
+  state: "queued" | "receiver_recorded" | "expired" | "contact_ended" | "peer_outdated" | "cancelled" | "unknown";
+  targetId?: string; at?: number; fingerprint?: string;
+};
 
 export interface DeliveryDetails {
   delivery: DeliveryState;
@@ -175,6 +180,7 @@ export type ClientMessage =
   | { type: "list"; requestId: string }
   | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string; dispatchPolicy?: "async" | "live_only" }
   | { type: "message_receipt"; receipt: MessageReceipt }
+  | { type: "mailbox_evidence"; requestId: string; ids: string[] }
   | { type: "cancel_message"; messageId: string }
   | { type: "cancel_ask"; messageId: string }
   | { type: "pair_list"; requestId: string }
@@ -199,6 +205,7 @@ export type ClientMessage =
 export type BrokerMessage =
   | ({ type: "registered"; sessionId: string; features?: string[] } & BrokerRuntimeInfo)
   | { type: "pair_list_result"; requestId: string; items?: PairStatus[]; error?: string }
+  | { type: "mailbox_evidence_result"; requestId: string; items: BrokerMailEvidence[] }
   | { type: "pair_decision_result"; requestId: string; status?: PairStatus; error?: string }
   | { type: "pair_update"; status: PairStatus }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
