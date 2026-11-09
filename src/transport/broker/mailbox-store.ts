@@ -110,6 +110,22 @@ export class DurableMailbox {
         bytes(this.evidence) + (this.items.length + 1) * 512 > MAIL_MAX_EVIDENCE_BYTES) throw Error('MAILBOX_FULL');
     this.commit([...this.items, item], this.evidence);
   }
+  /** An earlier revocation may have committed while the mailbox disk write
+   * failed. Before a new grant, finish *all* older mail for this exact pair.
+   * A later approval must never resurrect messages from the prior grant.
+   */
+  endPendingPair(scope: string | null, a: string, b: string, at = Date.now()): number {
+    if (this.blocked) throw Error(this.blocked);
+    const old = this.items.filter(x => x.scope === scope &&
+      ((x.from.id === a && x.targetId === b) || (x.from.id === b && x.targetId === a)));
+    if (!old.length) return 0;
+    const terminal: MailEvidence[] = old.map(x => ({
+      fromKey: x.fromKey, id: x.message.id, fingerprint: x.fingerprint,
+      targetId: x.targetId, outcome: 'contact_ended', at,
+    }));
+    this.commit(this.items.filter(x => !old.includes(x)), [...this.evidence, ...terminal]);
+    return old.length;
+  }
   settle(fromKey: string, id: string, outcome: MailOutcome, at = Date.now()): boolean {
     const item = this.items.find(x => x.fromKey === fromKey && x.message.id === id);
     if (!item) return false;
