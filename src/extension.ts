@@ -10,14 +10,14 @@ import { sendExactSession } from './transport/send.ts';
 import { connect } from './transport/start.ts';
 import { IntercomClient } from './transport/broker/client.ts';
 import { randomUUID } from 'node:crypto';
-import { PAIR_APPROVAL_FEATURE, type BrokerRuntimeInfo, type SessionInfo, type PairStatus, type Message as WireMessage } from './transport/types.ts';
+import { PAIR_APPROVAL_FEATURE, DURABLE_MAILBOX_FEATURE, type BrokerRuntimeInfo, type SessionInfo, type PairStatus, type Message as WireMessage } from './transport/types.ts';
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
 import { approvalPrompt, contactDecisionTitle, explicitApprovalTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CHOICES, CONTACT_GRANT_CHOICES, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
 import { getAgentDirPath, getBrokerConnectTarget, getBrokerPidFilePath, getIntercomDirPath } from './transport/broker/paths.ts';
 import { INTERCOM_PACKAGE_VERSION, isBrokerVersionOlder, readBrokerArtifactVersion, readBrokerPidMetadata, verifyBrokerProcess } from './transport/broker/runtime-claim.ts';
 import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
-const RESET = 'One approval covers both directions of an exact session pair. "This session" lasts until either Pi session reloads or the broker restarts; "remember" survives restarts until either side runs /comms revoke. Native Pi records retain communication history and Pause. No offline mail or automatic resend.';
+const RESET = 'One approval covers both directions of an exact session pair. "This session" lasts until either Pi session reloads or the broker restarts; "remember" survives restarts until either side runs /comms revoke. Native Pi records retain communication history and Pause. Approved exact offline peers can receive durable async mail; asks remain live-only. No automatic new-ID replay.';
 const HELP = 'Stop ends the current run; later peers may wake it. Pause holds peer admission/wakes, not current work or already-posted content. /comms approve | revoke | pause | resume | status | inspect | requests';
 const errorCode = (error: unknown, fallback = 'TARGET_UNAVAILABLE') =>
   (error instanceof Error ? error.message : String(error)).split(':')[0]?.trim() || fallback;
@@ -300,16 +300,15 @@ export default function comms(pi: ExtensionAPI) {
           // Modern pair consent is a broker decision, never transported message metadata.
           peerNames.set(from.id, from.name ?? from.id);
           if (fresh && !current.isApproved(from.id)) context.ui.notify(`Contact request from ${from.name ?? from.id}: ${envelope.subject}. Held for you, not the agent. Approval appears when idle; /comms requests to review.`, 'info');
-          // This existing receipt confirms live intake, not crash-durable mail.
-          // F12 will separately negotiate persistent receiver receipts.
-          candidate.sendMessageReceipt({ messageId: wire.id, status: 'queued', timestamp: Date.now() });
+          // A durable receipt requires a verified native disk entry, not live intake.
+          candidate.sendMessageReceipt({ messageId: wire.id, status: current.isSavedIncoming(wire.id) ? 'receiver_recorded' : 'queued', timestamp: Date.now() });
           admitAsks(); status();
         } catch (error) { context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning'); status(); }
       });
       try {
         const brokerURL = new URL('./transport/broker/broker.js', import.meta.url);
-        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, runtimeId }, candidate, brokerURL);
-        if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE)) {
+        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, durableMailboxV1: true, runtimeId }, candidate, brokerURL);
+        if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE) || !candidate.supportsFeature(DURABLE_MAILBOX_FEATURE)) {
           throw Error(formatBrokerOutdatedError(candidate.brokerInfo, INTERCOM_PACKAGE_VERSION, readBrokerArtifactVersion(brokerURL)));
         }
         // The pair_snapshot handler replaces the cache: approvals may have ended while offline.
@@ -386,12 +385,12 @@ export default function comms(pi: ExtensionAPI) {
       getEntries: () => context.sessionManager.getEntries() as unknown as NativeEntry[],
       append: (type, data) => pi.appendEntry(type, data),
     });
-    const current = new Runtime(self, async (id, envelope) => {
+    const current = new Runtime(self, async (id, envelope, policy) => {
       if (runtime !== current || stopped) return { outcome: 'rejected', code: 'CONTEXT_LOST' };
       try { await ensureConnection(); }
       catch (error) { return { outcome: 'rejected', code: errorCode(error) }; }
       if (runtime !== current || stopped || !client) return { outcome: 'rejected', code: 'CONTEXT_LOST' };
-      return sendExactSession(client, current.isApproved, id, envelope);
+      return sendExactSession(client, current.isApproved, id, envelope, policy);
     }, log.append);
     runtime = current; records = log;
     const restored = log.load();
@@ -608,7 +607,7 @@ export default function comms(pi: ExtensionAPI) {
       const data = await work(); const output = result(data);
       if (compact) {
         const sent = data as ReturnType<Runtime['view']>;
-        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''}${sent.message.handoverFrom ? ` Handover from exchange ${sent.message.handoverFrom} (link only, no authority transferred).` : ''}${sent.message.report ? ` Peer reports ${sent.message.report.state} on request ${sent.message.report.request} (not acceptance).` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}${sent.record.state === 'partial' ? `\n${sent.record.warning}` : sent.record.state === 'volatile' ? '\nCommunication record is live-only until Pi saves this session.' : ''}` }];
+        output.content = [{ type: 'text', text: `${sent.delivery === 'queued' ? 'Queued at broker for exact offline peer' : sent.delivery === 'receiver_recorded' ? 'Receiver recorded' : 'Sent'} to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''}${sent.message.handoverFrom ? ` Handover from exchange ${sent.message.handoverFrom} (link only, no authority transferred).` : ''}${sent.message.report ? ` Peer reports ${sent.message.report.state} on request ${sent.message.report.request} (not acceptance).` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}${sent.record.state === 'partial' ? `\n${sent.record.warning}` : sent.record.state === 'volatile' ? '\nCommunication record is live-only until Pi saves this session.' : ''}` }];
       }
       return output;
     } catch (error) {
@@ -677,7 +676,7 @@ export default function comms(pi: ExtensionAPI) {
             if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
             if (current.paused) { item.outcome = 'paused'; return; }
             let waiting: Promise<void> | undefined;
-            const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds); });
+            const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds); }, 'live_only');
             const dispatched = sending.then(sent => { pending.sent(sent.message.id, sent.state, sent.code); if (runtime === current) admitAsks(); });
             if (waiting) { void dispatched.catch(() => pending.end('unknown', call)); await waiting; } else await dispatched;
           } catch (error) { item.outcome = pending.ended(call) ?? 'not-sent'; item.code = errorCode(error); }
