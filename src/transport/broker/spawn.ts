@@ -391,11 +391,8 @@ async function waitForBrokerOrReclaim(targetVersion: string | undefined, timeout
     if (isBrokerAcceptable(health, targetVersion)) {
       return "ready";
     }
-    if (!existsSync(BROKER_SPAWN_LOCK)) {
-      return health.ok ? "ready" : "reclaim";
-    }
-    if (isSpawnLockStale()) {
-      return "reclaim";
+    if (!existsSync(BROKER_SPAWN_LOCK) || isSpawnLockStale()) {
+      return isBrokerAcceptable(await probeBrokerHealth(), targetVersion) ? "ready" : "reclaim";
     }
     await sleep(50);
   }

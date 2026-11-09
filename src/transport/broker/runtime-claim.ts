@@ -156,7 +156,7 @@ function readProcessCwd(pid: number): string | undefined {
 /**
  * Verify that `pid` is a live pi-comms broker process for `intercomDir` before sending SIGTERM.
  * Requires the process to be signalable by this user, running `transport/broker/broker.(js|ts)`,
- * and (when process cwd is inspectable) running in `intercomDir`.
+ * and running with `cwd` Verified to match `intercomDir` (fails closed when `cwd` cannot be read).
  */
 export function verifyBrokerProcess(pid: number, intercomDir: string = getIntercomDirPath()): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) return false;
@@ -170,7 +170,7 @@ export function verifyBrokerProcess(pid: number, intercomDir: string = getInterc
     return false;
   }
   const procCwd = readProcessCwd(pid);
-  if (procCwd && !sameCwd(procCwd, intercomDir)) {
+  if (!procCwd || !sameCwd(procCwd, intercomDir)) {
     return false;
   }
   return true;

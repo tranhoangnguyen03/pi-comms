@@ -380,3 +380,52 @@ test('Issue #37: unverified PID in broker.pid is never killed or recommended for
     rmSync(lockPath, { force: true });
   }
 });
+
+test('Issue #37: waiting client reclaims and replaces outdated broker when first upgrader releases lock without upgrading', async () => {
+  const commsDir = join(root, 'comms');
+  mkdirSync(commsDir, { recursive: true });
+  const pidPath = join(commsDir, 'broker.pid');
+  const lockPath = join(commsDir, 'broker.spawn.lock');
+  const legacyBrokerPath = join(root, 'legacy-pkg/dist/transport/broker/broker.js');
+  mkdirSync(join(root, 'legacy-pkg/dist/transport/broker'), { recursive: true });
+  writeFileSync(
+    legacyBrokerPath,
+    readFileSync(brokerPath, 'utf8')
+      .replaceAll(`packageVersion: INTERCOM_PACKAGE_VERSION,`, '')
+      .replaceAll('"pair-consent-v1"', '"owner-contact-v1"'),
+  );
+
+  let legacyBroker: ChildProcess | undefined;
+  let waitingClient: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    const spawnOpts = getBrokerSpawnOptions(process.env, true);
+    legacyBroker = spawn(process.execPath, [legacyBrokerPath], { ...spawnOpts, stdio: ['ignore', 'pipe', 'pipe'] });
+    const logs: string[] = [];
+    legacyBroker.stdout!.on('data', chunk => logs.push(String(chunk)));
+    legacyBroker.stderr!.on('data', chunk => logs.push(String(chunk)));
+    await waitFor(() => logs.join('').includes('Intercom broker started'), () => logs.join(''));
+    const legacyPid = legacyBroker.pid!;
+
+    // Simulate a first upgrader holding BROKER_SPAWN_LOCK while a second client waits.
+    writeFileSync(lockPath, `${process.pid}\n${Date.now()}\nfirst-upgrader-token\n`);
+    waitingClient = new IntercomClient();
+    waitingClient.on('error', () => undefined);
+    const pendingConnect = connectClient(randomUUID(), reg('Waiting B'), waitingClient, brokerURL);
+
+    // Wait until the second client has entered waitForBrokerOrReclaim, then release the lock
+    // while the outdated broker is still running.
+    await new Promise(resolve => setTimeout(resolve, 80));
+    rmSync(lockPath, { force: true });
+
+    await pendingConnect;
+    assert.equal(waitingClient.supportsFeature('pair-consent-v1'), true, 'waiting client must not accept the outdated broker when lock disappears');
+    assert.equal(waitingClient.brokerInfo.packageVersion, INTERCOM_PACKAGE_VERSION);
+    assert.notEqual(waitingClient.brokerInfo.pid, legacyPid, 'waiting client reclaimed the lock and replaced the outdated broker');
+  } finally {
+    await waitingClient?.disconnect().catch(() => undefined);
+    await stopBroker(legacyBroker);
+    try { process.kill(Number(readFileSync(pidPath, 'utf8')), 'SIGTERM'); } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+    rmSync(lockPath, { force: true });
+  }
+});
