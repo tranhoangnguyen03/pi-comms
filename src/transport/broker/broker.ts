@@ -19,7 +19,7 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { PAIR_APPROVAL_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
+import { PAIR_APPROVAL_FEATURE, DURABLE_MAILBOX_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { PairApprovalStore } from "./pair-approvals.ts";
@@ -592,6 +592,7 @@ class IntercomBroker {
           ...(session.herdrPaneId !== undefined ? { herdrPaneId: session.herdrPaneId } : {}),
           trustedLocal: typeof LISTEN_TARGET === "string" && process.platform !== "win32",
           ...(session.pairConsentV1 === true ? { pairConsentV1: true } : {}),
+          ...(session.durableMailboxV1 === true ? { durableMailboxV1: true } : {}),
         };
 
         const connectedSession: ConnectedSession = {
@@ -622,7 +623,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PAIR_APPROVAL_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PAIR_APPROVAL_FEATURE, DURABLE_MAILBOX_FEATURE],
           packageVersion: INTERCOM_PACKAGE_VERSION,
           pid: process.pid,
           startedAt: BROKER_STARTED_AT,
