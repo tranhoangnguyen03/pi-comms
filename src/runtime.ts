@@ -8,7 +8,7 @@ import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
 type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized' | 'dismissed';
-export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
+export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; delivery?: Attempt['delivery']; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
 export type Approval = { id: string; name: string; context: string; remembered?: boolean };
 export const ASK_ADMISSION = 'native ask result context admission';
 export const NESTED_HANDOFF = 'ask result handed to nested caller';
@@ -23,7 +23,7 @@ export class Runtime {
   private recoveryIssue: string | undefined;
   private pause = false;
   waiting: string[] = [];
-  constructor(readonly self: string, private transport: (id: string, envelope: Envelope) => Promise<Attempt>, private writer?: RecordWriter) {}
+  constructor(readonly self: string, private transport: (id: string, envelope: Envelope, policy?: 'async' | 'live_only') => Promise<Attempt>, private writer?: RecordWriter) {}
   get paused() { return this.pause; }
   set paused(value: boolean) {
     if (this.pause === value) { this.assertOperational(); return; }
@@ -78,7 +78,7 @@ export class Runtime {
           case 'outcome': {
             const entry = this.required(event.id);
             if (entry.message.from !== this.self) throw new Error('Outgoing outcome attached to an incoming message');
-            entry.state = event.state as Attempt['outcome']; entry.code = event.code;
+            entry.state = event.state as Attempt['outcome']; entry.code = event.code; entry.delivery = event.delivery;
             break;
           }
           case 'fact': this.addFact(this.required(event.id), event.fact as Fact); break;
@@ -223,7 +223,7 @@ export class Runtime {
     }
     return { to, source };
   }
-  async send(input: MessageInput, registered?: (entry: Entry) => void) {
+  async send(input: MessageInput, registered?: (entry: Entry) => void, policy: 'async' | 'live_only' = 'async') {
     this.assertOperational();
     const { to, source } = this.contactFor(input);
     if (!this.isApproved(to)) throw new Error('CONTACT_NOT_APPROVED');
@@ -246,12 +246,12 @@ export class Runtime {
     this.records.set(envelope.id, entry);
     registered?.(entry);
     let outcome: Attempt;
-    try { outcome = await this.transport(to, envelope); } catch { outcome = { outcome: 'unknown', code: 'OUTCOME_UNKNOWN' }; }
+    try { outcome = await this.transport(to, envelope, policy); } catch { outcome = { outcome: 'unknown', code: 'OUTCOME_UNKNOWN' }; }
     // Once dispatch happened, a failed save or switched session cannot turn an
     // observed send into a misleading "nothing sent" result.
-    entry.state = outcome.outcome; entry.code = outcome.code;
+    entry.state = outcome.outcome; entry.code = outcome.code; entry.delivery = outcome.delivery;
     try {
-      this.write({ kind: 'outcome', id: envelope.id, state: outcome.outcome, ...(outcome.code ? { code: outcome.code } : {}) }, [envelope.id]);
+      this.write({ kind: 'outcome', id: envelope.id, state: outcome.outcome, ...(outcome.code ? { code: outcome.code } : {}), ...(outcome.delivery ? { delivery: outcome.delivery } : {}) }, [envelope.id]);
       if (outcome.outcome !== 'unknown') this.fact(envelope.id, outcome.outcome === 'accepted' ? 'accepted' : 'rejected', 'broker');
     } catch { this.saveStates.set(envelope.id, 'partial'); }
     return this.view(entry);
@@ -294,6 +294,9 @@ export class Runtime {
     this.write({ kind: 'message', entry }, [envelope.id]);
     this.returns.set(handle, message); this.records.set(envelope.id, entry); this.waiting.push(envelope.id);
     return true;
+  }
+  isSavedIncoming(id: string): boolean {
+    return this.records.get(id)?.message.to === this.self && this.saveStates.get(id) === 'saved';
   }
   pendingCounts() {
     return {
