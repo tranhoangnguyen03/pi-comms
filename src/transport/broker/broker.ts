@@ -303,7 +303,7 @@ class IntercomBroker {
     }
     process.on("SIGTERM", () => this.shutdown());
     process.on("SIGINT", () => this.shutdown());
-    setInterval(() => this.evictSilentSessions(), LIVENESS_SWEEP_MS).unref();
+    setInterval(() => { this.evictSilentSessions(); this.pruneMailboxMessages(); }, LIVENESS_SWEEP_MS).unref();
   }
 
   // A process that died without closing its socket can leave it open, and writes to it
