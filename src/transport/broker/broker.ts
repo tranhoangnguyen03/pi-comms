@@ -1083,6 +1083,26 @@ class IntercomBroker {
         break;
       }
 
+      case "mailbox_evidence": {
+        const session = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!session || session.socket !== socket || !session.info.durableMailboxV1 ||
+            typeof clientMessage.requestId !== "string" ||
+            !Array.isArray(clientMessage.ids) || clientMessage.ids.length > 30 ||
+            clientMessage.ids.some(id => typeof id !== "string")) {
+          throw Error("Invalid mailbox evidence query");
+        }
+        this.pruneMailboxMessages();
+        const items = clientMessage.ids.map(id => {
+          const item = this.mailbox.lookup(currentKey!, id);
+          if (!item) return { id, state: "unknown" as const };
+          return { id, state: ("message" in item ? "queued" : item.outcome),
+            targetId: item.targetId, at: "message" in item ? item.queuedAt : item.at,
+            fingerprint: item.fingerprint };
+        });
+        writeMessage(socket, { type: "mailbox_evidence_result", requestId: clientMessage.requestId, items });
+        break;
+      }
+
       case "pair_list": {
         const session = currentKey ? this.sessions.get(currentKey) : undefined;
         if (!session || !session.info.pairConsentV1 || typeof clientMessage.requestId !== "string") {
