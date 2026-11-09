@@ -332,3 +332,25 @@ test('F12: a revoked pair cannot revive queued mail when terminal storage fails 
 function readFileSyncSafe(path: string): string | undefined {
   try { return readFileSync(path, 'utf8'); } catch { return undefined; }
 }
+
+test('F12: broker refuses offline mail that would exceed its delivery-frame limit', async () => {
+  const aId = randomUUID(), bId = randomUUID();
+  let broker: ChildProcess | undefined;
+  let a: InstanceType<typeof IntercomClient> | undefined, b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await start(); a = await peer(aId, 'A oversized sender'); b = await peer(bId, 'B offline');
+    await a.decidePair(bId, 'remembered', 'review');
+    await b.disconnect(); b = undefined;
+    // This fits the raw 1 MiB incoming send frame, but exceeds the 900 kB
+    // F12 mailbox message bound. A future broker-delivery frame would be larger.
+    const result = await a.sendExact(bId, undefined,
+      { messageId: randomUUID(), text: 'x'.repeat(920_000) }, 'async');
+    assert.equal(result.delivered, false);
+    assert.equal(result.code, 'E_MESSAGE_TOO_LARGE');
+    const store = new DurableMailbox(join(root, 'comms'));
+    assert.equal(store.pending.length, 0, 'the broker never acknowledges undeliverable mail');
+  } finally {
+    await Promise.all([a,b].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
+    await stop(broker);
+  }
+});
