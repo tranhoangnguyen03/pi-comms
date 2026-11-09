@@ -1,7 +1,7 @@
 import type { Envelope } from './schema.ts';
 
 export type Connection = { id: string; epoch: string };
-export type Attempt = { outcome: 'accepted' | 'rejected' | 'unknown'; code?: string };
+export type Attempt = { outcome: 'accepted' | 'rejected' | 'unknown'; code?: string; delivery?: 'queued' | 'socket_delivered' | 'receiver_recorded' };
 
 /** Native session ID is public; at most one refresh after definite stale-connection rejection. */
 export async function sendToSession(
