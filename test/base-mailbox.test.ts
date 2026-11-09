@@ -13,7 +13,7 @@ const root = mkdtempSync(join(tmpdir(), 'pc-mailbox-'));
 process.env.PI_CODING_AGENT_DIR = root;
 after(() => rmSync(root, { recursive: true, force: true }));
 const { IntercomClient } = await import('../src/transport/broker/client.ts');
-const { DurableMailbox, MAIL_TTL_MS, MAIL_MAX_ITEMS } = await import('../src/transport/broker/mailbox-store.ts');
+const { DurableMailbox, MAIL_TTL_MS, MAIL_MAX_ITEMS, mailFingerprint } = await import('../src/transport/broker/mailbox-store.ts');
 const { messageDeliveryFingerprint } = await import('../src/transport/broker/protocol.ts');
 const brokerPath = fileURLToPath(new URL('../dist/transport/broker/broker.js', import.meta.url));
 const waitFor = async (fn: () => boolean | Promise<boolean>, hint = 'mailbox', ms = 8000) => {
@@ -109,7 +109,7 @@ test('F12: bounded queue rejects instead of evicting; expiry, identity and corru
     const message = { id, timestamp: now, content: { text: 'payload' } };
     return { from, fromKey: fromId, targetId, targetKey: targetId, scope: null,
       message, queuedAt, expiresAt: queuedAt + MAIL_TTL_MS,
-      fingerprint: messageDeliveryFingerprint(message, targetId) };
+      fingerprint: mailFingerprint(message, targetId) };
   };
   const first = randomUUID();
   store.enqueue(item(first));
