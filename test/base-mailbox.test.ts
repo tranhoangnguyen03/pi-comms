@@ -7,6 +7,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+const { spawnBrokerIfNeeded, getBrokerSpawnOptions } = await import('../src/transport/broker/spawn.ts');
 
 const root = mkdtempSync(join(tmpdir(), 'pc-mailbox-'));
 process.env.PI_CODING_AGENT_DIR = root;
@@ -150,5 +151,72 @@ test('F12: ending approval before reconnect saves a terminal result, not a new d
   } finally {
     await Promise.all([a,b].filter(Boolean).map(x => x!.disconnect().catch(() => undefined)));
     await stop(broker);
+  }
+});
+
+
+test('F12 real broker: committed expiry remains visible after restart', async () => {
+  const fromId = randomUUID(), targetId = randomUUID(), mid = randomUUID();
+  const staleAt = Date.now() - MAIL_TTL_MS - 2000;
+  const message = { id: mid, timestamp: staleAt, content: { text: 'expired body' } };
+  const from = { id: fromId, cwd: root, model: 'fixture', pid: process.pid,
+    startedAt: staleAt, lastActivity: staleAt, endpointEpoch: randomUUID() };
+  new DurableMailbox(join(root, 'comms')).enqueue({ from, fromKey: fromId,
+    targetId, targetKey: targetId, scope: null, message, queuedAt: staleAt,
+    expiresAt: staleAt + MAIL_TTL_MS,
+    fingerprint: messageDeliveryFingerprint(message, targetId) });
+  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    broker = await start(); a = await peer(fromId, 'Expired mail sender');
+    assert.equal((await a.mailboxEvidence([mid]))[0].state, 'expired');
+    const duplicate = await a.sendExact(targetId, undefined, { messageId: mid, text: 'expired body' }, 'async');
+    assert.equal(duplicate.delivered, false, 'expired ID must not be re-accepted');
+    assert.equal(duplicate.code, 'E_MESSAGE_ID_REUSE', 'different fingerprint is not replay');
+  } finally {
+    await a?.disconnect().catch(() => undefined); await stop(broker);
+  }
+});
+
+test('F12 broker auto-upgrade leaves previously acknowledged offline message intact', async () => {
+  const aId = randomUUID(), bId = randomUUID(), mid = randomUUID();
+  const legacyPath = join(root, 'pre-upgrade/dist/transport/broker/broker.js');
+  mkdirSync(join(root, 'pre-upgrade/dist/transport/broker'), { recursive: true });
+  // The old F12-capable broker has no version stamp but uses the SAME durable
+  // mailbox format. This is not the pre-F12 RAM-only migration.
+  writeFileSync(legacyPath, readFileSync(brokerPath, 'utf8')
+    .replaceAll('packageVersion: INTERCOM_PACKAGE_VERSION,', ''));
+  let old: ChildProcess | undefined;
+  let a: InstanceType<typeof IntercomClient> | undefined, b: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    old = spawn(process.execPath, [legacyPath], {
+      ...getBrokerSpawnOptions(process.env, true), stdio: ['ignore','pipe','pipe'],
+    });
+    const logs: string[] = [];
+    old.stdout!.on('data', c => logs.push(String(c)));
+    old.stderr!.on('data', c => logs.push(String(c)));
+    await waitFor(() => logs.join('').includes('Intercom broker started'), logs.join(''), 9000);
+    a = await peer(aId, 'A before upgrade'); b = await peer(bId, 'B before upgrade');
+    await a.decidePair(bId, 'remembered', 'Upgraded mail');
+    await b.disconnect(); b = undefined;
+    assert.equal((await a.sendExact(bId, undefined, { messageId: mid, text: 'MAIL_SURVIVES_UPGRADE' }, 'async')).delivery, 'queued');
+    const queuedPath = join(root, 'comms', 'mailbox.json');
+    assert.ok(readFileSync(queuedPath, 'utf8').includes(mid));
+    await spawnBrokerIfNeeded(new URL('../dist/transport/broker/broker.js', import.meta.url));
+    await a.disconnect().catch(() => undefined);
+    a = await peer(aId, 'A after upgrade');
+    assert.equal((await a.mailboxEvidence([mid]))[0].state, 'queued');
+    const arrivals: string[] = [];
+    b = new IntercomClient(); b.on('error', () => undefined);
+    b.on('message', (_: unknown, msg: { id: string }) => {
+      arrivals.push(msg.id);
+      b!.sendMessageReceipt({ messageId: msg.id, status: 'receiver_recorded', timestamp: Date.now() });
+    });
+    await b.connect(reg('B after upgrade'), bId); await b.listPairs();
+    await waitFor(() => arrivals.includes(mid), 'exact receiver after broker upgrade');
+    await waitFor(async () => (await a!.mailboxEvidence([mid]))[0].state === 'receiver_recorded');
+  } finally {
+    await Promise.all([a,b].filter(Boolean).map(x => x!.disconnect().catch(() => undefined)));
+    await stop(old);
+    try { process.kill(Number(readFileSync(join(root,'comms','broker.pid'),'utf8')), 'SIGTERM'); } catch {}
   }
 });
