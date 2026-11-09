@@ -763,6 +763,15 @@ class IntercomBroker {
         if (hasTargetId) {
           const targetId = clientMessage.targetId as string;
           const fingerprint = messageDeliveryFingerprint(message, targetId);
+          // A replay is evidence inspection, not a renewed send authority.
+          // A revoke or expiry may have happened since the earlier queued ACK.
+          this.pruneMailboxMessages(brokerReceivedAt);
+          const oldMail = this.mailbox.lookup(currentKey, message.id);
+          if (oldMail && "message" in oldMail &&
+              this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, oldMail.targetId).mode === "none") {
+            this.writeDeliveryFailure(socket, message.id, "The earlier pair approval ended; pending terminal storage may still be unavailable", "E_PAIR_NOT_APPROVED");
+            break;
+          }
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) break;
           const exactTarget = this.sessions.get(scopedSessionKey(fromSession.scopeId, targetId));
           if (!exactTarget) {
