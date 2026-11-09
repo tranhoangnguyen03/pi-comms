@@ -1,20 +1,19 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, renameSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-const { spawnBrokerIfNeeded, getBrokerSpawnOptions } = await import('../src/transport/broker/spawn.ts');
-
 const root = mkdtempSync(join(tmpdir(), 'pc-mailbox-'));
 process.env.PI_CODING_AGENT_DIR = root;
 after(() => rmSync(root, { recursive: true, force: true }));
+// Broker path constants are captured at import time; set the isolated agent dir first.
+const { spawnBrokerIfNeeded, getBrokerSpawnOptions } = await import('../src/transport/broker/spawn.ts');
 const { IntercomClient } = await import('../src/transport/broker/client.ts');
 const { DurableMailbox, MAIL_TTL_MS, MAIL_MAX_ITEMS, mailFingerprint } = await import('../src/transport/broker/mailbox-store.ts');
-const { messageDeliveryFingerprint } = await import('../src/transport/broker/protocol.ts');
 const brokerPath = fileURLToPath(new URL('../dist/transport/broker/broker.js', import.meta.url));
 const waitFor = async (fn: () => boolean | Promise<boolean>, hint = 'mailbox', ms = 8000) => {
   const until = Date.now() + ms;
@@ -216,9 +215,15 @@ test('F12 broker auto-upgrade leaves previously acknowledged offline message int
     assert.equal((await a.sendExact(bId, undefined, { messageId: mid, text: 'MAIL_SURVIVES_UPGRADE' }, 'async')).delivery, 'queued');
     const queuedPath = join(root, 'comms', 'mailbox.json');
     assert.ok(readFileSync(queuedPath, 'utf8').includes(mid));
+    const legacyPid = old.pid!;
     await spawnBrokerIfNeeded(new URL('../dist/transport/broker/broker.js', import.meta.url));
+    const replacementPid = Number(readFileSync(join(root,'comms','broker.pid'),'utf8').trim());
+    assert.notEqual(replacementPid, legacyPid, 'automatic upgrade must replace the actual old broker');
     await a.disconnect().catch(() => undefined);
     a = await peer(aId, 'A after upgrade');
+    assert.equal(a.brokerInfo.pid, replacementPid);
+    assert.equal(a.brokerInfo.packageVersion, JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version,
+      'upgraded receiver talks to the new compiled broker, not a still-running old one');
     assert.equal((await a.mailboxEvidence([mid]))[0].state, 'queued');
     const arrivals: string[] = [];
     b = new IntercomClient(); b.on('error', () => undefined);
