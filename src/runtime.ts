@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, InspectInput } from './schema.ts';
 import type { Attempt } from './session-send.ts';
-import type { PairStatus } from './transport/types.ts';
+import type { PairStatus, BrokerMailEvidence } from './transport/types.ts';
 import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState } from './session-records.ts';
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
@@ -17,6 +17,7 @@ export class Runtime {
   private approvals = new Map<string, Approval>();
   private pairVersions = new Map<string, number>();
   private records = new Map<string, Entry>();
+  private brokerEvidence = new Map<string, BrokerMailEvidence>();
   private returns = new Map<string, Message>();
   private saveStates = new Map<string, SaveState | 'partial'>();
   private uncertainAdmission = new Set<string>();
@@ -250,6 +251,7 @@ export class Runtime {
     // Once dispatch happened, a failed save or switched session cannot turn an
     // observed send into a misleading "nothing sent" result.
     entry.state = outcome.outcome; entry.code = outcome.code; entry.delivery = outcome.delivery;
+    if (outcome.outcome === 'accepted' && outcome.delivery === 'queued') this.brokerEvidence.set(envelope.id, { id: envelope.id, state: 'queued', targetId: to });
     try {
       this.write({ kind: 'outcome', id: envelope.id, state: outcome.outcome, ...(outcome.code ? { code: outcome.code } : {}), ...(outcome.delivery ? { delivery: outcome.delivery } : {}) }, [envelope.id]);
       if (outcome.outcome !== 'unknown') this.fact(envelope.id, outcome.outcome === 'accepted' ? 'accepted' : 'rejected', 'broker');
@@ -294,6 +296,12 @@ export class Runtime {
     this.write({ kind: 'message', entry }, [envelope.id]);
     this.returns.set(handle, message); this.records.set(envelope.id, entry); this.waiting.push(envelope.id);
     return true;
+  }
+  updateBrokerEvidence(items: readonly BrokerMailEvidence[]): void {
+    for (const item of items) {
+      const entry = this.records.get(item.id);
+      if (entry?.message.from === this.self) this.brokerEvidence.set(item.id, { ...item });
+    }
   }
   isSavedIncoming(id: string): boolean {
     return this.records.get(id)?.message.to === this.self && this.saveStates.get(id) === 'saved';
@@ -421,6 +429,7 @@ export class Runtime {
   }
   view(entry: Entry) {
     return structuredClone({ ...entry, responses: [...this.records.values()].filter(r => r.message.replyTo === entry.message.id).map(r => r.message.id), evidence: 'available',
+      ...(entry.message.from === this.self && this.brokerEvidence.has(entry.message.id) ? { brokerDelivery: this.brokerEvidence.get(entry.message.id) } : {}),
       record: { state: this.saveStates.get(entry.message.id) ?? 'volatile', ...(this.saveStates.get(entry.message.id) === 'partial' ? { warning: 'The latest observation was not saved. Do not resend solely because of this storage failure.' } : {}) },
       ...(this.uncertainAdmission.has(entry.message.id) ? { admission: 'uncertain' as const } : {}),
     });
@@ -448,7 +457,7 @@ export class Runtime {
       const replies = records.filter(entry => entry.message.replyTo === id && entry.message.from === request.message.to);
       const { reports, current, laterProgressCount } = this.reportState(id, audience);
       return { request: id, peer: request.message.to, subject: request.message.subject, workRef: request.message.workRef ?? null, state: request.state,
-        code: request.code, outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
+        code: request.code, ...(this.brokerEvidence.has(id) ? { brokerDelivery: this.brokerEvidence.get(id) } : {}), outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
         responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)),
         reportCount: reports.length, ...(reports.length ? { latestReport: this.project(reports.at(-1)!, audience) } : {}),
         ...(current ? { currentReport: this.project(current, audience) } : {}), ...(laterProgressCount ? { laterProgressCount } : {}) };
