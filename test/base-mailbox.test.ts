@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -376,12 +376,16 @@ test('F12: uncertain mailbox filesystem write never reports a definite unsent ou
   let broker: ChildProcess | undefined;
   let a: InstanceType<typeof IntercomClient> | undefined, b: InstanceType<typeof IntercomClient> | undefined;
   const mailPath = join(root, 'comms', 'mailbox.json');
+  const backup = mailPath + '.io-test-backup';
   try {
     broker = await start(); a = await peer(aId, 'A storage test'); b = await peer(bId, 'B offline');
     await a.decidePair(bId, 'remembered', 'mail storage failure');
     await b.disconnect(); b = undefined;
-    // An unexpected failure in atomic rename is not a proven "nothing sent".
+    // Tests share an isolated agent dir; keep any earlier terminal evidence
+    // while replacing the mailbox path with an unwritable directory.
+    if (existsSync(mailPath)) renameSync(mailPath, backup);
     mkdirSync(mailPath);
+    // An unexpected failure in atomic rename is not a proven "nothing sent".
     const attempt = await a.sendExact(bId, undefined, { messageId: randomUUID(), text: 'save must be confirmed' }, 'async');
     assert.equal(attempt.delivered, false);
     assert.equal(attempt.code, 'MAILBOX_SAVE_FAILED');
@@ -389,6 +393,7 @@ test('F12: uncertain mailbox filesystem write never reports a definite unsent ou
     assert.equal(attempt.delivery, 'unknown');
   } finally {
     rmSync(mailPath, { recursive: true, force: true });
+    if (existsSync(backup)) renameSync(backup, mailPath);
     await Promise.all([a,b].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
     await stop(broker);
   }
