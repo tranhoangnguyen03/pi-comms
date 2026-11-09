@@ -1,14 +1,16 @@
 import { spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { fileURLToPath } from "url";
 import net from "net";
 import { randomUUID } from "crypto";
+import type { BrokerRuntimeInfo } from "../types.ts";
 import { createMessageReader, writeMessage } from "./framing.ts";
 import {
   ensureIntercomRuntimeDir,
   getAgentDirPath,
   getBrokerConnectTarget,
+  getBrokerPidFilePath,
   getIntercomDirPath,
   INTERCOM_PROTOCOL_NAME,
   INTERCOM_PROTOCOL_VERSION,
@@ -16,17 +18,32 @@ import {
   restrictIntercomRuntimeFile,
   type BrokerConnectTarget,
 } from "./paths.ts";
+import {
+  isBrokerVersionOlder,
+  isProcessAlive,
+  readBrokerArtifactVersion,
+  readBrokerPidMetadata,
+  verifyBrokerProcess,
+} from "./runtime-claim.ts";
+
+export { verifyBrokerProcess } from "./runtime-claim.ts";
 
 const INTERCOM_DIR = getIntercomDirPath();
-const BROKER_PID = join(INTERCOM_DIR, "broker.pid");
+const BROKER_PID = getBrokerPidFilePath(INTERCOM_DIR);
 const BROKER_SPAWN_LOCK = join(INTERCOM_DIR, "broker.spawn.lock");
+const BROKER_RECLAIM_LOCK = `${BROKER_SPAWN_LOCK}.reclaim`;
 const BROKER_STARTUP_STDERR_LIMIT = 4_000;
+const BROKER_RETIRE_TIMEOUT_MS = 2_500;
+const BROKER_START_TIMEOUT_MS = 5_000;
+const BROKER_LOCK_WAIT_TIMEOUT_MS = BROKER_RETIRE_TIMEOUT_MS + BROKER_START_TIMEOUT_MS + 1_500;
 
 type BrokerLaunchSpec = {
   command: string;
   args: string[];
   captureStartupStderr: boolean;
 };
+
+export type BrokerHealthProbe = { ok: boolean } & BrokerRuntimeInfo;
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -41,6 +58,10 @@ export function isBrokerHealthOkMessage(message: unknown, requestId: string): bo
     && response.requestId === requestId
     && response.protocol === INTERCOM_PROTOCOL_NAME
     && response.version === INTERCOM_PROTOCOL_VERSION;
+}
+
+function isBrokerAcceptable(health: BrokerHealthProbe, targetVersion?: string): boolean {
+  return health.ok && !isBrokerVersionOlder(health.packageVersion, targetVersion);
 }
 
 export function getBrokerSpawnOptions(
@@ -70,92 +91,128 @@ function toError(error: unknown): Error {
 
 export async function spawnBrokerIfNeeded(brokerURL: URL): Promise<void> {
   ensureIntercomRuntimeDir(INTERCOM_DIR);
+  const targetVersion = readBrokerArtifactVersion(brokerURL);
+  const deadline = Date.now() + BROKER_LOCK_WAIT_TIMEOUT_MS;
 
-  if (await isBrokerRunning()) {
-    return;
-  }
-
-  const ownsLock = acquireSpawnLock();
-  if (!ownsLock) {
-    await waitForBroker();
-    return;
-  }
-
-  try {
-    if (await isBrokerRunning()) {
+  while (true) {
+    if (isBrokerAcceptable(await isBrokerRunning(), targetVersion)) {
       return;
     }
 
-    const launch: BrokerLaunchSpec = { command: process.execPath, args: [fileURLToPath(brokerURL)], captureStartupStderr: true };
-    const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(process.env, launch.captureStartupStderr));
-    let brokerStderr = "";
-    const rememberBrokerStderr = (chunk: Buffer | string) => {
-      brokerStderr = `${brokerStderr}${chunk.toString()}`.slice(-BROKER_STARTUP_STDERR_LIMIT);
-    };
-    const brokerStartupError = (message: string, cause?: unknown) => {
-      const stderr = brokerStderr.trim();
-      const errorMessage = stderr ? `${message}\nBroker stderr:\n${stderr}` : message;
-      return cause === undefined ? new Error(errorMessage) : new Error(errorMessage, { cause });
-    };
-    child.stderr?.on("data", rememberBrokerStderr);
-    // The detached broker's diagnostic pipe must not keep its starter alive.
-    if (child.stderr instanceof net.Socket) child.stderr.unref();
-    child.unref();
+    const lockToken = acquireSpawnLock();
+    if (!lockToken) {
+      const outcome = await waitForBrokerOrReclaim(targetVersion, Math.max(deadline - Date.now(), 250));
+      if (outcome === "ready") {
+        return;
+      }
+      continue;
+    }
 
-    await new Promise<void>((resolve, reject) => {
-      const cleanup = () => {
-        child.stderr?.off("data", rememberBrokerStderr);
-        child.stderr?.resume();
-        child.off("error", onError);
-        child.off("close", onExit);
-      };
-
-      const onError = (error: Error) => {
-        cleanup();
-        reject(brokerStartupError(`Failed to spawn intercom broker: ${error.message}`, error));
-      };
-
-      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-        cleanup();
-        if (signal) {
-          reject(brokerStartupError(`Intercom broker exited before startup with signal ${signal}`));
+    try {
+      const current = await isBrokerRunning();
+      if (isBrokerAcceptable(current, targetVersion)) {
+        return;
+      }
+      if (current.ok && isBrokerVersionOlder(current.packageVersion, targetVersion)) {
+        // Pre-F12 brokers keep any queued mail in RAM only; replacing an older broker
+        // discards that RAM state. Verify the broker process before sending SIGTERM.
+        if (!await retireOutdatedBroker(current)) {
           return;
         }
-        reject(brokerStartupError(`Intercom broker exited before startup with code ${code ?? "unknown"}`));
-      };
+      }
 
-      child.once("error", onError);
-      child.once("close", onExit);
-      waitForBroker().then(() => {
-        cleanup();
-        resolve();
-      }, (error) => {
-        cleanup();
-        const startupError = toError(error);
-        reject(brokerStartupError(startupError.message, startupError));
+      const launch: BrokerLaunchSpec = { command: process.execPath, args: [fileURLToPath(brokerURL)], captureStartupStderr: true };
+      const child = spawn(launch.command, launch.args, getBrokerSpawnOptions(process.env, launch.captureStartupStderr));
+      let brokerStderr = "";
+      const rememberBrokerStderr = (chunk: Buffer | string) => {
+        brokerStderr = `${brokerStderr}${chunk.toString()}`.slice(-BROKER_STARTUP_STDERR_LIMIT);
+      };
+      const brokerStartupError = (message: string, cause?: unknown) => {
+        const stderr = brokerStderr.trim();
+        const errorMessage = stderr ? `${message}\nBroker stderr:\n${stderr}` : message;
+        return cause === undefined ? new Error(errorMessage) : new Error(errorMessage, { cause });
+      };
+      child.stderr?.on("data", rememberBrokerStderr);
+      // The detached broker's diagnostic pipe must not keep its starter alive.
+      if (child.stderr instanceof net.Socket) child.stderr.unref();
+      child.unref();
+
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          child.stderr?.off("data", rememberBrokerStderr);
+          child.stderr?.resume();
+          child.off("error", onError);
+          child.off("close", onExit);
+        };
+
+        const onError = (error: Error) => {
+          cleanup();
+          reject(brokerStartupError(`Failed to spawn intercom broker: ${error.message}`, error));
+        };
+
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+          cleanup();
+          if (signal) {
+            reject(brokerStartupError(`Intercom broker exited before startup with signal ${signal}`));
+            return;
+          }
+          reject(brokerStartupError(`Intercom broker exited before startup with code ${code ?? "unknown"}`));
+        };
+
+        child.once("error", onError);
+        child.once("close", onExit);
+        waitForStartedBroker(targetVersion, BROKER_START_TIMEOUT_MS).then(() => {
+          cleanup();
+          resolve();
+        }, (error) => {
+          cleanup();
+          const startupError = toError(error);
+          reject(brokerStartupError(startupError.message, startupError));
+        });
       });
-    });
-  } finally {
-    releaseSpawnLock();
+      return;
+    } finally {
+      releaseSpawnLock(lockToken);
+    }
   }
 }
 
-async function isBrokerRunning(): Promise<boolean> {
-  if (await checkSocketConnectable()) {
-    return true;
-  }
-
-  if (!existsSync(BROKER_PID)) return false;
-
-  try {
-    const pid = parseInt(readFileSync(BROKER_PID, "utf-8").trim(), 10);
-    if (!Number.isFinite(pid)) return false;
-    process.kill(pid, 0);
-    return checkSocketConnectable();
-  } catch {
-    // Missing or unreadable PID state means there is no live broker to reuse.
+async function retireOutdatedBroker(current: BrokerHealthProbe): Promise<boolean> {
+  const filePid = readBrokerPidMetadata(BROKER_PID).pid;
+  if (current.pid !== undefined && filePid !== undefined && current.pid !== filePid) {
     return false;
   }
+  const pid = current.pid ?? filePid;
+  if (!pid || !verifyBrokerProcess(pid, INTERCOM_DIR)) {
+    return false;
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+    return false;
+  }
+  const deadline = Date.now() + BROKER_RETIRE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid) && !(await probeBrokerHealth()).ok) {
+      return true;
+    }
+    await sleep(20);
+  }
+  return !isProcessAlive(pid) && !(await probeBrokerHealth()).ok;
+}
+
+async function isBrokerRunning(): Promise<BrokerHealthProbe> {
+  const first = await probeBrokerHealth();
+  if (first.ok) {
+    return first;
+  }
+
+  const { pid } = readBrokerPidMetadata(BROKER_PID);
+  if (!pid || !isProcessAlive(pid)) {
+    return { ok: false };
+  }
+  return probeBrokerHealth();
 }
 
 function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
@@ -164,13 +221,13 @@ function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
     : net.connect({ host: target.host, port: target.port });
 }
 
-function checkSocketConnectable(): Promise<boolean> {
+function probeBrokerHealth(): Promise<BrokerHealthProbe> {
   return new Promise((resolve) => {
     let target: BrokerConnectTarget;
     try {
       target = getBrokerConnectTarget();
     } catch {
-      resolve(false);
+      resolve({ ok: false });
       return;
     }
 
@@ -178,7 +235,7 @@ function checkSocketConnectable(): Promise<boolean> {
     const requestId = randomUUID();
     const expectedStateId = typeof target === "string" ? undefined : target.stateId;
     let settled = false;
-    const finish = (isConnected: boolean) => {
+    const finish = (probe: BrokerHealthProbe) => {
       if (settled) {
         return;
       }
@@ -188,7 +245,7 @@ function checkSocketConnectable(): Promise<boolean> {
       socket.off("error", onError);
       socket.off("data", reader);
       socket.destroy();
-      resolve(isConnected);
+      resolve(probe);
     };
     const onConnect = () => {
       try {
@@ -198,46 +255,92 @@ function checkSocketConnectable(): Promise<boolean> {
           ...(expectedStateId ? { stateId: expectedStateId } : {}),
         });
       } catch {
-        finish(false);
+        finish({ ok: false });
       }
     };
-    const onError = () => finish(false);
+    const onError = () => finish({ ok: false });
     const reader = createMessageReader((message) => {
-      finish(isBrokerHealthOkMessage(message, requestId));
-    }, () => finish(false));
+      if (!isBrokerHealthOkMessage(message, requestId)) {
+        finish({ ok: false });
+        return;
+      }
+      const response = message as Record<string, unknown>;
+      finish({
+        ok: true,
+        ...(typeof response.packageVersion === "string" ? { packageVersion: response.packageVersion } : {}),
+        ...(Number.isSafeInteger(response.pid) && Number(response.pid) > 0 ? { pid: Number(response.pid) } : {}),
+        ...(Number.isSafeInteger(response.startedAt) && Number(response.startedAt) > 0 ? { startedAt: Number(response.startedAt) } : {}),
+      });
+    }, () => finish({ ok: false }));
     socket.on("connect", onConnect);
     socket.on("error", onError);
     socket.on("data", reader);
-    const timeout = setTimeout(() => finish(false), 1000);
+    const timeout = setTimeout(() => finish({ ok: false }), 1000);
   });
 }
 
-function acquireSpawnLock(): boolean {
+function writeSpawnLockFile(token: string): void {
+  writeFileSync(BROKER_SPAWN_LOCK, `${process.pid}\n${Date.now()}\n${token}\n`, {
+    flag: "wx",
+    mode: INTERCOM_RUNTIME_FILE_MODE,
+  });
+  restrictIntercomRuntimeFile(BROKER_SPAWN_LOCK);
+}
+
+function acquireSpawnLock(): string | null {
+  const token = randomUUID();
   const maxRetries = 5;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      writeFileSync(BROKER_SPAWN_LOCK, `${process.pid}\n${Date.now()}\n`, {
-        flag: "wx",
-        mode: INTERCOM_RUNTIME_FILE_MODE,
-      });
-      restrictIntercomRuntimeFile(BROKER_SPAWN_LOCK);
-      return true;
+      writeSpawnLockFile(token);
+      return token;
     } catch (error) {
       if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== "EEXIST") {
         throw error;
       }
-      if (isSpawnLockStale()) {
-        try {
-          unlinkSync(BROKER_SPAWN_LOCK);
-        } catch {
-          // If we can't delete the stale lock, retry a few times before giving up
-        }
-        continue;
+      if (!isSpawnLockStale()) {
+        return null;
       }
-      return false;
+      if (reclaimStaleSpawnLock(token)) {
+        return token;
+      }
     }
   }
-  return false;
+  return null;
+}
+
+function reclaimStaleSpawnLock(token: string): boolean {
+  let acquiredReclaimDir = false;
+  try {
+    mkdirSync(BROKER_RECLAIM_LOCK, { mode: 0o700 });
+    acquiredReclaimDir = true;
+  } catch {
+    try {
+      if (Date.now() - statSync(BROKER_RECLAIM_LOCK).mtimeMs > 5_000) {
+        rmdirSync(BROKER_RECLAIM_LOCK);
+      }
+    } catch {}
+    return false;
+  }
+
+  try {
+    if (!isSpawnLockStale()) {
+      return false;
+    }
+    try {
+      unlinkSync(BROKER_SPAWN_LOCK);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+    writeSpawnLockFile(token);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (acquiredReclaimDir) {
+      try { rmdirSync(BROKER_RECLAIM_LOCK); } catch {}
+    }
+  }
 }
 
 function isSpawnLockStale(): boolean {
@@ -249,39 +352,49 @@ function isSpawnLockStale(): boolean {
     const [pidLine = "", createdAtLine = "0"] = readFileSync(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
     const pid = Number.parseInt(pidLine, 10);
     const createdAt = Number.parseInt(createdAtLine, 10);
-    const ageMs = Date.now() - createdAt;
-
-    if (Number.isFinite(pid)) {
-      try {
-        process.kill(pid, 0);
-      } catch {
-        // The process that created the lock is gone.
-        return true;
-      }
+    // Never preempt a live lock owner based on elapsed time alone.
+    if (Number.isSafeInteger(pid) && pid > 0) {
+      return !isProcessAlive(pid);
     }
-
-    return !Number.isFinite(createdAt) || ageMs > 10_000;
+    return !Number.isFinite(createdAt) || Date.now() - createdAt > 10_000;
   } catch {
     // Unreadable lock contents are treated as stale so a new broker can start.
     return true;
   }
 }
 
-function releaseSpawnLock(): void {
+function releaseSpawnLock(token: string): void {
   try {
+    const [, , currentToken = ""] = readFileSync(BROKER_SPAWN_LOCK, "utf-8").trim().split("\n");
+    if (currentToken !== token) return;
     unlinkSync(BROKER_SPAWN_LOCK);
   } catch {
     // Another cleanup path may already have removed the lock.
   }
 }
 
-async function waitForBroker(timeoutMs = 5000): Promise<void> {
+async function waitForStartedBroker(targetVersion?: string, timeoutMs = BROKER_START_TIMEOUT_MS): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (await checkSocketConnectable()) {
+    if (isBrokerAcceptable(await probeBrokerHealth(), targetVersion)) {
       return;
     }
-    await sleep(100);
+    await sleep(50);
+  }
+  throw new Error("Broker failed to start within timeout");
+}
+
+async function waitForBrokerOrReclaim(targetVersion: string | undefined, timeoutMs: number): Promise<"ready" | "reclaim"> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const health = await probeBrokerHealth();
+    if (isBrokerAcceptable(health, targetVersion)) {
+      return "ready";
+    }
+    if (!existsSync(BROKER_SPAWN_LOCK) || isSpawnLockStale()) {
+      return isBrokerAcceptable(await probeBrokerHealth(), targetVersion) ? "ready" : "reclaim";
+    }
+    await sleep(50);
   }
   throw new Error("Broker failed to start within timeout");
 }

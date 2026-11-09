@@ -1,18 +1,31 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 
 const root = mkdtempSync(join(tmpdir(), 'pc-pair-broker-'));
 process.env.PI_CODING_AGENT_DIR = root;
 after(() => rmSync(root, { recursive: true, force: true }));
 const { IntercomClient } = await import('../src/transport/broker/client.ts');
-const brokerPath = fileURLToPath(new URL('../dist/transport/broker/broker.js', import.meta.url));
+const { connect: connectClient } = await import('../src/transport/start.ts');
+const { getBrokerSpawnOptions, spawnBrokerIfNeeded, verifyBrokerProcess } = await import('../src/transport/broker/spawn.ts');
+const { PairApprovalStore } = await import('../src/transport/broker/pair-approvals.ts');
+const { getBrokerSocketPath } = await import('../src/transport/broker/paths.ts');
+const {
+  compareSemver,
+  INTERCOM_PACKAGE_VERSION,
+  isBrokerVersionOlder,
+} = await import('../src/transport/broker/runtime-claim.ts');
+const { formatBrokerOutdatedError } = await import('../src/extension.ts');
+const { createMessageReader, writeMessage } = await import('../src/transport/broker/framing.ts');
+const brokerURL = new URL('../dist/transport/broker/broker.js', import.meta.url);
+const brokerPath = fileURLToPath(brokerURL);
 const waitFor = async (check: () => boolean | Promise<boolean>, logs: () => string, ms = 8000) => {
   const deadline = Date.now() + ms;
   while (!await check()) {
@@ -178,5 +191,241 @@ test('F11 real broker: replacing a dead-pid registration with its socket still o
     await Promise.all([a, stale, replacement].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
     if (pidOwner && pidOwner.exitCode === null && pidOwner.signalCode === null) pidOwner.kill('SIGKILL');
     await stopBroker(broker);
+  }
+});
+
+test('Issue #37: verified older compiled broker held open by 32 clients is retired once under lock; clients reconnect and remembered pairs survive', async () => {
+  const commsDir = join(root, 'comms');
+  mkdirSync(commsDir, { recursive: true });
+  const pidPath = join(commsDir, 'broker.pid');
+  // Create a 0.1.9 copy of the real compiled broker at transport/broker/broker.js.
+  const legacyBrokerDir = join(root, 'legacy-pkg/dist/transport/broker');
+  mkdirSync(legacyBrokerDir, { recursive: true });
+  const legacyBrokerPath = join(legacyBrokerDir, 'broker.js');
+  const compiledBrokerSource = readFileSync(brokerPath, 'utf8')
+    .replaceAll(`packageVersion: INTERCOM_PACKAGE_VERSION,`, '')
+    .replaceAll('"pair-consent-v1"', '"owner-contact-v1"');
+  writeFileSync(legacyBrokerPath, compiledBrokerSource);
+
+  const aId = randomUUID(), bId = randomUUID(), legacyPeerId = randomUUID();
+  new PairApprovalStore(commsDir).decide(undefined, aId, bId, 'remembered', 'Survives broker upgrade', () => 'rt');
+
+  let legacyBroker: ChildProcess | undefined;
+  const fleet: { id: string; name: string; pairConsentV1: boolean; runtimeId: string; client: InstanceType<typeof IntercomClient> }[] = [];
+  let newA: InstanceType<typeof IntercomClient> | undefined, newB: InstanceType<typeof IntercomClient> | undefined;
+  let reconnecting = true;
+  const reconnectErrors: Error[] = [];
+
+  try {
+    const spawnOpts = getBrokerSpawnOptions(process.env, true);
+    legacyBroker = spawn(process.execPath, [legacyBrokerPath], { ...spawnOpts, stdio: ['ignore', 'pipe', 'pipe'] });
+    const logs: string[] = [];
+    legacyBroker.stdout!.on('data', chunk => logs.push(String(chunk)));
+    legacyBroker.stderr!.on('data', chunk => logs.push(String(chunk)));
+    await waitFor(() => logs.join('').includes('Intercom broker started'), () => logs.join(''));
+    const legacyPid = legacyBroker.pid!;
+    assert.equal(verifyBrokerProcess(legacyPid, commsDir), true, 'real compiled broker in commsDir passes verification');
+    assert.equal(
+      verifyBrokerProcess(legacyPid, join(root, 'other-agent/comms')),
+      false,
+      'broker running in a different agent directory must fail verification for that directory',
+    );
+
+    // Connect 32 long-lived clients (31 pair-aware + 1 pre-0.1.10) that auto-reconnect on disconnect.
+    for (let i = 0; i < 32; i++) {
+      const id = i === 0 ? legacyPeerId : randomUUID();
+      const pairConsentV1 = i !== 0;
+      const runtimeId = randomUUID();
+      const name = i === 0 ? 'Old 0.1.9 peer' : `Fleet-${i}`;
+      const attach = async () => {
+        const client = new IntercomClient();
+        client.on('error', () => undefined);
+        client.on('disconnected', () => {
+          if (!reconnecting) return;
+          setTimeout(() => {
+            if (!reconnecting) return;
+            const replacement = new IntercomClient();
+            replacement.on('error', () => undefined);
+            const entry = fleet.find(item => item.id === id);
+            if (!entry) return;
+            entry.client = replacement;
+            void connectClient(id, reg(name, pairConsentV1, runtimeId), replacement, brokerURL).catch(err => {
+              if (reconnecting) reconnectErrors.push(err instanceof Error ? err : new Error(String(err)));
+            });
+          }, 80);
+        });
+        await client.connect(reg(name, pairConsentV1, runtimeId), id);
+        return client;
+      };
+      fleet.push({ id, name, pairConsentV1, runtimeId, client: await attach() });
+    }
+
+    // Two upgraded clients connect concurrently, contending for BROKER_SPAWN_LOCK.
+    newA = new IntercomClient(); newA.on('error', () => undefined);
+    newB = new IntercomClient(); newB.on('error', () => undefined);
+    await Promise.all([
+      connectClient(aId, reg('Upgraded A'), newA, brokerURL),
+      connectClient(bId, reg('Upgraded B'), newB, brokerURL),
+    ]);
+
+    assert.equal(newA.supportsFeature('pair-consent-v1'), true);
+    assert.equal(newB.supportsFeature('pair-consent-v1'), true);
+    assert.equal(newA.brokerInfo.packageVersion, INTERCOM_PACKAGE_VERSION);
+    assert.equal(newA.brokerInfo.pid, newB.brokerInfo.pid, 'concurrent starters share one replacement broker');
+    const upgradedPid = Number(readFileSync(pidPath, 'utf8').trim());
+    assert.notEqual(upgradedPid, legacyPid, 'legacy broker PID was retired and replaced');
+    assert.equal(newA.brokerInfo.pid, upgradedPid);
+
+    // All 32 fleet clients reconnect without eviction (34 total sessions).
+    await waitFor(async () => (await newA!.listSessions()).length === 34,
+      async () => `connected=${(await newA!.listSessions()).length} errors=${reconnectErrors.map(e => e.message).join(';')}`, 8000);
+    assert.deepEqual(reconnectErrors, []);
+
+    // Remembered approval between A and B survived the automatic broker upgrade.
+    assert.equal(await mode(newA, bId), 'remembered');
+    assert.equal((await send(newB, newA)).delivered, true);
+    assert.equal((await send(newA, newB)).delivered, true);
+
+    // Pre-0.1.10 connected peer still gets per-peer PEER_OUTDATED.
+    const legacyEntry = fleet.find(item => item.id === legacyPeerId)!;
+    assert.equal((await send(newA, legacyEntry.client)).code, 'PEER_OUTDATED');
+  } finally {
+    reconnecting = false;
+    await Promise.all([newA, newB, ...fleet.map(f => f.client)].filter(Boolean).map(c => c!.disconnect().catch(() => undefined)));
+    await stopBroker(legacyBroker);
+    try { process.kill(Number(readFileSync(pidPath, 'utf8')), 'SIGTERM'); } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+});
+
+test('Issue #37: unverified PID in broker.pid is never killed or recommended for kill; stale lock is reclaimed on owner exit', async () => {
+  const commsDir = join(root, 'comms');
+  mkdirSync(commsDir, { recursive: true });
+  const socketPath = getBrokerSocketPath();
+  const pidPath = join(commsDir, 'broker.pid');
+  const lockPath = join(commsDir, 'broker.spawn.lock');
+  try { rmSync(socketPath, { force: true }); } catch {}
+
+  let bystander: ChildProcess | undefined;
+  let deceptiveBroker: ChildProcess | undefined;
+  let fakeServer: net.Server | undefined;
+  try {
+    // 1. Both an arbitrary node process AND a deceptive *broker*.js script fail verification.
+    bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const deceptivePath = join(root, 'other-broker.js');
+    writeFileSync(deceptivePath, 'setInterval(() => {}, 1000);\n');
+    deceptiveBroker = spawn(process.execPath, [deceptivePath], { cwd: commsDir, stdio: 'ignore' });
+    assert.ok(bystander.pid && deceptiveBroker.pid);
+    assert.equal(verifyBrokerProcess(bystander.pid, commsDir), false, 'non-broker process fails verification');
+    assert.equal(verifyBrokerProcess(deceptiveBroker.pid, commsDir), false, 'arbitrary *broker*.js outside transport/broker/broker.js fails verification');
+
+    writeFileSync(pidPath, String(deceptiveBroker.pid));
+    fakeServer = net.createServer(socket => {
+      socket.on('data', createMessageReader((msg: any) => {
+        if (msg.type === 'health') {
+          writeMessage(socket, { type: 'health_ok', requestId: msg.requestId, protocol: 'pi-comms', version: 1 });
+        }
+      }, () => socket.destroy()));
+    });
+    await new Promise<void>(resolve => fakeServer!.listen(socketPath, resolve));
+
+    // spawnBrokerIfNeeded must refuse to terminate the deceptive process.
+    await spawnBrokerIfNeeded(brokerURL);
+    process.kill(deceptiveBroker.pid, 0);
+
+    // Error formatter reports an unverified PID as unverified and warns NOT to kill it blindly.
+    const unverifiedError = formatBrokerOutdatedError(undefined, '0.1.11', '0.1.11', commsDir);
+    assert.match(unverifiedError, new RegExp(`^BROKER_OUTDATED: running broker \\(unverified broker\\.pid ${deceptiveBroker.pid}, version unreported \\(pre-0\\.1\\.11\\), pid-file timestamp 20`));
+    assert.match(unverifiedError, /broker\.pid could not be verified as this pi-comms broker, so do not kill it blindly/);
+    assert.doesNotMatch(unverifiedError, new RegExp(`kill ${deceptiveBroker.pid}`));
+
+    // SemVer prerelease precedence and monotonic comparison.
+    assert.equal(compareSemver('0.1.11-rc.1', '0.1.11-rc.2'), -1);
+    assert.equal(compareSemver('0.1.11-rc.2', '0.1.11-rc.10'), -1);
+    assert.equal(compareSemver('0.1.11-rc.10', '0.1.11'), -1);
+    assert.equal(isBrokerVersionOlder('0.1.11-rc.1', '0.1.11'), true);
+    assert.equal(isBrokerVersionOlder('0.1.12', '0.1.11'), false);
+
+    // 2. When a verified broker PID is known, formatBrokerOutdatedError advises asking the user to stop that verified PID.
+    await new Promise(resolve => fakeServer!.close(resolve));
+    fakeServer = undefined;
+    rmSync(pidPath, { force: true });
+    rmSync(socketPath, { force: true });
+
+    // Seed a stale lock from a dead process and verify a contender reclaims it and starts the broker.
+    const deadOwner = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await once(deadOwner, 'exit');
+    writeFileSync(lockPath, `${deadOwner.pid}\n${Date.now()}\nstale-token\n`);
+
+    await spawnBrokerIfNeeded(brokerURL);
+    const liveBrokerPid = Number(readFileSync(pidPath, 'utf8').trim());
+    assert.equal(verifyBrokerProcess(liveBrokerPid, commsDir), true);
+
+    const verifiedDowngradedError = formatBrokerOutdatedError(
+      { pid: liveBrokerPid, packageVersion: '0.1.10', startedAt: Date.parse('2026-11-04T02:47:27.000Z') },
+      '0.1.11',
+      '0.1.10',
+      commsDir,
+    );
+    assert.match(verifiedDowngradedError, new RegExp(`running broker \\(pid ${liveBrokerPid}, v0\\.1\\.10, started 2026-11-04T02:47:27\\.000Z\\) and on-disk broker \\(v0\\.1\\.10\\) are older than this session \\(v0\\.1\\.11\\)`));
+    assert.match(verifiedDowngradedError, new RegExp(`ask the user to update the installed pi-comms package and then stop broker pid ${liveBrokerPid} \\(kill ${liveBrokerPid}\\)`));
+  } finally {
+    if (fakeServer) await new Promise(resolve => fakeServer!.close(resolve));
+    if (bystander && bystander.exitCode === null && bystander.signalCode === null) bystander.kill('SIGKILL');
+    if (deceptiveBroker && deceptiveBroker.exitCode === null && deceptiveBroker.signalCode === null) deceptiveBroker.kill('SIGKILL');
+    try { process.kill(Number(readFileSync(pidPath, 'utf8')), 'SIGTERM'); } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+    rmSync(pidPath, { force: true });
+    rmSync(socketPath, { force: true });
+    rmSync(lockPath, { force: true });
+  }
+});
+
+test('Issue #37: waiting client reclaims and replaces outdated broker when first upgrader releases lock without upgrading', async () => {
+  const commsDir = join(root, 'comms');
+  mkdirSync(commsDir, { recursive: true });
+  const pidPath = join(commsDir, 'broker.pid');
+  const lockPath = join(commsDir, 'broker.spawn.lock');
+  const legacyBrokerPath = join(root, 'legacy-pkg/dist/transport/broker/broker.js');
+  mkdirSync(join(root, 'legacy-pkg/dist/transport/broker'), { recursive: true });
+  writeFileSync(
+    legacyBrokerPath,
+    readFileSync(brokerPath, 'utf8')
+      .replaceAll(`packageVersion: INTERCOM_PACKAGE_VERSION,`, '')
+      .replaceAll('"pair-consent-v1"', '"owner-contact-v1"'),
+  );
+
+  let legacyBroker: ChildProcess | undefined;
+  let waitingClient: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    const spawnOpts = getBrokerSpawnOptions(process.env, true);
+    legacyBroker = spawn(process.execPath, [legacyBrokerPath], { ...spawnOpts, stdio: ['ignore', 'pipe', 'pipe'] });
+    const logs: string[] = [];
+    legacyBroker.stdout!.on('data', chunk => logs.push(String(chunk)));
+    legacyBroker.stderr!.on('data', chunk => logs.push(String(chunk)));
+    await waitFor(() => logs.join('').includes('Intercom broker started'), () => logs.join(''));
+    const legacyPid = legacyBroker.pid!;
+
+    // Simulate a first upgrader holding BROKER_SPAWN_LOCK while a second client waits.
+    writeFileSync(lockPath, `${process.pid}\n${Date.now()}\nfirst-upgrader-token\n`);
+    waitingClient = new IntercomClient();
+    waitingClient.on('error', () => undefined);
+    const pendingConnect = connectClient(randomUUID(), reg('Waiting B'), waitingClient, brokerURL);
+
+    // Wait until the second client has entered waitForBrokerOrReclaim, then release the lock
+    // while the outdated broker is still running.
+    await new Promise(resolve => setTimeout(resolve, 80));
+    rmSync(lockPath, { force: true });
+
+    await pendingConnect;
+    assert.equal(waitingClient.supportsFeature('pair-consent-v1'), true, 'waiting client must not accept the outdated broker when lock disappears');
+    assert.equal(waitingClient.brokerInfo.packageVersion, INTERCOM_PACKAGE_VERSION);
+    assert.notEqual(waitingClient.brokerInfo.pid, legacyPid, 'waiting client reclaimed the lock and replaced the outdated broker');
+  } finally {
+    await waitingClient?.disconnect().catch(() => undefined);
+    await stopBroker(legacyBroker);
+    try { process.kill(Number(readFileSync(pidPath, 'utf8')), 'SIGTERM'); } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+    rmSync(lockPath, { force: true });
   }
 });

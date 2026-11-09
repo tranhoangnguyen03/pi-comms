@@ -116,7 +116,7 @@ A pair is either **approved or not approved**; there is no block list. `/comms r
 
 The broker stores remembered approvals only, keyed by the shared comms scope and the two sorted native Pi session IDs, and saves them before reporting success. Session-only approvals stay in broker memory. Local session records retain message history, visibility, Pause and recovery evidence, not approvals. A fork (`B_new`) has a different ID, so `A–B_new` needs its own approval. Rename does not change a pair. When a session-only approval ends because a Pi session left (unregister, a reload, or replacement of a dead-PID registration whose socket is still open), the remaining participant is notified and its affected asks end as disconnected.
 
-**Upgrading from 0.1.9:** Earlier approvals and refusals in saved sessions are history only; any messages they made readable stay readable. All sessions sharing a broker must run 0.1.10: a session talking to an older peer gets `PEER_OUTDATED`, and a session that finds an older broker still running gets `BROKER_OUTDATED`. Reload or close the older sessions; the old broker exits when they leave and newer sessions reconnect automatically.
+**Upgrading from 0.1.9 or 0.1.10:** Earlier approvals and refusals in saved sessions are history only; any messages they made readable stay readable. When an updated session connects and finds an older verified `pi-comms` broker process running while a newer broker is installed on disk, it automatically retires the older broker under the spawn lock and starts the current broker; other connected sessions reconnect after ~1s. A stale or unverified `broker.pid` is never terminated automatically. Replacing a running broker ends in-memory **Allow this session** approvals (remembered pair approvals in `pair-approvals.json` survive), ends active `comms_ask` waits as `disconnected`, leaves unconfirmed in-flight sends as `OUTCOME_UNKNOWN`, and discards any RAM-only mail held in a pre-F12 broker. Older un-reloaded pre-0.1.10 sessions still get per-peer `PEER_OUTDATED` on pair operations. If a broker predating shared pair approval cannot be replaced automatically, `BROKER_OUTDATED` reports the broker version and start/PID-file timestamp, tells the user how to stop a verified broker PID (or warns not to blindly kill an unverified `broker.pid`), and surfaces the same diagnostic in `/comms status`.
 
 The explicit `/comms approve` command only grants/edits approval and sends no message. Cancel/Esc keeps the existing approval and active asks. If the broker cannot save a remembered approval, that one choice fails with `PAIR_SAVE_FAILED` and nothing else changes; an unreadable approvals file is moved aside (`pair-approvals.json.unreadable-*`) and remembered approvals must be granted again.
 
@@ -128,7 +128,7 @@ The explicit `/comms approve` command only grants/edits approval and sends no me
 npm ci --ignore-scripts
 npm run build
 npm run test:base
-npm pack --ignore-scripts   # build first; produces pi-comms-0.1.10.tgz
+npm pack --ignore-scripts   # build first; produces pi-comms-0.1.11.tgz
 ```
 
 To try without modifying normal Pi settings, use an owned temporary agent directory and the unpacked package:
@@ -142,7 +142,7 @@ PI_CODING_AGENT_DIR=/tmp/comms-try/agent pi -e /tmp/comms-try/package
 
 Launch the second Pi with the same isolated agent directory. No mandatory init command. The local broker starts at session startup, not factory evaluation. It uses `comms/` under the configured agent directory, separately from intercom. No automatic bridge or migration of existing intercom asks.
 
-For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.6`, which is published). The `0.1.10` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
+For a reproducible installation, check the version on npm, then pin it (for example, `pi install npm:pi-comms@0.1.10`, which is published). The `0.1.11` tarball above describes this development candidate, **not** a claim that npm has published it. Use the isolated instructions above when evaluating unpublished changes. Release lifecycle and initial npm setup are documented in [RELEASING.md](RELEASING.md).
 
 ## First run
 
@@ -214,7 +214,7 @@ F10 restores saved-session message/outbox records, authorized historical visibil
 
 ## Update and rollback
 
-Pause and finish/inspect outstanding work before replacing the package. Record useful work products outside the transport. Exit participating sessions and their shared broker, replace the reviewed artifact, then restart and renew contacts. Requester-only approval requires the `owner-contact-v1` broker capability and matching reviewed participant artifacts; an older broker rejects this send path rather than silently dropping the approval. Rollback uses the retained older artifact, but pre-F10 builds cannot restore F10 native communication records. Do not erase or rewrite saved session files during rollback; return to a compatible build to recover those records. No automatic work replay or durable offline delivery is promised. Do not blindly repeat uncertain sends after restart.
+Pause and finish/inspect outstanding work before replacing the package. Record useful work products outside the transport. When a newer broker artifact is installed on disk, the next connecting session verifies the older running broker process and replaces it under the spawn lock, or you can stop the old broker and restart participating sessions manually. Replacing a running broker ends session-only approvals, ends active local `comms_ask` waits as `disconnected`, and loses any RAM-only mail held by a pre-F12 broker; remembered pair approvals in `pair-approvals.json` survive. Rollback uses the retained older artifact, but pre-F10 builds cannot restore F10 native communication records, and an in-memory session newer than a downgraded on-disk broker reports `BROKER_OUTDATED` without entering a kill loop. Do not erase or rewrite saved session files during rollback; return to a compatible build to recover those records. No automatic work replay or durable offline delivery is promised. Do not blindly repeat uncertain sends after restart.
 
 ## Verification
 

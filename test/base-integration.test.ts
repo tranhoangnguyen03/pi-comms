@@ -8,7 +8,10 @@ import { fauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
 import { KeybindingsManager, TUI_KEYBINDINGS } from '@earendil-works/pi-tui';
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, createReadTool, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { fileURLToPath } from 'node:url';
+import net from 'node:net';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { Type } from 'typebox';
+import { createMessageReader, writeMessage } from '../src/transport/broker/framing.ts';
 const extensionPath = process.env.PI_COMMS_TEST_EXTENSION ?? fileURLToPath(new URL('../dist/extension.js', import.meta.url));
 
 const root = mkdtempSync(join(tmpdir(), 'pc-base-native-'));
@@ -1504,4 +1507,62 @@ test('ask retains unadmitted replies while a human revoke decision is open', asy
     release?.(); await inspection;
     assert.equal(leaked, false, 'unadmitted ask payload must remain held during the human decision');
   } finally { release?.(); await b.close(); await a.close(); }
+});
+
+test('Issue #37 native extension: unreplaceable outdated broker preserves unverified PID notice in BROKER_OUTDATED and /comms status, then recovers', async () => {
+  const commsDir = join(root, 'comms');
+  mkdirSync(commsDir, { recursive: true });
+  const pidPath = join(commsDir, 'broker.pid');
+  const socketPath = join(commsDir, 'broker.sock');
+  try { process.kill(Number(readFileSync(pidPath, 'utf8')), 'SIGTERM'); } catch {}
+  await new Promise(resolve => setTimeout(resolve, 60));
+  rmSync(socketPath, { force: true });
+
+  // Spawn an unrelated process named other-broker.js so command-line verification is actually exercised.
+  const bystanderScript = join(root, 'other-broker.js');
+  writeFileSync(bystanderScript, 'setInterval(() => {}, 1000);\n');
+  let bystander: ChildProcess | undefined = spawn(process.execPath, [bystanderScript], { cwd: commsDir, stdio: 'ignore' });
+  assert.ok(bystander.pid);
+  writeFileSync(pidPath, String(bystander.pid));
+  const outdatedServer = net.createServer(socket => {
+    socket.on('data', createMessageReader((msg: any) => {
+      if (msg.type === 'health') {
+        writeMessage(socket, { type: 'health_ok', requestId: msg.requestId, protocol: 'pi-comms', version: 1 });
+      } else if (msg.type === 'register') {
+        writeMessage(socket, { type: 'registered', sessionId: msg.sessionId ?? randomUUID(), features: ['extension-bus-v1', 'exact-send-v1', 'owner-contact-v1'] });
+      }
+    }, () => socket.destroy()));
+  });
+  await new Promise<void>(resolve => outdatedServer.listen(socketPath, resolve));
+
+  let a: Awaited<ReturnType<typeof participant>> | undefined;
+  try {
+    a = await participant('outdated-broker-check');
+    process.kill(bystander.pid, 0);
+    const failed = data(await a.tool('comms_peers', {}));
+    assert.equal(failed.ok, false);
+    assert.equal(failed.error.code, 'BROKER_OUTDATED');
+    assert.match(failed.error.message, new RegExp(`^BROKER_OUTDATED: running broker \\(unverified broker\\.pid ${bystander.pid}, version unreported \\(pre-0\\.1\\.11\\), pid-file timestamp 20`));
+    assert.match(failed.error.message, /do not kill it blindly/);
+    assert.doesNotMatch(failed.error.message, new RegExp(`kill ${bystander.pid}`));
+    assert.match(failed.error.nextAction, /Restarting this session alone will not replace a broker held open by other sessions/);
+
+    await a.command('status');
+    const failedStatus = a.notifications.at(-1) ?? '';
+    assert.match(failedStatus, /waiting · \d+ uncertain · BROKER_OUTDATED/);
+    assert.match(failedStatus, new RegExp(`BROKER_OUTDATED: running broker \\(unverified broker\\.pid ${bystander.pid}`));
+
+    await new Promise<void>(resolve => outdatedServer.close(() => resolve()));
+    rmSync(socketPath, { force: true });
+    rmSync(pidPath, { force: true });
+
+    const recovered = data(await a.tool('comms_peers', {}));
+    assert.equal(recovered.ok, true);
+    await a.command('status');
+    assert.match(a.notifications.at(-1) ?? '', /Broker: .* \(pid \d+ · v\d+\.\d+\.\d+ · started 20/);
+  } finally {
+    try { outdatedServer.close(); } catch {}
+    if (bystander && bystander.exitCode === null && bystander.signalCode === null) bystander.kill('SIGKILL');
+    await a?.close();
+  }
 });
