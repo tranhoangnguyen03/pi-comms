@@ -1589,6 +1589,17 @@ test('F12 installed Pi: remembered exact offline mail survives broker restart an
     assert.equal(sent.ok, true, JSON.stringify(sent.error));
     assert.equal(sent.data.delivery, 'queued');
     const mid = sent.data.message.id;
+    // A blocking ask to the same offline peer must fail on its own, never enter
+    // the durable mailbox or create a restored waiter.
+    const offlineAsk = data(await a.tool('comms_ask', {
+      requests: [{ to: originalId, subject: 'Unqueued ask', text: 'F12_DO_NOT_QUEUE_ASK' }],
+      timeoutSeconds: 0.2,
+    }));
+    assert.equal(offlineAsk.ok, true);
+    assert.notEqual(offlineAsk.data.items[0].outcome, 'replied');
+    assert.notEqual(offlineAsk.data.items[0].outcome, 'timeout', 'offline ask is unavailable, not a queued wait');
+    assert.equal(JSON.parse(readFileSync(join(root,'comms','mailbox.json'),'utf8')).pending.length, 1,
+      'only the asynchronous message was accepted offline');
     assert.equal(b.observed.length, modelCallsBefore, 'replacement session does not receive old exact-ID mail');
 
     const brokerPid = Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8'));
