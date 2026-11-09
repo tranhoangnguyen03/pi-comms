@@ -70,9 +70,10 @@ export class DurableMailbox {
       }
       this.items = data.pending; this.evidence = data.terminal;
     } catch (error) {
-      const aside = this.path + '.unreadable-' + Date.now();
-      try { renameSync(this.path, aside); } catch { /* Do not overwrite unreadable evidence. */ }
-      this.blocked = 'MAILBOX_UNREADABLE: ' + String(error) + '; preserved at ' + aside;
+      // Unlike a remembered-approval store, a corrupt mailbox may conceal work
+      // already acknowledged as queued. Leave it in place so every broker
+      // restart stays fail-closed until the owner repairs or explicitly removes it.
+      this.blocked = 'MAILBOX_UNREADABLE: ' + String(error) + '; preserve and inspect ' + this.path;
     }
   }
   private commit(pending: MailItem[], terminal: MailEvidence[]): void {
