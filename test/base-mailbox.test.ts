@@ -161,8 +161,8 @@ test('F12 real broker: committed expiry remains visible after restart', async ()
   const message = { id: mid, timestamp: staleAt, content: { text: 'expired body' } };
   const from = { id: fromId, cwd: root, model: 'fixture', pid: process.pid,
     startedAt: staleAt, lastActivity: staleAt, endpointEpoch: randomUUID() };
-  new DurableMailbox(join(root, 'comms')).enqueue({ from, fromKey: fromId,
-    targetId, targetKey: targetId, scope: null, message, queuedAt: staleAt,
+  new DurableMailbox(join(root, 'comms')).enqueue({ from, fromKey: JSON.stringify([null, fromId]),
+    targetId, targetKey: JSON.stringify([null, targetId]), scope: null, message, queuedAt: staleAt,
     expiresAt: staleAt + MAIL_TTL_MS,
     fingerprint: messageDeliveryFingerprint(message, targetId) });
   let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined;
