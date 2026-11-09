@@ -437,6 +437,12 @@ class IntercomBroker {
     this.rememberDisconnectedSession(existing);
     this.sessions.delete(existing.key);
     this.clearMessageReceiptRoutesForSession(existing.key);
+    // A socket offer is not durable proof. Forget its endpoint marker when
+    // that connection ends so reconnects may safely receive the same ID.
+    const endedEndpoint = ":" + existing.info.endpointEpoch;
+    for (const offerKey of this.offeredMail) {
+      if (offerKey.endsWith(endedEndpoint)) this.offeredMail.delete(offerKey);
+    }
     for (const peer of this.pairApprovals.expireSession(existing.scopeId, existing.info.id, keepRuntime)) {
       this.publishPair(existing.scopeId, existing.info.id, peer, "expired");
     }
@@ -1095,7 +1101,7 @@ class IntercomBroker {
         this.pruneMailboxMessages();
         const items = clientMessage.ids.map(id => {
           const item = this.mailbox.lookup(currentKey!, id);
-          if (!item) return { id, state: "unknown" as const };
+          if (!item) return { id, state: "unknown" as const, ...(this.mailbox.blocked ? { reason: "broker mailbox unreadable; delivery evidence cannot be checked" } : {}) };
           return { id, state: ("message" in item ? "queued" : item.outcome),
             targetId: item.targetId, at: "message" in item ? item.queuedAt : item.at,
             fingerprint: item.fingerprint };
