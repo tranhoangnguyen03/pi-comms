@@ -43,7 +43,17 @@ type BrokerLaunchSpec = {
   captureStartupStderr: boolean;
 };
 
-export type BrokerHealthProbe = { ok: boolean } & BrokerRuntimeInfo;
+export type BrokerHealthProbe = { ok: boolean; occupied?: boolean } & BrokerRuntimeInfo;
+
+function assertBrokerEndpointAvailable(probe: BrokerHealthProbe): void {
+  if (!probe.occupied) return;
+  throw new Error(
+    `An existing process is listening at the pi-comms broker endpoint in ${INTERCOM_DIR}, ` +
+    "but it does not answer the supported health protocol. Ask the user to inspect and stop that process, " +
+    "then restart participating Pi/PiG sessions with a compatible pi-comms build. " +
+    "The existing socket was not removed.",
+  );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -79,7 +89,7 @@ export function getBrokerSpawnOptions(
     detached: true,
     stdio: captureStderr ? ["ignore", "ignore", "pipe"] : "ignore",
     // Windows locks a process's cwd against renames, so keep it outside the package.
-    cwd: getIntercomDirPath(agentDir),
+    cwd: getIntercomDirPath(agentDir, env),
     env: { ...env, PI_CODING_AGENT_DIR: agentDir, NODE_NO_WARNINGS: "1" },
     windowsHide: true,
   };
@@ -95,7 +105,9 @@ export async function spawnBrokerIfNeeded(brokerURL: URL): Promise<void> {
   const deadline = Date.now() + BROKER_LOCK_WAIT_TIMEOUT_MS;
 
   while (true) {
-    if (isBrokerAcceptable(await isBrokerRunning(), targetVersion)) {
+    const initial = await isBrokerRunning();
+    assertBrokerEndpointAvailable(initial);
+    if (isBrokerAcceptable(initial, targetVersion)) {
       return;
     }
 
@@ -110,6 +122,7 @@ export async function spawnBrokerIfNeeded(brokerURL: URL): Promise<void> {
 
     try {
       const current = await isBrokerRunning();
+      assertBrokerEndpointAvailable(current);
       if (isBrokerAcceptable(current, targetVersion)) {
         return;
       }
@@ -204,7 +217,7 @@ async function retireOutdatedBroker(current: BrokerHealthProbe): Promise<boolean
 
 async function isBrokerRunning(): Promise<BrokerHealthProbe> {
   const first = await probeBrokerHealth();
-  if (first.ok) {
+  if (first.ok || first.occupied) {
     return first;
   }
 
@@ -212,7 +225,8 @@ async function isBrokerRunning(): Promise<BrokerHealthProbe> {
   if (!pid || !isProcessAlive(pid)) {
     return { ok: false };
   }
-  return probeBrokerHealth();
+  const second = await probeBrokerHealth();
+  return second.ok || second.occupied ? second : { ok: false, occupied: true };
 }
 
 function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
@@ -235,6 +249,7 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
     const requestId = randomUUID();
     const expectedStateId = typeof target === "string" ? undefined : target.stateId;
     let settled = false;
+    let connected = false;
     const finish = (probe: BrokerHealthProbe) => {
       if (settled) {
         return;
@@ -248,6 +263,7 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
       resolve(probe);
     };
     const onConnect = () => {
+      connected = true;
       try {
         writeMessage(socket, {
           type: "health",
@@ -255,13 +271,13 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
           ...(expectedStateId ? { stateId: expectedStateId } : {}),
         });
       } catch {
-        finish({ ok: false });
+        finish({ ok: false, occupied: true });
       }
     };
-    const onError = () => finish({ ok: false });
+    const onError = () => finish({ ok: false, ...(connected ? { occupied: true } : {}) });
     const reader = createMessageReader((message) => {
       if (!isBrokerHealthOkMessage(message, requestId)) {
-        finish({ ok: false });
+        finish({ ok: false, occupied: true });
         return;
       }
       const response = message as Record<string, unknown>;
@@ -271,11 +287,11 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
         ...(Number.isSafeInteger(response.pid) && Number(response.pid) > 0 ? { pid: Number(response.pid) } : {}),
         ...(Number.isSafeInteger(response.startedAt) && Number(response.startedAt) > 0 ? { startedAt: Number(response.startedAt) } : {}),
       });
-    }, () => finish({ ok: false }));
+    }, () => finish({ ok: false, occupied: true }));
     socket.on("connect", onConnect);
     socket.on("error", onError);
     socket.on("data", reader);
-    const timeout = setTimeout(() => finish({ ok: false }), 1000);
+    const timeout = setTimeout(() => finish({ ok: false, ...(connected ? { occupied: true } : {}) }), 1000);
   });
 }
 
@@ -388,6 +404,7 @@ async function waitForBrokerOrReclaim(targetVersion: string | undefined, timeout
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const health = await probeBrokerHealth();
+    assertBrokerEndpointAvailable(health);
     if (isBrokerAcceptable(health, targetVersion)) {
       return "ready";
     }
