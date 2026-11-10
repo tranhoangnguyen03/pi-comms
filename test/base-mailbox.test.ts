@@ -465,3 +465,51 @@ test('F12: receiver_recorded also completes an ordinary live send that waits for
     await stop(broker);
   }
 });
+
+test('F12: past-expiry mail with a failed terminal write is unknown, not queued, on inspect and replay', async () => {
+  const aId = randomUUID(), bId = randomUUID(), mid = randomUUID();
+  const mailPath = join(root, 'comms', 'mailbox.json');
+  const savedPath = mailPath + '.prior-expiry-test';
+  const unsettledPath = mailPath + '.unsaved-expiry';
+  let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined;
+  try {
+    if (existsSync(mailPath)) renameSync(mailPath, savedPath);
+    const at = Date.now() - MAIL_TTL_MS - 1000;
+    const message = { id: mid, timestamp: at, content: { text: 'original expired content' } };
+    const from = { id: aId, cwd: root, model: 'fixture', pid: process.pid,
+      startedAt: at, lastActivity: at, endpointEpoch: randomUUID() };
+    new DurableMailbox(join(root, 'comms')).enqueue({
+      from, fromKey: JSON.stringify([null, aId]), targetId: bId,
+      targetKey: JSON.stringify([null, bId]), scope: null,
+      message, queuedAt: at, expiresAt: at + MAIL_TTL_MS,
+      fingerprint: mailFingerprint(message, bId),
+    });
+    new PairApprovalStore(join(root, 'comms')).decide(undefined, aId, bId,
+      'remembered', 'Original offline review', () => randomUUID());
+    broker = await start();
+    // The broker has loaded this old mail, but its first attempt to save the
+    // expiration outcome fails. It must not lie about a still-active queue.
+    renameSync(mailPath, unsettledPath);
+    mkdirSync(mailPath);
+    a = await peer(aId, 'A expired send');
+    const checked = (await a.mailboxEvidence([mid]))[0];
+    assert.equal(checked.state, 'unknown');
+    assert.match(checked.reason ?? '', /expired.*terminal outcome/i);
+    const replay = await a.sendExact(bId, undefined,
+      { messageId: mid, text: 'original expired content' }, 'async');
+    assert.equal(replay.delivered, false);
+    assert.equal(replay.delivery, 'unknown');
+    assert.equal(replay.outcomeKnown, false);
+    assert.equal(replay.code, 'MAILBOX_SAVE_FAILED');
+    const changed = await a.sendExact(bId, undefined,
+      { messageId: mid, text: 'different expired content' }, 'async');
+    assert.equal(changed.code, 'E_MESSAGE_ID_REUSE',
+      'content conflict takes precedence over a failed expiry settlement');
+  } finally {
+    await a?.disconnect().catch(() => undefined);
+    await stop(broker);
+    rmSync(mailPath, { recursive: true, force: true });
+    rmSync(unsettledPath, { force: true });
+    if (existsSync(savedPath)) renameSync(savedPath, mailPath);
+  }
+});
