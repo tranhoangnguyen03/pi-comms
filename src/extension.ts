@@ -610,6 +610,10 @@ export default function comms(pi: ExtensionAPI) {
           }
           const peer = available.find(p => p.id === selected);
           if (!peer || selected === current.self) throw new Error('TARGET_UNAVAILABLE');
+          await ensureConnection();
+          const livePeer = (await client!.listSessions()).find(p => p.id === selected);
+          if (!livePeer?.durableMailboxV1)
+            throw Error('PEER_OUTDATED: the colleague must update pi-comms before this pair can be approved');
           const collaboration = await commandCtx.ui.input('What work is this colleague approved for?'); if (!collaboration?.trim()) return;
           // /comms approve only grants or edits consent. Unlike a first-contact
           // No, Cancel/Esc here never revokes an existing peer or ends its asks.
@@ -694,6 +698,8 @@ export default function comms(pi: ExtensionAPI) {
       if (current.isApproved(to)) return resolved;
       const peer = (await client!.listSessions()).find(p => p.id === to);
       if (!peer || to === current.self) throw new Error('TARGET_UNAVAILABLE');
+      if (!peer.durableMailboxV1)
+        throw Error('PEER_OUTDATED: the colleague must update pi-comms before contact approval');
       await approveContact(to, peer.name ?? to, source?.subject ?? input.subject!, input.text, 'send', signal);
     }
     if (signal?.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
