@@ -129,6 +129,12 @@ remain only in the respective private homes.
 
 **Physical human control:** Test actual Escape and owner approval dialogs in the installed Pi/PiG TUIs; scripted broker pair decisions do not substitute for this evidence. Verify session-only approval across a *socket drop* separately from a full runtime/broker restart.
 
+## Incompatible or occupied broker endpoint
+
+If `comms_peers` or `/comms status` reports `BROKER_ENDPOINT_OCCUPIED`, another process answers at the chosen broker socket but does not speak the expected pi-comms health protocol. The Pi/​PiG extension must show the **original broker directory, stop/inspect guidance and the fact that the socket was left intact**, not a generic `TARGET_UNAVAILABLE`. Inspect the process bound to that exact endpoint before stopping it; never delete a live socket or kill a PID whose identity is unverified. A live/stale PID without any listening socket is not itself evidence that the endpoint is occupied.
+
+`BROKER_OUTDATED` remains distinct: a recognizable older pi-comms broker may be safely replaced under the existing verified PID/cwd spawn lock; an unverified process is never killed blindly. A failing broker cannot silently cause a second invisible broker for the same shared root.
+
 ## Evidence ledger
 
 | Journey / check | Result | Evidence required |
