@@ -1686,3 +1686,37 @@ test('F12 native: known older live peer gets PEER_OUTDATED before any owner cont
     await old.disconnect().catch(() => undefined); await a.close();
   }
 });
+
+test('F12 installed Pi: inspecting live sends and live asks never invents broker-mail unknown', async () => {
+  const a = await participant('f12-inspect-live-sender');
+  const b = await participant('f12-inspect-live-receiver');
+  try {
+    a.confirm(true);
+    await a.command(`approve ${b.id()}`);
+    await b.command('pause');
+    const sent = data(await a.tool('comms_message', {
+      to: b.id(), subject: 'Live only review', text: 'normal socket delivery',
+    }));
+    assert.equal(sent.ok, true);
+    assert.equal(sent.data.delivery, 'socket_delivered');
+    const id = sent.data.message.id;
+    const inspected = data(await a.tool('comms_inspect', { message: id })).data;
+    assert.equal(inspected.brokerDelivery, undefined);
+    const rows = data(await a.tool('comms_inspect', { requests: [id] })).data.responses;
+    assert.equal(rows[0].brokerDelivery, undefined,
+      'normal socket delivery is not unknown offline mail');
+    const outbox = data(await a.tool('comms_inspect', { outbox: 'self' })).data.items;
+    assert.equal(outbox.find((item: any) => item.message.id === id)?.brokerDelivery, undefined);
+    const ask = data(await a.tool('comms_ask', {
+      requests: [{ to: b.id(), subject: 'Live ask', text: 'wait briefly' }],
+      timeoutSeconds: 0.1,
+    }));
+    assert.equal(ask.ok, true);
+    const askId = ask.data.items[0].request;
+    assert.ok(askId);
+    assert.equal(data(await a.tool('comms_inspect', { requests: [askId] })).data.responses[0].brokerDelivery,
+      undefined, 'live first-reply waiter never creates an offline-mail status');
+  } finally {
+    await b.close(); await a.close();
+  }
+});
