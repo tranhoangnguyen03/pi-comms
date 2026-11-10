@@ -71,12 +71,10 @@ jobs:
           set -eu
           TAG="v$V"
           if gh release view "$TAG" >/dev/null 2>&1; then exit 0; fi
-          found=''
-          for attempt in $(seq 1 36); do
-            if npm view "pi-comms@$V" version >/dev/null 2>&1; then found=1; break; fi
-            sleep 5
-          done
-          test -n "$found"
+          # The prior npm publish step must succeed before this job can reach
+          # GitHub release. npm's public version index can lag a successful
+          # publish; do not turn that eventual consistency into a failed release.
+          test -f "pi-comms-$V.tgz"
           node --input-type=module -e '
             import fs from "node:fs";
             const lines = fs.readFileSync("CHANGELOG.md", "utf8").split("\n");
