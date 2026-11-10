@@ -129,7 +129,7 @@ export function getBrokerListenTarget(
     return { transport: "tcp", host: INTERCOM_TCP_HOST, port: 0 };
   }
 
-  return getBrokerSocketPath(platform, getAgentDirPath(env));
+  return getBrokerSocketPath(platform, getAgentDirPath(env), env);
 }
 
 export function ensureIntercomRuntimeDir(
