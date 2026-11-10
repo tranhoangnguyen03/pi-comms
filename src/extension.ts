@@ -613,7 +613,7 @@ export default function comms(pi: ExtensionAPI) {
         if (!current.entry(id)) { commandCtx.ui.notify('That message is not available in this saved session. Older memory-only records cannot be reconstructed. /comms inspect with no ID shows waiting messages.', 'info'); return; }
       }
       observeSaved();
-      if (id) await refreshMailEvidence([id]);
+      if (id && current.isBrokerMailCandidate(id)) await refreshMailEvidence([id]);
       if (stopped || runtime !== current) return;
       try { await withDialog(signal => showInspection(commandCtx, cursor => id !== undefined ? current.inspect({ message: id }, 'human') : current.inspect({ queue: 'self', ...(cursor ? { cursor } : {}) }, 'human'), { self: current.self, name, approved: current.isApproved }, signal)); }
       catch (error) { commandCtx.ui.notify(String(error), 'info'); }
@@ -774,10 +774,10 @@ export default function comms(pi: ExtensionAPI) {
     observeSaved();
     const projected = owner.inspect(resolved);
     const ids = new Set<string>();
-    if (input.requests) for (const id of input.requests) if (owner.entry(id)?.message.from === owner.self) ids.add(id);
+    if (input.requests) for (const id of input.requests) if (owner.isBrokerMailCandidate(id)) ids.add(id);
     const visit = (value: any, depth = 0) => {
       if (!value || typeof value !== 'object' || depth > 5) return;
-      if (value.message?.from === owner.self && typeof value.message.id === 'string') ids.add(value.message.id);
+      if (typeof value.message?.id === 'string' && owner.isBrokerMailCandidate(value.message.id)) ids.add(value.message.id);
       if (Array.isArray(value)) for (const item of value) visit(item, depth + 1);
       else if (depth < 5) for (const [key, item] of Object.entries(value)) if (key !== 'message' && key !== 'text' && key !== 'structured') visit(item, depth + 1);
     };
