@@ -6,6 +6,8 @@ Read the [product and development principles](https://github.com/tranhoangnguyen
 
 Communication between existing Pi sessions: user-approved contacts, exact native session addresses, replies across turns/tools, and human-first batches. It does not launch agents or own their work.
 
+**Cross-home Pi/PiG collaboration (0.2.0 candidate):** Set the same **absolute** `PI_COMMS_BROKER_DIR` for each running native Pi or independently installed PiG-Agent process. Keep each `PI_CODING_AGENT_DIR` private. Without the override, Comms still uses `<agent-dir>/comms`. The shared broker provides discovery and exact-ID routing; it does not launch agents, share credentials/session files, or grant contact permission. F10 saved-session history, F11 unordered pair approval and F12 durable exact async offline mail remain in force. See [PiG cross-home qualification](docs/PIG-CROSS-HOME-QUALIFICATION.md). Scripted process checks are not claims of real PiG approval/model conversations.
+
 User-approved communication for Pi. Install the published package with `pi install npm:pi-comms`. Release availability is shown on [npm](https://www.npmjs.com/package/pi-comms) and [GitHub Releases](https://github.com/tranhoangnguyen03/pi-comms/releases). Tested with Pi 1.4.0; CI verifies Node 22.19.0/24 on Linux and Node 24 on macOS. Other Pi versions are not claimed. [Base integration evidence and limits](docs/BASE-3.md). Historical [spike delivery](docs/GATE-C-DELIVERY.md) and [Gate A/B report](docs/SPIKE-2-REPORT.md) remain unchanged.
 
 ## Common calls

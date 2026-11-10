@@ -57,6 +57,7 @@ const recovery: Record<string, string> = {
   CONTACT_APPROVAL_REQUIRED: 'No message was sent. Contact needs a human confirmation UI; open /comms approve in an interactive session.',
   AMBIGUOUS_PEER: 'Choose one of the listed native IDs; no message was sent. Exact names must be unique.',
   BROKER_OUTDATED: 'The shared broker lacks a required pi-comms capability. Nothing was sent. Restarting this session alone will not replace a broker held open by other sessions. Ask the user to follow the broker details above (stop a verified PID or inspect an unverified holder); update the installed package when needed.',
+  BROKER_ENDPOINT_OCCUPIED: 'An existing process holds the selected pi-comms broker endpoint but does not answer the supported health protocol. No message was sent. Inspect the exact broker directory and its live listener; stop or update that process, then reload the participating Pi/PiG sessions. The socket was preserved; do not delete or kill an unverified process.',
   PEER_OUTDATED: 'The colleague runs an older pi-comms without the required shared communication protocol. Nothing was sent. Ask the user to update pi-comms in that session and reload it, then try again.',
   MAILBOX_FULL: 'The offline mailbox is full; this new message was rejected, not queued. Wait for delivery/expiry or ask the user to address capacity. Do not substitute a different peer.',
   MAILBOX_UNREADABLE: 'The broker cannot trust its saved mailbox state, so it rejected this new message. Preserve the unreadable file, repair storage and restart the broker; no automatic resend.',
@@ -350,11 +351,14 @@ export default function comms(pi: ExtensionAPI) {
         await candidate.disconnect();
         if (runtime !== current || stopped) throw new Error('CONTEXT_LOST');
         const reason = error instanceof Error ? error.message : String(error);
-        const isOutdated = errorCode(error) === 'BROKER_OUTDATED';
-        connectionError = (error as { code?: string }).code === 'E_SESSION_HELD' ? 'IDENTITY_CONFLICT' : isOutdated ? 'BROKER_OUTDATED' : 'TARGET_UNAVAILABLE';
-        connectionErrorDetail = isOutdated ? reason : undefined;
+        const code = errorCode(error);
+        const actionableBrokerFailure = code === 'BROKER_OUTDATED' || code === 'BROKER_ENDPOINT_OCCUPIED';
+        connectionError = (error as { code?: string }).code === 'E_SESSION_HELD'
+          ? 'IDENTITY_CONFLICT'
+          : actionableBrokerFailure ? code : 'TARGET_UNAVAILABLE';
+        connectionErrorDetail = actionableBrokerFailure ? reason : undefined;
         nextReconnect = Date.now() + reconnectDelay; reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
-        status(); throw new Error(isOutdated ? reason : connectionError);
+        status(); throw new Error(actionableBrokerFailure ? reason : connectionError);
       }
     })().finally(() => { if (runtime === current) connecting = undefined; });
     return connecting;

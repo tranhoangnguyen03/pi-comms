@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -1568,6 +1568,52 @@ test('Issue #37 native extension: unreplaceable outdated broker preserves unveri
   }
 });
 
+
+
+test('Issue #35 native extension: occupied incompatible socket keeps actionable user guidance and never replaces the listener', async () => {
+  const dir = join(root, 'comms');
+  const pidFile = join(dir, 'broker.pid');
+  const socketFile = join(dir, 'broker.sock');
+  mkdirSync(dir, { recursive: true });
+  // Stop only this isolated test broker. A foreign listener with no PID
+  // metadata is the important case; it must remain untouched.
+  try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGTERM'); } catch {}
+  await new Promise(resolve => setTimeout(resolve, 75));
+  rmSync(socketFile, { force: true });
+  rmSync(pidFile, { force: true });
+
+  const foreign = net.createServer(socket => {
+    socket.on('error', () => undefined);
+    socket.on('data', () => writeMessage(socket, {
+      type: 'health_ok', requestId: 'wrong-request-id', protocol: 'other-protocol', version: 0,
+    }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    foreign.once('error', reject);
+    foreign.listen(socketFile, resolve);
+  });
+  let fixture: Awaited<ReturnType<typeof participant>> | undefined;
+  try {
+    fixture = await participant('occupied-broker-native');
+    const failed = data(await fixture.tool('comms_peers', {}));
+    assert.equal(failed.ok, false);
+    assert.equal(failed.error.code, 'BROKER_ENDPOINT_OCCUPIED');
+    assert.match(failed.error.message, /BROKER_ENDPOINT_OCCUPIED:.*pi-comms endpoint/);
+    assert.match(failed.error.message, /existing socket was not removed/i);
+    assert.match(failed.error.nextAction, /inspect.*listener/i);
+    await fixture.command('status');
+    const status = fixture.notifications.at(-1) ?? '';
+    assert.match(status, /BROKER_ENDPOINT_OCCUPIED/);
+    assert.match(status, /existing socket was not removed/i);
+    assert.equal(foreign.listening, true, 'the foreign listener must still own its socket');
+    assert.equal(existsSync(pidFile), false, 'no broker PID file should be claimed');
+  } finally {
+    await fixture?.close();
+    await new Promise<void>(resolve => foreign.close(() => resolve()));
+    rmSync(socketFile, { force: true });
+    rmSync(pidFile, { force: true });
+  }
+});
 
 test('F12 installed Pi: remembered exact offline mail survives broker restart and stays held by saved Pause', async () => {
   const a = await participant('f12-installed-sender'), b = await participant('f12-installed-receiver');
