@@ -14,6 +14,7 @@ after(() => rmSync(root, { recursive: true, force: true }));
 const { spawnBrokerIfNeeded, getBrokerSpawnOptions } = await import('../src/transport/broker/spawn.ts');
 const { IntercomClient } = await import('../src/transport/broker/client.ts');
 const { DurableMailbox, MAIL_TTL_MS, MAIL_MAX_ITEMS, mailFingerprint } = await import('../src/transport/broker/mailbox-store.ts');
+const { PairApprovalStore } = await import('../src/transport/broker/pair-approvals.ts');
 const brokerPath = fileURLToPath(new URL('../dist/transport/broker/broker.js', import.meta.url));
 const waitFor = async (fn: () => boolean | Promise<boolean>, hint = 'mailbox', ms = 8000) => {
   const until = Date.now() + ms;
@@ -273,10 +274,14 @@ test('F12 real broker: 0.1.10 pair-aware peer cannot silently downgrade live or 
   let broker: ChildProcess | undefined, a: InstanceType<typeof IntercomClient> | undefined,
     b: InstanceType<typeof IntercomClient> | undefined;
   try {
+    // The approved pair was persisted by an earlier F11 broker, before both
+    // peers were required to offer the F12 durable-mailbox capability.
+    new PairApprovalStore(join(root, 'comms')).decide(undefined, aId, bId,
+      'remembered', 'Previously approved exact pair', () => randomUUID());
     broker = await start();
     a = await peer(aId, 'New F12 sender');
     b = await peer(bId, 'Old pair-aware peer', false);
-    await a.decidePair(bId, 'remembered', 'Previously approved exact pair');
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'remembered');
     const fresh = (await a.listSessions()).find(x => x.id === bId)!;
     assert.equal((await a.sendExact(bId, fresh.endpointEpoch, { messageId: randomUUID(), text: 'no live downgrade' }, 'async')).code,
       'PEER_OUTDATED');
@@ -314,6 +319,13 @@ test('F12: a revoked pair cannot revive queued mail when terminal storage fails 
     assert.equal(oldReplay.delivered, false);
     assert.equal(oldReplay.code, 'E_PAIR_NOT_APPROVED',
       'a same-ID retry cannot pretend old queued mail is still authorized after revocation');
+    const unsettled = (await a.mailboxEvidence([mid]))[0];
+    assert.equal(unsettled.state, 'unknown', 'failed terminal write is not still queued');
+    assert.match(unsettled.reason ?? '', /pair approval ended/i);
+    const changedReplay = await a.sendExact(bId, undefined,
+      { messageId: mid, text: 'different content under old ID' }, 'async');
+    assert.equal(changedReplay.code, 'E_MESSAGE_ID_REUSE',
+      'auth expiry cannot hide a reused-ID payload conflict');
     b = await peer(bId, 'B returns');
     const arrivals: string[] = [];
     b.on('message', (_: unknown, msg: { id: string }) => arrivals.push(msg.id));
@@ -404,8 +416,10 @@ test('F12: unknown offline peer version after broker restart ends as peer_outdat
   let broker: ChildProcess | undefined;
   let a: InstanceType<typeof IntercomClient> | undefined, b: InstanceType<typeof IntercomClient> | undefined;
   try {
+    new PairApprovalStore(join(root, 'comms')).decide(undefined, aId, bId,
+      'remembered', 'An existing F11 pair', () => randomUUID());
     broker = await start(); a = await peer(aId, 'F12 sender'); b = await peer(bId, 'Older F11 peer', false);
-    await a.decidePair(bId, 'remembered', 'An existing F11 pair');
+    assert.equal((await a.listPairs()).find(p => p.peer === bId)?.mode, 'remembered');
     await b.disconnect(); b = undefined;
     await a.disconnect(); a = undefined;
     await stop(broker); broker = await start();
