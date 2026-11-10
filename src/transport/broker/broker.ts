@@ -1,5 +1,5 @@
 import net from "net";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, lstatSync } from "fs";
 import { join } from "path";
 import { createHash, randomUUID } from "crypto";
 import { writeMessage, createMessageReader, MAX_FRAME_BYTES } from "./framing.ts";
@@ -251,17 +251,51 @@ class IntercomBroker {
     if (this.pairApprovals.recovered) console.log(this.pairApprovals.recovered);
     this.mailbox = new DurableMailbox(INTERCOM_DIR);
     if (this.mailbox.blocked) console.error(this.mailbox.blocked);
-    if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
-      try {
-        unlinkSync(LISTEN_TARGET);
-      } catch {
-        // A clean startup has no stale socket to remove.
-      }
-    }
     this.server = net.createServer(this.handleConnection.bind(this));
   }
 
+  // Unix socket cleanup belongs AFTER a connectability check. A foreign or
+  // older listener can be live even when broker.pid does not exist. Deleting
+  // its endpoint is never a valid way to claim this broker root.
+  private async clearDeadUnixSocket(): Promise<void> {
+    if (typeof LISTEN_TARGET !== "string" || process.platform === "win32") return;
+    let stat;
+    try { stat = lstatSync(LISTEN_TARGET); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!stat.isSocket()) throw Error("BROKER_ENDPOINT_OCCUPIED: broker endpoint is not a socket; refusing to remove it");
+    const state = await new Promise<"occupied" | "stale">((resolve, reject) => {
+      const probe = net.createConnection(LISTEN_TARGET);
+      let complete = false;
+      const finish = (value: "occupied" | "stale" | Error) => {
+        if (complete) return;
+        complete = true; clearTimeout(timeout); probe.destroy();
+        if (value instanceof Error) reject(value); else resolve(value);
+      };
+      probe.once("connect", () => finish("occupied"));
+      probe.once("error", error => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ECONNREFUSED" || code === "ENOENT") finish("stale");
+        else finish(error);
+      });
+      const timeout = setTimeout(() => finish(Error("BROKER_ENDPOINT_OCCUPIED: cannot verify whether the listener is alive")), 1000);
+    });
+    if (state === "occupied") throw Error("BROKER_ENDPOINT_OCCUPIED: existing live listener; socket not removed");
+    try { unlinkSync(LISTEN_TARGET); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+
   start(): void {
+    void this.startListener().catch(error => {
+      console.error("pi-comms broker startup failed:", error);
+      process.exitCode = 1;
+    });
+  }
+
+  private async startListener(): Promise<void> {
+    await this.clearDeadUnixSocket();
     const onListening = () => {
       if (typeof LISTEN_TARGET === "string") {
         restrictIntercomRuntimeFile(LISTEN_TARGET);
