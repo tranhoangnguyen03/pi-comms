@@ -59,3 +59,51 @@ test('unapproved intake is human-visible but ineligible, approval/revocation con
   assert.equal(r.entry(late.id)!.linkage, 'context-lost');
   assert.equal(r.entry(late.id)!.message.text, late.text);
 });
+
+test('F12 inspection: ordinary live and rejected sends never acquire phantom broker mail unknown', async () => {
+  let result: { outcome: 'accepted' | 'rejected' | 'unknown'; delivery?: 'queued' | 'socket_delivered'; code?: string } =
+    { outcome: 'accepted', delivery: 'socket_delivered' };
+  const r = new Runtime(a, async () => ({ ...result }));
+  r.approve(approval(b));
+  const live = await r.send({ to: b, subject: 'Live request', text: 'already delivered over socket' });
+  result = { outcome: 'rejected', code: 'TARGET_UNAVAILABLE' };
+  const rejected = await r.send({ to: b, subject: 'Rejected request', text: 'never queued' });
+  result = { outcome: 'unknown', code: 'OUTCOME_UNKNOWN' };
+  const unknown = await r.send({ to: b, subject: 'Unknown transport', text: 'might have queued' });
+  result = { outcome: 'accepted', delivery: 'queued' };
+  const queued = await r.send({ to: b, subject: 'Actual offline mail', text: 'saved by broker' });
+
+  r.updateBrokerEvidence([
+    { id: live.message.id, state: 'unknown' },
+    { id: rejected.message.id, state: 'unknown' },
+    { id: unknown.message.id, state: 'unknown' },
+    { id: queued.message.id, state: 'unknown' },
+  ]);
+  assert.equal(r.inspect({ message: live.message.id }).brokerDelivery, undefined);
+  assert.equal(r.inspect({ message: rejected.message.id }).brokerDelivery, undefined);
+  assert.equal(r.inspect({ requests: [live.message.id] }).responses[0].brokerDelivery, undefined);
+  assert.equal(r.inspect({ requests: [rejected.message.id] }).responses[0].brokerDelivery, undefined);
+  assert.equal(r.inspect({ message: unknown.message.id }).brokerDelivery, undefined,
+    'broker has no evidence: do not invent an offline-mail fact for an ordinary unknown send');
+  assert.equal(r.inspect({ message: queued.message.id }).brokerDelivery.state, 'unknown',
+    'previously queued mail may be unknown after broker evidence ages out');
+
+  r.updateBrokerEvidence([{ id: unknown.message.id, state: 'queued', targetId: b }]);
+  assert.equal(r.inspect({ message: unknown.message.id }).brokerDelivery.state, 'queued',
+    'positive broker proof resolves an uncertain send without a new message ID');
+  r.updateBrokerEvidence([{ id: live.message.id, state: 'receiver_recorded', targetId: b }]);
+  assert.equal(r.inspect({ message: live.message.id }).brokerDelivery, undefined,
+    'ordinary live delivery cannot become a mailbox record');
+});
+
+test('F12 restore: a saved queued outcome is visible before the broker reconnects', async () => {
+  const events: any[] = [];
+  const first = new Runtime(a, async () => ({ outcome: 'accepted', delivery: 'queued' }),
+    event => { events.push(structuredClone(event)); return 'saved'; });
+  first.approve(approval(b));
+  const sent = await first.send({ to: b, subject: 'Offline note', text: 'hold until A resumes' });
+  const restored = new Runtime(a, async () => ({ outcome: 'unknown' }));
+  restored.restore(events);
+  assert.equal(restored.inspect({ message: sent.message.id }).brokerDelivery.state, 'queued');
+  assert.equal(restored.inspect({ requests: [sent.message.id] }).responses[0].brokerDelivery.state, 'queued');
+});

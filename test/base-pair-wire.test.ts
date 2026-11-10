@@ -53,7 +53,7 @@ async function stopBroker(child: ChildProcess | undefined) {
 }
 const reg = (name: string, pairConsentV1 = true, runtimeId = randomUUID()) => ({
   name, cwd: root, model: 'fixture', pid: process.pid, startedAt: Date.now(),
-  lastActivity: Date.now(), pairConsentV1, ...(pairConsentV1 ? { runtimeId } : {}),
+  lastActivity: Date.now(), pairConsentV1, ...(pairConsentV1 ? { durableMailboxV1: true, runtimeId } : {}),
 });
 async function member(id: string, name: string, pairConsentV1 = true, runtimeId = randomUUID()) {
   const client = new IntercomClient();

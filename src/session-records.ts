@@ -19,12 +19,12 @@ const StoredMessageSchema = Type.Object({ ...EnvelopeSchema.properties, from: Id
 const StoredEntrySchema = Type.Object({
   message: StoredMessageSchema, facts: Type.Array(FactSchema), state: StateSchema,
   readable: Type.Boolean(), returnHandle: Type.Optional(Id),
-  code: Type.Optional(Type.String()), intake: Type.Optional(IntakeSchema),
+  code: Type.Optional(Type.String()), delivery: Type.Optional(Type.Union([Type.Literal('queued'), Type.Literal('socket_delivered'), Type.Literal('receiver_recorded')])), intake: Type.Optional(IntakeSchema),
   linkage: Type.Optional(Type.Literal('context-lost')), reportLinkage: Type.Optional(Type.Literal('context-lost')),
 }, { additionalProperties: false });
 export const RecoveryEventSchema = Type.Union([
   Type.Object({ kind: Type.Literal('message'), entry: StoredEntrySchema }, { additionalProperties: false }),
-  Type.Object({ kind: Type.Literal('outcome'), id: Id, state: StateSchema, code: Type.Optional(Type.String()) }, { additionalProperties: false }),
+  Type.Object({ kind: Type.Literal('outcome'), id: Id, state: StateSchema, code: Type.Optional(Type.String()), delivery: Type.Optional(Type.Union([Type.Literal('queued'), Type.Literal('socket_delivered'), Type.Literal('receiver_recorded')])) }, { additionalProperties: false }),
   Type.Object({ kind: Type.Literal('fact'), id: Id, fact: FactSchema }, { additionalProperties: false }),
   Type.Object({ kind: Type.Literal('visibility'), ids: Type.Array(Id) }, { additionalProperties: false }),
   Type.Object({ kind: Type.Literal('intake'), ids: Type.Array(Id), disposition: IntakeSchema, source: Type.String() }, { additionalProperties: false }),

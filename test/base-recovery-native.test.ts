@@ -622,7 +622,7 @@ test('F11 native: stale same-ID broker replacement expires pair and ends the rem
     const registration = (pid: number, name: string) => ({
       name, cwd: root, model: 'native-fixture', pid,
       startedAt: Date.now(), lastActivity: Date.now(),
-      pairConsentV1: true, runtimeId: randomUUID(),
+      pairConsentV1: true, durableMailboxV1: true, runtimeId: randomUUID(),
     });
     await stale.connect(registration(claimedPid.pid!, 'Old B holder'), bId);
     a.confirm(true); a.remember(false);

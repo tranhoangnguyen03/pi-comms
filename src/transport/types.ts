@@ -1,6 +1,7 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
 export const PAIR_APPROVAL_FEATURE = "pair-consent-v1";
+export const DURABLE_MAILBOX_FEATURE = "durable-mailbox-v1";
 /** Approved (this runtime or remembered) or not approved. There is no stored refusal. */
 export type PairMode = "session" | "remembered" | "none";
 /** Why a pair_update reports `none`: an owner ended it, or a runtime left. */
@@ -14,7 +15,12 @@ export interface BrokerRuntimeInfo {
   startedAt?: number;
 }
 
-export type DeliveryState = "socket_delivered" | "queued" | "failed" | "unknown";
+export type DeliveryState = "socket_delivered" | "queued" | "receiver_recorded" | "failed" | "unknown";
+export type BrokerMailEvidence = {
+  id: string;
+  state: "queued" | "receiver_recorded" | "expired" | "contact_ended" | "peer_outdated" | "cancelled" | "unknown";
+  targetId?: string; at?: number; fingerprint?: string; reason?: string;
+};
 
 export interface DeliveryDetails {
   delivery: DeliveryState;
@@ -58,6 +64,8 @@ export interface SessionInfo {
   peerUid?: number;
   trustedLocal?: boolean;
   pairConsentV1?: boolean;
+  /** F12 persistent-receipt support; older peers cannot accept durable mailbox offers. */
+  durableMailboxV1?: boolean;
   /** Live context-window usage, pushed via presence from the source session's
    *  getContextUsage(). contextPct is 0..100 (rounded); contextTokens /
    *  contextWindow are raw token counts. All optional: unknown right after a
@@ -129,7 +137,7 @@ export interface Attachment {
   language?: string;
 }
 
-export type MessageReceiptStatus = "receiver_received" | "queued" | "injected" | "acknowledged" | "expired" | "cancelled" | "superseded" | "cancellation_requested";
+export type MessageReceiptStatus = "receiver_received" | "receiver_recorded" | "queued" | "injected" | "acknowledged" | "expired" | "cancelled" | "superseded" | "cancellation_requested";
 
 export interface MessageReceipt {
   messageId: string;
@@ -170,8 +178,9 @@ export type ClientMessage =
   | { type: "unregister" }
   | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
-  | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string }
+  | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string; dispatchPolicy?: "async" | "live_only" }
   | { type: "message_receipt"; receipt: MessageReceipt }
+  | { type: "mailbox_evidence"; requestId: string; ids: string[] }
   | { type: "cancel_message"; messageId: string }
   | { type: "cancel_ask"; messageId: string }
   | { type: "pair_list"; requestId: string }
@@ -196,6 +205,7 @@ export type ClientMessage =
 export type BrokerMessage =
   | ({ type: "registered"; sessionId: string; features?: string[] } & BrokerRuntimeInfo)
   | { type: "pair_list_result"; requestId: string; items?: PairStatus[]; error?: string }
+  | { type: "mailbox_evidence_result"; requestId: string; items: BrokerMailEvidence[] }
   | { type: "pair_decision_result"; requestId: string; status?: PairStatus; error?: string }
   | { type: "pair_update"; status: PairStatus }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }

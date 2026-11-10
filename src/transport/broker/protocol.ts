@@ -36,6 +36,7 @@ function isHerdrLocation(value: unknown): boolean {
 
 function isMessageReceiptStatus(value: unknown): value is MessageReceiptStatus {
   return value === "receiver_received"
+    || value === "receiver_recorded"
     || value === "queued"
     || value === "injected"
     || value === "acknowledged"
@@ -231,6 +232,7 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
   }
 
   if (value.pairConsentV1 !== undefined && typeof value.pairConsentV1 !== "boolean") return false;
+  if (value.durableMailboxV1 !== undefined && typeof value.durableMailboxV1 !== "boolean") return false;
   return value.trustedLocal === undefined || typeof value.trustedLocal === "boolean";
 }
 
@@ -260,6 +262,8 @@ export function isSessionRegistration(value: unknown): value is SessionRegistrat
     return false;
   }
   if (value.pairConsentV1 !== undefined && typeof value.pairConsentV1 !== "boolean") return false;
+  if (value.durableMailboxV1 !== undefined && typeof value.durableMailboxV1 !== "boolean") return false;
+  if (value.durableMailboxV1 === true && value.pairConsentV1 !== true) return false;
   if (value.pairConsentV1 === true && (typeof value.runtimeId !== "string" || !value.runtimeId)) return false;
   if (value.extensions !== undefined && !Array.isArray(value.extensions)) {
     return false;

@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Id, MessageInput, EnvelopeSchema, checkSize, validate, type Envelope, InspectInput } from './schema.ts';
 import type { Attempt } from './session-send.ts';
-import type { PairStatus } from './transport/types.ts';
+import type { PairStatus, BrokerMailEvidence } from './transport/types.ts';
 import { isRecoveryEvent, type RecoveryEvent, type RecordWriter, type SaveState } from './session-records.ts';
 
 export type Fact = { kind: 'accepted' | 'queued' | 'posted' | 'handed-off' | 'saved' | 'summarized' | 'rejected'; at: string; source: string; evidenceRef?: string };
 export type Message = Envelope & { from: string; to: string };
 type Intake = 'waiting' | 'offered' | 'posted' | 'handed-off' | 'summarized' | 'dismissed';
-export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
+export type Entry = { message: Message; facts: Fact[]; state: Attempt['outcome']; code?: string; delivery?: Attempt['delivery']; returnHandle?: string; linkage?: 'context-lost'; reportLinkage?: 'context-lost'; readable?: boolean; intake?: Intake; intakeSource?: string };
 export type Approval = { id: string; name: string; context: string; remembered?: boolean };
 export const ASK_ADMISSION = 'native ask result context admission';
 export const NESTED_HANDOFF = 'ask result handed to nested caller';
@@ -17,13 +17,14 @@ export class Runtime {
   private approvals = new Map<string, Approval>();
   private pairVersions = new Map<string, number>();
   private records = new Map<string, Entry>();
+  private brokerEvidence = new Map<string, BrokerMailEvidence>();
   private returns = new Map<string, Message>();
   private saveStates = new Map<string, SaveState | 'partial'>();
   private uncertainAdmission = new Set<string>();
   private recoveryIssue: string | undefined;
   private pause = false;
   waiting: string[] = [];
-  constructor(readonly self: string, private transport: (id: string, envelope: Envelope) => Promise<Attempt>, private writer?: RecordWriter) {}
+  constructor(readonly self: string, private transport: (id: string, envelope: Envelope, policy?: 'async' | 'live_only') => Promise<Attempt>, private writer?: RecordWriter) {}
   get paused() { return this.pause; }
   set paused(value: boolean) {
     if (this.pause === value) { this.assertOperational(); return; }
@@ -78,7 +79,10 @@ export class Runtime {
           case 'outcome': {
             const entry = this.required(event.id);
             if (entry.message.from !== this.self) throw new Error('Outgoing outcome attached to an incoming message');
-            entry.state = event.state as Attempt['outcome']; entry.code = event.code;
+            entry.state = event.state as Attempt['outcome']; entry.code = event.code; entry.delivery = event.delivery;
+            if (event.delivery === 'queued' || event.delivery === 'receiver_recorded') {
+              this.brokerEvidence.set(event.id, { id: event.id, state: event.delivery, targetId: entry.message.to });
+            } else this.brokerEvidence.delete(event.id);
             break;
           }
           case 'fact': this.addFact(this.required(event.id), event.fact as Fact); break;
@@ -223,7 +227,7 @@ export class Runtime {
     }
     return { to, source };
   }
-  async send(input: MessageInput, registered?: (entry: Entry) => void) {
+  async send(input: MessageInput, registered?: (entry: Entry) => void, policy: 'async' | 'live_only' = 'async') {
     this.assertOperational();
     const { to, source } = this.contactFor(input);
     if (!this.isApproved(to)) throw new Error('CONTACT_NOT_APPROVED');
@@ -246,12 +250,13 @@ export class Runtime {
     this.records.set(envelope.id, entry);
     registered?.(entry);
     let outcome: Attempt;
-    try { outcome = await this.transport(to, envelope); } catch { outcome = { outcome: 'unknown', code: 'OUTCOME_UNKNOWN' }; }
+    try { outcome = await this.transport(to, envelope, policy); } catch { outcome = { outcome: 'unknown', code: 'OUTCOME_UNKNOWN' }; }
     // Once dispatch happened, a failed save or switched session cannot turn an
     // observed send into a misleading "nothing sent" result.
-    entry.state = outcome.outcome; entry.code = outcome.code;
+    entry.state = outcome.outcome; entry.code = outcome.code; entry.delivery = outcome.delivery;
+    if (outcome.outcome === 'accepted' && outcome.delivery === 'queued') this.brokerEvidence.set(envelope.id, { id: envelope.id, state: 'queued', targetId: to });
     try {
-      this.write({ kind: 'outcome', id: envelope.id, state: outcome.outcome, ...(outcome.code ? { code: outcome.code } : {}) }, [envelope.id]);
+      this.write({ kind: 'outcome', id: envelope.id, state: outcome.outcome, ...(outcome.code ? { code: outcome.code } : {}), ...(outcome.delivery ? { delivery: outcome.delivery } : {}) }, [envelope.id]);
       if (outcome.outcome !== 'unknown') this.fact(envelope.id, outcome.outcome === 'accepted' ? 'accepted' : 'rejected', 'broker');
     } catch { this.saveStates.set(envelope.id, 'partial'); }
     return this.view(entry);
@@ -294,6 +299,30 @@ export class Runtime {
     this.write({ kind: 'message', entry }, [envelope.id]);
     this.returns.set(handle, message); this.records.set(envelope.id, entry); this.waiting.push(envelope.id);
     return true;
+  }
+  // Querying the broker never turns ordinary live/rejected traffic into
+  // "unknown offline mail". A failed send with an unknown outcome may have
+  // reached the mailbox, so a positive broker observation can still resolve it.
+  isBrokerMailCandidate(id: string): boolean {
+    const entry = this.records.get(id);
+    return !!entry && entry.message.from === this.self && entry.state !== 'rejected' &&
+      entry.delivery !== 'socket_delivered' &&
+      (entry.delivery === 'queued' || entry.delivery === 'receiver_recorded' || entry.state === 'unknown');
+  }
+  updateBrokerEvidence(items: readonly BrokerMailEvidence[]): void {
+    for (const item of items) {
+      if (!this.isBrokerMailCandidate(item.id)) continue;
+      const entry = this.records.get(item.id)!;
+      // No mailbox record is expected for an uncertain ordinary live send.
+      // Unknown is meaningful for mail we already know was queued, or when
+      // the broker supplies a concrete storage/expiry warning.
+      if (item.state === 'unknown' && !item.reason &&
+          entry.delivery !== 'queued') continue;
+      this.brokerEvidence.set(item.id, { ...item });
+    }
+  }
+  isSavedIncoming(id: string): boolean {
+    return this.records.get(id)?.message.to === this.self && this.saveStates.get(id) === 'saved';
   }
   pendingCounts() {
     return {
@@ -418,6 +447,7 @@ export class Runtime {
   }
   view(entry: Entry) {
     return structuredClone({ ...entry, responses: [...this.records.values()].filter(r => r.message.replyTo === entry.message.id).map(r => r.message.id), evidence: 'available',
+      ...(this.isBrokerMailCandidate(entry.message.id) && this.brokerEvidence.has(entry.message.id) ? { brokerDelivery: this.brokerEvidence.get(entry.message.id) } : {}),
       record: { state: this.saveStates.get(entry.message.id) ?? 'volatile', ...(this.saveStates.get(entry.message.id) === 'partial' ? { warning: 'The latest observation was not saved. Do not resend solely because of this storage failure.' } : {}) },
       ...(this.uncertainAdmission.has(entry.message.id) ? { admission: 'uncertain' as const } : {}),
     });
@@ -445,7 +475,7 @@ export class Runtime {
       const replies = records.filter(entry => entry.message.replyTo === id && entry.message.from === request.message.to);
       const { reports, current, laterProgressCount } = this.reportState(id, audience);
       return { request: id, peer: request.message.to, subject: request.message.subject, workRef: request.message.workRef ?? null, state: request.state,
-        code: request.code, outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
+        code: request.code, ...(this.isBrokerMailCandidate(id) && this.brokerEvidence.has(id) ? { brokerDelivery: this.brokerEvidence.get(id) } : {}), outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
         responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)),
         reportCount: reports.length, ...(reports.length ? { latestReport: this.project(reports.at(-1)!, audience) } : {}),
         ...(current ? { currentReport: this.project(current, audience) } : {}), ...(laterProgressCount ? { laterProgressCount } : {}) };

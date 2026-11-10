@@ -56,6 +56,7 @@ export function inspectionText(data: Inspection, labels: Labels, technical = fal
     const m = entry.message;
     lines.push(`Subject: ${m.subject}`, `Contact: ${labels.approved(m.from === labels.self ? m.to : m.from) ? 'approved' : 'not approved'}`,
       `Latest observation: ${observationLabel(entry)}`,
+      ...(entry.brokerDelivery ? [`Broker mail: ${entry.brokerDelivery.state}${entry.brokerDelivery.reason ? ` — ${entry.brokerDelivery.reason}` : ''} (separate from native posting or peer work completion)`] : []),
       `${entry.responses.length} linked response(s) — not proof of completed work.`);
     lines.push(...messageContextLines(m));
     if (entry.reportLinkage) lines.push('Reported request unavailable: link unverified.');

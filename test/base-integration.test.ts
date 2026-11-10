@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -17,6 +17,7 @@ const extensionPath = process.env.PI_COMMS_TEST_EXTENSION ?? fileURLToPath(new U
 const root = mkdtempSync(join(tmpdir(), 'pc-base-native-'));
 // Set before dynamic broker imports; the bundled extension resolves paths at startup.
 process.env.PI_CODING_AGENT_DIR = root;
+const { IntercomClient } = await import('../src/transport/broker/client.ts');
 after(async () => {
   try { process.kill(Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8')), 'SIGTERM'); } catch {}
   await new Promise(r => setTimeout(r, 100)); rmSync(root, { recursive: true, force: true });
@@ -1564,5 +1565,158 @@ test('Issue #37 native extension: unreplaceable outdated broker preserves unveri
     try { outdatedServer.close(); } catch {}
     if (bystander && bystander.exitCode === null && bystander.signalCode === null) bystander.kill('SIGKILL');
     await a?.close();
+  }
+});
+
+
+test('F12 installed Pi: remembered exact offline mail survives broker restart and stays held by saved Pause', async () => {
+  const a = await participant('f12-installed-sender'), b = await participant('f12-installed-receiver');
+  try {
+    await a.runtime.session.prompt('Initialize saved sender');
+    await b.runtime.session.prompt('Initialize saved receiver');
+    const originalId = b.id(), originalFile = b.runtime.session.sessionFile!;
+    assert.ok(originalFile, 'receiver has a real saved session file');
+    a.confirm(true); a.remember(true);
+    const warm = data(await a.tool('comms_message', { to: originalId, subject: 'Warm pair', text: 'F12_WARM' }));
+    assert.equal(warm.ok, true);
+    await waitFor(() => b.observed.some(messages => text(messages).includes('F12_WARM')));
+    await b.command('pause');
+    const modelCallsBefore = b.observed.length;
+    await b.runtime.newSession();
+    assert.notEqual(b.id(), originalId);
+    const sent = data(await a.tool('comms_message', {
+      to: originalId, subject: 'Offline review result', text: 'F12_EXACT_SAVED_MAIL',
+    }));
+    assert.equal(sent.ok, true, JSON.stringify(sent.error));
+    assert.equal(sent.data.delivery, 'queued');
+    const mid = sent.data.message.id;
+    // A blocking ask to the same offline peer must fail on its own, never enter
+    // the durable mailbox or create a restored waiter.
+    const offlineAsk = data(await a.tool('comms_ask', {
+      requests: [{ to: originalId, subject: 'Unqueued ask', text: 'F12_DO_NOT_QUEUE_ASK' }],
+      timeoutSeconds: 0.2,
+    }));
+    assert.equal(offlineAsk.ok, true);
+    assert.notEqual(offlineAsk.data.items[0].outcome, 'replied');
+    assert.notEqual(offlineAsk.data.items[0].outcome, 'timeout', 'offline ask is unavailable, not a queued wait');
+    assert.equal(JSON.parse(readFileSync(join(root,'comms','mailbox.json'),'utf8')).pending.length, 1,
+      'only the asynchronous message was accepted offline');
+    assert.equal(b.observed.length, modelCallsBefore, 'replacement session does not receive old exact-ID mail');
+
+    const brokerPid = Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8'));
+    process.kill(brokerPid, 'SIGTERM');
+    await b.runtime.switchSession(originalFile);
+    assert.equal(b.id(), originalId, 'returns to original saved session');
+    await waitFor(async () => {
+      const item = data(await b.tool('comms_inspect', { message: mid }));
+      return item.ok && item.data.record.state === 'saved';
+    });
+    const incoming = data(await b.tool('comms_inspect', { message: mid })).data;
+    assert.equal(incoming.intake, 'waiting', 'saved Pause holds native model admission');
+    assert.equal(b.observed.length, modelCallsBefore, 'no model wake while paused');
+    await waitFor(async () => {
+      const item = data(await a.tool('comms_inspect', { message: mid }));
+      return item.ok && item.data.brokerDelivery?.state === 'receiver_recorded';
+    });
+    await b.command('resume');
+    await waitFor(() => b.observed.some(messages => text(messages).includes('F12_EXACT_SAVED_MAIL')));
+    const inspected = data(await b.tool('comms_inspect', { message: mid })).data;
+    assert.ok(inspected.facts.some((f: any) => f.kind === 'saved'), 'native save is distinct from model posting');
+  } finally {
+    await b.close(); await a.close();
+  }
+});
+
+test('F12 native: recovery-held receiver stops appearing online; approved async mail goes to broker disk', async () => {
+  const a = await participant('f12-hold-sender');
+  const b = await participant('f12-hold-receiver');
+  let file = '', before = '';
+  try {
+    await a.runtime.session.prompt('Save sender for an interrupted review');
+    await b.runtime.session.prompt('Save reviewer before storage failure');
+    a.confirm(true); a.remember(false);
+    await a.command(`approve ${b.id()}`);
+    await b.command('pause');
+    const bid = b.id();
+    file = b.runtime.session.sessionFile!;
+    before = readFileSync(file, 'utf8');
+    appendFileSync(file, '{INVALID_NATIVE_JSON\n');
+    const held = data(await b.tool('comms_inspect', {}));
+    assert.equal(held.data.recovery.state, 'blocked');
+    await waitFor(async () => {
+      const roster = data(await a.tool('comms_peers', { view: 'all' }));
+      return roster.ok && roster.data.items.find((p: any) => p.id === bid)?.presence === 'offline';
+    });
+    const known = data(await a.tool('comms_peers', { view: 'known' })).data.items.find((p: any) => p.id === bid);
+    assert.ok(known?.approved, 'a blocked receiver is a socket loss, not a Pi runtime exit');
+    const sent = data(await a.tool('comms_message', {
+      to: bid, subject: 'Findings after reviewer held', text: 'F12_MUST_SAVE_TO_BROKER_NOT_DROP',
+    }));
+    assert.equal(sent.ok, true, JSON.stringify(sent.error));
+    assert.equal(sent.data.delivery, 'queued');
+    const saved = JSON.parse(readFileSync(join(root, 'comms', 'mailbox.json'), 'utf8'));
+    assert.ok(saved.pending.some((x: any) => x.message.id === sent.data.message.id),
+      'the exact payload must be persisted at the broker while receiver storage is blocked');
+  } finally {
+    if (file && before) writeFileSync(file, before);
+    await b.close(); await a.close();
+  }
+});
+
+test('F12 native: known older live peer gets PEER_OUTDATED before any owner contact approval', async () => {
+  const a = await participant('f12-old-peer-approval');
+  const old = new IntercomClient(); old.on('error', () => undefined);
+  const oldId = randomUUID();
+  try {
+    await old.connect({ name: 'F11-only colleague', cwd: root, model: 'legacy',
+      pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(),
+      pairConsentV1: true, runtimeId: randomUUID() }, oldId);
+    a.confirm(true);
+    const before = a.dialogs.length;
+    const sent = data(await a.tool('comms_message', {
+      to: oldId, subject: 'No wasted approval', text: 'Old protocol cannot accept F12',
+    }));
+    assert.equal(sent.error.code, 'PEER_OUTDATED');
+    assert.equal(a.dialogs.length, before, 'unsupported peer must not consume a first-contact prompt');
+    await a.command(`approve ${oldId}`);
+    assert.match(a.notifications.at(-1) ?? '', /PEER_OUTDATED/);
+    assert.equal(a.dialogs.length, before, 'explicit approve must reject before opening the owner dialog');
+    await assert.rejects(old.decidePair(a.id(), 'remembered', 'Unsupported pair'), /PEER_OUTDATED/);
+  } finally {
+    await old.disconnect().catch(() => undefined); await a.close();
+  }
+});
+
+test('F12 installed Pi: inspecting live sends and live asks never invents broker-mail unknown', async () => {
+  const a = await participant('f12-inspect-live-sender');
+  const b = await participant('f12-inspect-live-receiver');
+  try {
+    a.confirm(true);
+    await a.command(`approve ${b.id()}`);
+    await b.command('pause');
+    const sent = data(await a.tool('comms_message', {
+      to: b.id(), subject: 'Live only review', text: 'normal socket delivery',
+    }));
+    assert.equal(sent.ok, true);
+    assert.equal(sent.data.delivery, 'socket_delivered');
+    const id = sent.data.message.id;
+    const inspected = data(await a.tool('comms_inspect', { message: id })).data;
+    assert.equal(inspected.brokerDelivery, undefined);
+    const rows = data(await a.tool('comms_inspect', { requests: [id] })).data.responses;
+    assert.equal(rows[0].brokerDelivery, undefined,
+      'normal socket delivery is not unknown offline mail');
+    const outbox = data(await a.tool('comms_inspect', { outbox: 'self' })).data.items;
+    assert.equal(outbox.find((item: any) => item.message.id === id)?.brokerDelivery, undefined);
+    const ask = data(await a.tool('comms_ask', {
+      requests: [{ to: b.id(), subject: 'Live ask', text: 'wait briefly' }],
+      timeoutSeconds: 0.1,
+    }));
+    assert.equal(ask.ok, true);
+    const askId = ask.data.items[0].request;
+    assert.ok(askId);
+    assert.equal(data(await a.tool('comms_inspect', { requests: [askId] })).data.responses[0].brokerDelivery,
+      undefined, 'live first-reply waiter never creates an offline-mail status');
+  } finally {
+    await b.close(); await a.close();
   }
 });

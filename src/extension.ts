@@ -10,14 +10,14 @@ import { sendExactSession } from './transport/send.ts';
 import { connect } from './transport/start.ts';
 import { IntercomClient } from './transport/broker/client.ts';
 import { randomUUID } from 'node:crypto';
-import { PAIR_APPROVAL_FEATURE, type BrokerRuntimeInfo, type SessionInfo, type PairStatus, type Message as WireMessage } from './transport/types.ts';
+import { PAIR_APPROVAL_FEATURE, DURABLE_MAILBOX_FEATURE, type BrokerRuntimeInfo, type SessionInfo, type PairStatus, type Message as WireMessage } from './transport/types.ts';
 import { registerInlineCards, type CardMessage } from './inline-card.ts';
 import { approvalPrompt, contactDecisionTitle, explicitApprovalTitle, CONTACT_SESSION, CONTACT_REMEMBER, CONTACT_CHOICES, CONTACT_GRANT_CHOICES, admissionDecisionStorageNotice, showInspection } from './human-view.ts';
 import { getAgentDirPath, getBrokerConnectTarget, getBrokerPidFilePath, getIntercomDirPath } from './transport/broker/paths.ts';
 import { INTERCOM_PACKAGE_VERSION, isBrokerVersionOlder, readBrokerArtifactVersion, readBrokerPidMetadata, verifyBrokerProcess } from './transport/broker/runtime-claim.ts';
 import { serveOrganizerApi, type OrganizerApi } from './organizer-api.ts';
 
-const RESET = 'One approval covers both directions of an exact session pair. "This session" lasts until either Pi session reloads or the broker restarts; "remember" survives restarts until either side runs /comms revoke. Native Pi records retain communication history and Pause. No offline mail or automatic resend.';
+const RESET = 'One approval covers both directions of an exact session pair. "This session" lasts until either Pi session reloads or the broker restarts; "remember" survives restarts until either side runs /comms revoke. Native Pi records retain communication history and Pause. Approved exact offline peers can receive durable async mail; asks remain live-only. No automatic new-ID replay.';
 const HELP = 'Stop ends the current run; later peers may wake it. Pause holds peer admission/wakes, not current work or already-posted content. /comms approve | revoke | pause | resume | status | inspect | requests';
 const errorCode = (error: unknown, fallback = 'TARGET_UNAVAILABLE') =>
   (error instanceof Error ? error.message : String(error)).split(':')[0]?.trim() || fallback;
@@ -56,8 +56,13 @@ const recovery: Record<string, string> = {
   CONTACT_NOT_APPROVED: 'Contact is not approved. Nothing was sent. Do not retry in this turn; if the contact is still needed, tell the user. You may ask again after their next message, or they can use /comms approve.',
   CONTACT_APPROVAL_REQUIRED: 'No message was sent. Contact needs a human confirmation UI; open /comms approve in an interactive session.',
   AMBIGUOUS_PEER: 'Choose one of the listed native IDs; no message was sent. Exact names must be unique.',
-  BROKER_OUTDATED: 'The shared pi-comms broker process predates shared pair approval. Nothing was sent. Restarting this session alone will not replace a broker held open by other sessions. Ask the user to follow the broker details in the error message above (stop a verified broker PID so connected sessions reconnect and start the updated broker, or inspect the endpoint holder when broker.pid is unverified).',
-  PEER_OUTDATED: 'The colleague runs an older pi-comms without shared pair approval. Nothing was sent. Ask the user to update pi-comms in that session and reload it, then try again.',
+  BROKER_OUTDATED: 'The shared broker lacks a required pi-comms capability. Nothing was sent. Restarting this session alone will not replace a broker held open by other sessions. Ask the user to follow the broker details above (stop a verified PID or inspect an unverified holder); update the installed package when needed.',
+  PEER_OUTDATED: 'The colleague runs an older pi-comms without the required shared communication protocol. Nothing was sent. Ask the user to update pi-comms in that session and reload it, then try again.',
+  MAILBOX_FULL: 'The offline mailbox is full; this new message was rejected, not queued. Wait for delivery/expiry or ask the user to address capacity. Do not substitute a different peer.',
+  MAILBOX_UNREADABLE: 'The broker cannot trust its saved mailbox state, so it rejected this new message. Preserve the unreadable file, repair storage and restart the broker; no automatic resend.',
+  MAILBOX_SAVE_FAILED: 'The broker could not confirm the offline write. Treat the result as uncertain if storage may have committed; inspect the original message ID before any retry.',
+  E_DELIVERY_EXPIRED: 'The older queued message expired. Do not assume the colleague saw it; tell the user if the work is still needed.',
+  E_TARGET_DISCONNECTED: 'The exact peer is offline. Live-only asks are not queued; try again later only on a new user request.',
   E_PAIR_NOT_APPROVED: 'The contact approval ended before delivery. Nothing was delivered. Ask again only if the user still wants this contact.',
   PAIR_SAVE_FAILED: 'The broker could not save the remembered approval; nothing changed. Choose "Allow this session", or free disk space / fix permissions in the Pi agent directory and try again.',
   CONTACT_CANCELLED: 'The operation was stopped or the session changed. Nothing was sent. Wait for the user to continue.',
@@ -77,6 +82,8 @@ export default function comms(pi: ExtensionAPI) {
   let records: NativeSessionRecords | undefined;
   let asks: Asks | undefined;
   const askStops = new Map<string, AbortController>();
+  const pendingSavedReceipts = new Set<string>();
+  let lastReceiptScanAt = 0;
   let timer: NodeJS.Timeout | undefined;
   let active = false;
   let wakeReserved = false;
@@ -262,6 +269,17 @@ export default function comms(pi: ExtensionAPI) {
     } catch (error) { wakeReserved = false; ctx.ui.notify(`pi-comms could not confirm batch admission: ${String(error)}. Inspect before repeating work.`, 'error'); }
     status();
   }
+  // A held receiver must stop advertising a usable live socket. Otherwise
+  // senders get socket_delivered while current.receive rejects the payload,
+  // instead of using the same exact pair's durable offline mailbox.
+  function quarantineHeldConnection(owner: Runtime, candidate = client) {
+    if (stopped || runtime !== owner || !owner.holdReason() || !candidate) return;
+    if (client === candidate) client = undefined;
+    endAsks('interrupted');
+    // Destroy only this socket. A transient recovery hold is not a Pi runtime
+    // exit, so preserve F11 session-only approval until that runtime ends.
+    candidate.suspendForRecoveryHold();
+  }
   async function ensureConnection() {
     if (!ctx || !runtime || stopped) throw new Error('TARGET_UNAVAILABLE');
     runtime.assertOperational();
@@ -300,20 +318,31 @@ export default function comms(pi: ExtensionAPI) {
           // Modern pair consent is a broker decision, never transported message metadata.
           peerNames.set(from.id, from.name ?? from.id);
           if (fresh && !current.isApproved(from.id)) context.ui.notify(`Contact request from ${from.name ?? from.id}: ${envelope.subject}. Held for you, not the agent. Approval appears when idle; /comms requests to review.`, 'info');
-          // This existing receipt confirms live intake, not crash-durable mail.
-          // F12 will separately negotiate persistent receiver receipts.
-          candidate.sendMessageReceipt({ messageId: wire.id, status: 'queued', timestamp: Date.now() });
+          // Native Pi may buffer a fresh session's custom entry before its
+          // first conversation. Keep broker responsibility until it really saves.
+          const saved = current.isSavedIncoming(wire.id);
+          if (saved) pendingSavedReceipts.delete(wire.id);
+          else pendingSavedReceipts.add(wire.id);
+          candidate.sendMessageReceipt({ messageId: wire.id, status: saved ? 'receiver_recorded' : 'queued', timestamp: Date.now() });
           admitAsks(); status();
-        } catch (error) { context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning'); status(); }
+        } catch (error) {
+          context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning');
+          quarantineHeldConnection(current, candidate);
+          status();
+        }
       });
       try {
         const brokerURL = new URL('./transport/broker/broker.js', import.meta.url);
-        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, runtimeId }, candidate, brokerURL);
-        if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE)) {
+        await connect(current.self, { name: context.sessionManager.getSessionName() ?? current.self, cwd: context.cwd, model: context.model?.id ?? 'unknown', pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), pairConsentV1: true, durableMailboxV1: true, runtimeId }, candidate, brokerURL);
+        if (!candidate.supportsFeature(PAIR_APPROVAL_FEATURE) || !candidate.supportsFeature(DURABLE_MAILBOX_FEATURE)) {
           throw Error(formatBrokerOutdatedError(candidate.brokerInfo, INTERCOM_PACKAGE_VERSION, readBrokerArtifactVersion(brokerURL)));
         }
         // The pair_snapshot handler replaces the cache: approvals may have ended while offline.
         await candidate.listPairs();
+        if (current.holdReason()) {
+          candidate.suspendForRecoveryHold();
+          throw Error('RECOVERY_BLOCKED: receiver must not remain online while its records are held');
+        }
         if (runtime !== current || stopped) { await candidate.disconnect(); return; }
         client = candidate; candidate.updatePresence({ name: context.sessionManager.getSessionName() ?? current.self, status: active ? 'working' : 'idle' }); lastPresenceSentAt = Date.now();
         connectionError = undefined; connectionErrorDetail = undefined; reconnectDelay = 1000; status();
@@ -337,6 +366,7 @@ export default function comms(pi: ExtensionAPI) {
     const native = entries ?? log.nativeEntries();
     if (log.info().state === 'blocked') {
       owner.holdRecovery(log.info().reason ?? 'Native session recovery failed');
+      quarantineHeldConnection(owner);
     }
     const savedIds = new Set(native.map(entry => entry.id).filter((id): id is string => !!id));
     for (const entry of native) {
@@ -367,11 +397,29 @@ export default function comms(pi: ExtensionAPI) {
       owner.observedNative(ids, entry.id, 'batch', false);
     }
   }
+  // When Pi later flushes an initially volatile session, upgrade the receipt
+  // without another broker offer, user prompt, or message ID.
+  function flushSavedReceipts(now = Date.now()) {
+    const owner = runtime, log = records, currentClient = client;
+    if (!pendingSavedReceipts.size || !owner || !log || !currentClient?.isConnected() ||
+        now - lastReceiptScanAt < 1000) return;
+    lastReceiptScanAt = now;
+    observeSaved(owner, log);
+    if (owner.holdReason()) { quarantineHeldConnection(owner); return; }
+    for (const id of pendingSavedReceipts) {
+      if (!owner.isSavedIncoming(id)) continue;
+      try {
+        currentClient.sendMessageReceipt({ messageId: id, status: 'receiver_recorded', timestamp: now });
+        pendingSavedReceipts.delete(id);
+      } catch { /* Same-ID broker reoffer on reconnect remains safe. */ }
+    }
+  }
   async function stopRuntime() {
     stopped = true; endAsks('context-lost'); lifetime.abort(); records?.close();
     if (timer) clearInterval(timer); timer = undefined;
     const old = client; client = undefined; runtime = undefined; records = undefined; asks = undefined; ctx = undefined; connecting = undefined;
     active = false; wakeReserved = false; approvalDialog = false; lastPresenceSentAt = 0;
+    pendingSavedReceipts.clear(); lastReceiptScanAt = 0;
     askStops.clear(); contactStops.clear(); declined.clear(); localPairDecisions.clear(); prompted.clear(); peerNames.clear(); dialogTail = Promise.resolve();
     lastWidget = null; lastStatus = undefined; connectionError = undefined; connectionErrorDetail = undefined; nextReconnect = 0; reconnectDelay = 1000;
     await old?.disconnect();
@@ -386,12 +434,12 @@ export default function comms(pi: ExtensionAPI) {
       getEntries: () => context.sessionManager.getEntries() as unknown as NativeEntry[],
       append: (type, data) => pi.appendEntry(type, data),
     });
-    const current = new Runtime(self, async (id, envelope) => {
+    const current = new Runtime(self, async (id, envelope, policy) => {
       if (runtime !== current || stopped) return { outcome: 'rejected', code: 'CONTEXT_LOST' };
       try { await ensureConnection(); }
       catch (error) { return { outcome: 'rejected', code: errorCode(error) }; }
       if (runtime !== current || stopped || !client) return { outcome: 'rejected', code: 'CONTEXT_LOST' };
-      return sendExactSession(client, current.isApproved, id, envelope);
+      return sendExactSession(client, current.isApproved, id, envelope, policy);
     }, log.append);
     runtime = current; records = log;
     const restored = log.load();
@@ -404,9 +452,10 @@ export default function comms(pi: ExtensionAPI) {
     if (stopped || ctx !== context) return;
     timer = setInterval(() => {
       if (runtime !== current || stopped) return;
-      if (!current.holdReason() && !client?.isConnected() && !connecting && Date.now() >= nextReconnect) void ensureConnection().catch(() => undefined);
-      try { publishActivity(); offerIncoming(); admitAsks(); pump(); status(); }
-      catch (error) { current.holdRecovery(String(error)); status(); }
+      if (current.holdReason()) { quarantineHeldConnection(current); status(); return; }
+      if (!client?.isConnected() && !connecting && Date.now() >= nextReconnect) void ensureConnection().catch(() => undefined);
+      try { publishActivity(); flushSavedReceipts(); offerIncoming(); admitAsks(); pump(); status(); }
+      catch (error) { current.holdRecovery(String(error)); quarantineHeldConnection(current); status(); }
     }, 150); timer.unref();
     status();
   });
@@ -563,6 +612,10 @@ export default function comms(pi: ExtensionAPI) {
           }
           const peer = available.find(p => p.id === selected);
           if (!peer || selected === current.self) throw new Error('TARGET_UNAVAILABLE');
+          await ensureConnection();
+          const livePeer = (await client!.listSessions()).find(p => p.id === selected);
+          if (!livePeer?.durableMailboxV1)
+            throw Error('PEER_OUTDATED: the colleague must update pi-comms before this pair can be approved');
           const collaboration = await commandCtx.ui.input('What work is this colleague approved for?'); if (!collaboration?.trim()) return;
           // /comms approve only grants or edits consent. Unlike a first-contact
           // No, Cancel/Esc here never revokes an existing peer or ends its asks.
@@ -586,6 +639,8 @@ export default function comms(pi: ExtensionAPI) {
         if (!current.entry(id)) { commandCtx.ui.notify('That message is not available in this saved session. Older memory-only records cannot be reconstructed. /comms inspect with no ID shows waiting messages.', 'info'); return; }
       }
       observeSaved();
+      if (id && current.isBrokerMailCandidate(id)) await refreshMailEvidence([id]);
+      if (stopped || runtime !== current) return;
       try { await withDialog(signal => showInspection(commandCtx, cursor => id !== undefined ? current.inspect({ message: id }, 'human') : current.inspect({ queue: 'self', ...(cursor ? { cursor } : {}) }, 'human'), { self: current.self, name, approved: current.isApproved }, signal)); }
       catch (error) { commandCtx.ui.notify(String(error), 'info'); }
       return;
@@ -608,7 +663,7 @@ export default function comms(pi: ExtensionAPI) {
       const data = await work(); const output = result(data);
       if (compact) {
         const sent = data as ReturnType<Runtime['view']>;
-        output.content = [{ type: 'text', text: `Sent to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''}${sent.message.handoverFrom ? ` Handover from exchange ${sent.message.handoverFrom} (link only, no authority transferred).` : ''}${sent.message.report ? ` Peer reports ${sent.message.report.state} on request ${sent.message.report.request} (not acceptance).` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}${sent.record.state === 'partial' ? `\n${sent.record.warning}` : sent.record.state === 'volatile' ? '\nCommunication record is live-only until Pi saves this session.' : ''}` }];
+        output.content = [{ type: 'text', text: `${sent.delivery === 'queued' ? 'Queued at broker for exact offline peer' : sent.delivery === 'receiver_recorded' ? 'Receiver recorded' : 'Sent'} to ${name(sent.message.to)} · ${sent.message.subject}.${sent.message.workRef ? ` Work: ${sent.message.workRef}.` : ''}${sent.message.recipientLabel ? ` Recipient label (sender-supplied, not authority): ${sent.message.recipientLabel}.` : ''}${sent.message.handoverFrom ? ` Handover from exchange ${sent.message.handoverFrom} (link only, no authority transferred).` : ''}${sent.message.report ? ` Peer reports ${sent.message.report.state} on request ${sent.message.report.request} (not acceptance).` : ''} Replies may arrive later; sending does not prove reading or completion.\nMessage: ${sent.message.id} · Exchange: ${sent.message.exchange}${sent.record.state === 'partial' ? `\n${sent.record.warning}` : sent.record.state === 'volatile' ? '\nCommunication record is live-only until Pi saves this session.' : ''}` }];
       }
       return output;
     } catch (error) {
@@ -645,6 +700,8 @@ export default function comms(pi: ExtensionAPI) {
       if (current.isApproved(to)) return resolved;
       const peer = (await client!.listSessions()).find(p => p.id === to);
       if (!peer || to === current.self) throw new Error('TARGET_UNAVAILABLE');
+      if (!peer.durableMailboxV1)
+        throw Error('PEER_OUTDATED: the colleague must update pi-comms before contact approval');
       await approveContact(to, peer.name ?? to, source?.subject ?? input.subject!, input.text, 'send', signal);
     }
     if (signal?.aborted || runtime !== current) throw new Error('CONTACT_CANCELLED');
@@ -677,7 +734,7 @@ export default function comms(pi: ExtensionAPI) {
             if (pending.ended(call)) { item.outcome = pending.ended(call); return; }
             if (current.paused) { item.outcome = 'paused'; return; }
             let waiting: Promise<void> | undefined;
-            const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds); });
+            const sending = current.send(resolved, entry => { waiting = pending.register(call, item, entry, seconds); }, 'live_only');
             const dispatched = sending.then(sent => { pending.sent(sent.message.id, sent.state, sent.code); if (runtime === current) admitAsks(); });
             if (waiting) { void dispatched.catch(() => pending.end('unknown', call)); await waiting; } else await dispatched;
           } catch (error) { item.outcome = pending.ended(call) ?? 'not-sent'; item.code = errorCode(error); }
@@ -726,12 +783,36 @@ export default function comms(pi: ExtensionAPI) {
       }
     }) };
   });
+  async function refreshMailEvidence(ids: string[]) {
+    const owner = runtime, transport = client;
+    if (!owner || !transport?.isConnected() || !transport.supportsFeature(DURABLE_MAILBOX_FEATURE)) return;
+    for (let i = 0; i < ids.length; i += 30) {
+      try {
+        const evidence = await transport.mailboxEvidence(ids.slice(i, i + 30));
+        if (stopped || runtime !== owner || client !== transport) return;
+        owner.updateBrokerEvidence(evidence);
+      } catch { /* No new broker evidence; saved sender observations remain. */ }
+    }
+  }
   async function inspectCommunication(input: InspectInput, guard: () => void = () => {}) {
     guard(); validate(InspectInput, input);
     const owner = runtime; if (!owner || stopped) throw new Error('CONTEXT_LOST');
     const resolved = input.peer ? { ...input, peer: await resolvePeer(input.peer) } : input;
     guard(); if (stopped || runtime !== owner) throw new Error('CONTEXT_LOST');
     observeSaved();
+    const projected = owner.inspect(resolved);
+    const ids = new Set<string>();
+    if (input.requests) for (const id of input.requests) if (owner.isBrokerMailCandidate(id)) ids.add(id);
+    const visit = (value: any, depth = 0) => {
+      if (!value || typeof value !== 'object' || depth > 5) return;
+      if (typeof value.message?.id === 'string' && owner.isBrokerMailCandidate(value.message.id)) ids.add(value.message.id);
+      if (Array.isArray(value)) for (const item of value) visit(item, depth + 1);
+      else if (depth < 5) for (const [key, item] of Object.entries(value)) if (key !== 'message' && key !== 'text' && key !== 'structured') visit(item, depth + 1);
+    };
+    visit(projected);
+    await refreshMailEvidence([...ids].slice(0, 30));
+    guard();
+    if (stopped || runtime !== owner) throw Error('CONTEXT_LOST: inspection belongs to an earlier Pi session');
     return { ...owner.inspect(resolved), localTransport: { hold: hold(), connectivity: client?.isConnected() ? 'online' : 'offline' }, recovery: records?.info() };
   }
   pi.registerTool({ name: 'comms_inspect', label: 'Inspect communication', description: 'Inspect without consuming: {} overview; {requests:[messageId,...]} reply progress and current peer report; {workRef:"TICKET"}, {peer}, {exchange}, {message}, {queue:"self"}, {outbox:"self"}. One selector. Saved authorized history remains readable after approval expires; previously withheld content stays hidden. Historical access is not current contact permission. Peer reports are claims, not acceptance.', parameters: InspectInput, outputSchema: Output,
