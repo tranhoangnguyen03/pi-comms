@@ -80,6 +80,9 @@ export class Runtime {
             const entry = this.required(event.id);
             if (entry.message.from !== this.self) throw new Error('Outgoing outcome attached to an incoming message');
             entry.state = event.state as Attempt['outcome']; entry.code = event.code; entry.delivery = event.delivery;
+            if (event.delivery === 'queued' || event.delivery === 'receiver_recorded') {
+              this.brokerEvidence.set(event.id, { id: event.id, state: event.delivery, targetId: entry.message.to });
+            } else this.brokerEvidence.delete(event.id);
             break;
           }
           case 'fact': this.addFact(this.required(event.id), event.fact as Fact); break;
@@ -297,10 +300,25 @@ export class Runtime {
     this.returns.set(handle, message); this.records.set(envelope.id, entry); this.waiting.push(envelope.id);
     return true;
   }
+  // Querying the broker never turns ordinary live/rejected traffic into
+  // "unknown offline mail". A failed send with an unknown outcome may have
+  // reached the mailbox, so a positive broker observation can still resolve it.
+  isBrokerMailCandidate(id: string): boolean {
+    const entry = this.records.get(id);
+    return !!entry && entry.message.from === this.self && entry.state !== 'rejected' &&
+      entry.delivery !== 'socket_delivered' &&
+      (entry.delivery === 'queued' || entry.delivery === 'receiver_recorded' || entry.state === 'unknown');
+  }
   updateBrokerEvidence(items: readonly BrokerMailEvidence[]): void {
     for (const item of items) {
-      const entry = this.records.get(item.id);
-      if (entry?.message.from === this.self) this.brokerEvidence.set(item.id, { ...item });
+      if (!this.isBrokerMailCandidate(item.id)) continue;
+      const entry = this.records.get(item.id)!;
+      // No mailbox record is expected for an uncertain ordinary live send.
+      // Unknown is meaningful for mail we already know was queued, or when
+      // the broker supplies a concrete storage/expiry warning.
+      if (item.state === 'unknown' && !item.reason &&
+          entry.delivery !== 'queued' && entry.delivery !== 'receiver_recorded') continue;
+      this.brokerEvidence.set(item.id, { ...item });
     }
   }
   isSavedIncoming(id: string): boolean {
@@ -429,7 +447,7 @@ export class Runtime {
   }
   view(entry: Entry) {
     return structuredClone({ ...entry, responses: [...this.records.values()].filter(r => r.message.replyTo === entry.message.id).map(r => r.message.id), evidence: 'available',
-      ...(entry.message.from === this.self && this.brokerEvidence.has(entry.message.id) ? { brokerDelivery: this.brokerEvidence.get(entry.message.id) } : {}),
+      ...(this.isBrokerMailCandidate(entry.message.id) && this.brokerEvidence.has(entry.message.id) ? { brokerDelivery: this.brokerEvidence.get(entry.message.id) } : {}),
       record: { state: this.saveStates.get(entry.message.id) ?? 'volatile', ...(this.saveStates.get(entry.message.id) === 'partial' ? { warning: 'The latest observation was not saved. Do not resend solely because of this storage failure.' } : {}) },
       ...(this.uncertainAdmission.has(entry.message.id) ? { admission: 'uncertain' as const } : {}),
     });
@@ -457,7 +475,7 @@ export class Runtime {
       const replies = records.filter(entry => entry.message.replyTo === id && entry.message.from === request.message.to);
       const { reports, current, laterProgressCount } = this.reportState(id, audience);
       return { request: id, peer: request.message.to, subject: request.message.subject, workRef: request.message.workRef ?? null, state: request.state,
-        code: request.code, ...(this.brokerEvidence.has(id) ? { brokerDelivery: this.brokerEvidence.get(id) } : {}), outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
+        code: request.code, ...(this.isBrokerMailCandidate(id) && this.brokerEvidence.has(id) ? { brokerDelivery: this.brokerEvidence.get(id) } : {}), outcome: replies.length ? 'reply-received' : request.state === 'accepted' ? 'no-reply-yet' : request.state,
         responseCount: replies.length, replies: replies.slice(-1).map(entry => this.project(entry, audience)),
         reportCount: reports.length, ...(reports.length ? { latestReport: this.project(reports.at(-1)!, audience) } : {}),
         ...(current ? { currentReport: this.project(current, audience) } : {}), ...(laterProgressCount ? { laterProgressCount } : {}) };
