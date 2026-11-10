@@ -1634,7 +1634,7 @@ test('F12 native: recovery-held receiver stops appearing online; approved async 
   try {
     await a.runtime.session.prompt('Save sender for an interrupted review');
     await b.runtime.session.prompt('Save reviewer before storage failure');
-    a.confirm(true); a.remember(true);
+    a.confirm(true); a.remember(false);
     await a.command(`approve ${b.id()}`);
     await b.command('pause');
     const bid = b.id();
@@ -1647,6 +1647,8 @@ test('F12 native: recovery-held receiver stops appearing online; approved async 
       const roster = data(await a.tool('comms_peers', { view: 'all' }));
       return roster.ok && roster.data.items.find((p: any) => p.id === bid)?.presence === 'offline';
     });
+    const known = data(await a.tool('comms_peers', { view: 'known' })).data.items.find((p: any) => p.id === bid);
+    assert.ok(known?.approved, 'a blocked receiver is a socket loss, not a Pi runtime exit');
     const sent = data(await a.tool('comms_message', {
       to: bid, subject: 'Findings after reviewer held', text: 'F12_MUST_SAVE_TO_BROKER_NOT_DROP',
     }));
