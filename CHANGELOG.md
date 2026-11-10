@@ -6,6 +6,8 @@
 - Persist bounded pending mail and outcome/fingerprint evidence in `comms/mailbox.json`, with checksum and atomic fsync/rename. Use seven-day expiry, 256 messages / 32 MiB of pending mail, and fourteen-day terminal evidence (4,096 records / 4 MiB); reject new work when full, without evicting accepted mail.
 - Keep broker responsibility until the receiver has saved the native Pi arrival and sends `receiver_recorded`; a live `queued` receipt is not a disk receipt. Recheck pair approval and exact session on delivery; same-ID broker offers are deduplicated by native Pi records. Never automatically resend with a new ID.
 - On revoke, never let later reapproval revive an earlier queued message, even if the earlier terminal write failed; hold reapproval until that mail is safely ended. Treat uncertain mailbox writes as unknown, not definitely unsent. Reject offline payloads that cannot fit the later delivery frame and clear stale socket-offer markers on reconnect.
+- Limit broker-mail evidence to queued/uncertain async sends; ordinary live or rejected messages must not gain fictitious `Broker mail: unknown`. Preserve saved queued facts after native restart. Unsettled revoked/expired mail reports unknown or an explicit refusal, not a fresh queued acknowledgment.
+- Disconnect the live socket of a receiver whose native records enter recovery hold, without changing its Pi runtime's session-only approval lifetime. Refuse known older peers before asking the owner for contact approval, and remove dead fuzzy offline routing helpers.
 - Gate the durable mailbox protocol for older brokers/peers, maintain F11 snapshot-before-queue wire order, and preserve broker-upgrade and restart evidence without adding new agent tools or a second inbox.
 
 
