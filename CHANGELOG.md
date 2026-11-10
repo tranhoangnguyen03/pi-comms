@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0] - 2026-11-10
+
+- Support opt-in `PI_COMMS_BROKER_DIR`, one absolute shared local broker address for independent main Pi and PiG-Agent homes; each agent keeps its own Pi settings, credentials, models, and session history. Default remains per-agent home.
+- Preserve the **merged** M4 F10–F12 recovery, one unordered A–B consent decision and exact-ID offline queue. No fallback by similar name/cwd, no implicit PiG permissions, no new agent tools or coordinator.
+- Prevent overwriting a live incompatible broker socket without a supported health response or verified process; show actionable guidance and never blindly delete/kill.
+- Add three-process cross-home and no-override routing tests, version-safe first-contact approvals and installed npm broker tests. Ship a real Pi/PiG/PiG acceptance recipe; live TUI/model use remains a separately labeled gate.
+
+
 ## [0.1.12] - 2026-11-09
 
 - M4-C / F12: accept asynchronous messages to an exact previously approved offline saved session, and save the broker mailbox before returning `queued`. No name, cwd or successor fallback. Ordinary `comms_message` and M3 organizer send share this path; `comms_ask` remains live-only.
