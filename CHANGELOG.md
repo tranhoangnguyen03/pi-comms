@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0] - 2026-11-10
+
+- Add opt-in absolute `PI_COMMS_BROKER_DIR` so independently installed native Pi and PiG agents can join the same same-user local broker while keeping distinct private agent homes, model credentials, session histories and settings. The default per-home broker location is unchanged.
+- Preserve the merged 0.1.12 F10/F11/F12 contract: exact native IDs, one broker-owned unordered A–B approval, session-only and remembered lifetimes, broker-persisted offline async mail, and live-only asks. Never grant permission from role, model or shared broker membership.
+- Reject incompatible live broker endpoints with no verified broker PID without unlinking their socket. Verify safe shared spawn/listen/lock/health and version replacement from the selected broker root.
+- Add actual OS-process cross-home shared/default broker and exact-ID messaging checks, with a separate installed-package broker run, plus a Pi ↔ PiG ↔ PiG hands-on acceptance recipe. Automated process clients do not establish real human approval or PiG TUI qualification.
+
+
 ## [0.1.12] - 2026-11-09
 
 - M4-C / F12: accept asynchronous messages to an exact previously approved offline saved session, and save the broker mailbox before returning `queued`. No name, cwd or successor fallback. Ordinary `comms_message` and M3 organizer send share this path; `comms_ask` remains live-only.
