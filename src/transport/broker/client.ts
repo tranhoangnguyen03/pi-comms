@@ -633,6 +633,15 @@ export class IntercomClient extends EventEmitter {
     }
   }
 
+  /** Stop advertising this socket while native recovery is blocked.
+   * Unlike a normal unregister, a socket drop leaves the existing Pi runtime
+   * intact so F11 session-only approval still follows its original lifetime.
+   * The receiver cannot reconnect until the native recovery hold is cleared.
+   */
+  suspendForRecoveryHold(): void {
+    this.socket?.destroy();
+  }
+
   async disconnect(): Promise<void> {
     const socket = this.socket;
     if (!socket) {
