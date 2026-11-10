@@ -43,7 +43,15 @@ type BrokerLaunchSpec = {
   captureStartupStderr: boolean;
 };
 
-export type BrokerHealthProbe = { ok: boolean } & BrokerRuntimeInfo;
+export type BrokerHealthProbe = { ok: boolean; occupied?: boolean } & BrokerRuntimeInfo;
+
+function assertBrokerEndpointNotOccupied(health: BrokerHealthProbe): void {
+  if (health.occupied) throw Error(
+    `BROKER_ENDPOINT_OCCUPIED: another process answers at the pi-comms endpoint in ${INTERCOM_DIR} ` +
+    "but does not speak the required health protocol. Inspect or stop that listener and reload the compatible Pi agents. " +
+    "The existing socket was not removed."
+  );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -79,7 +87,7 @@ export function getBrokerSpawnOptions(
     detached: true,
     stdio: captureStderr ? ["ignore", "ignore", "pipe"] : "ignore",
     // Windows locks a process's cwd against renames, so keep it outside the package.
-    cwd: getIntercomDirPath(agentDir),
+    cwd: getIntercomDirPath(agentDir, env),
     env: { ...env, PI_CODING_AGENT_DIR: agentDir, NODE_NO_WARNINGS: "1" },
     windowsHide: true,
   };
@@ -95,9 +103,9 @@ export async function spawnBrokerIfNeeded(brokerURL: URL): Promise<void> {
   const deadline = Date.now() + BROKER_LOCK_WAIT_TIMEOUT_MS;
 
   while (true) {
-    if (isBrokerAcceptable(await isBrokerRunning(), targetVersion)) {
-      return;
-    }
+    const initial = await isBrokerRunning();
+    assertBrokerEndpointNotOccupied(initial);
+    if (isBrokerAcceptable(initial, targetVersion)) return;
 
     const lockToken = acquireSpawnLock();
     if (!lockToken) {
@@ -110,6 +118,7 @@ export async function spawnBrokerIfNeeded(brokerURL: URL): Promise<void> {
 
     try {
       const current = await isBrokerRunning();
+      assertBrokerEndpointNotOccupied(current);
       if (isBrokerAcceptable(current, targetVersion)) {
         return;
       }
@@ -204,9 +213,7 @@ async function retireOutdatedBroker(current: BrokerHealthProbe): Promise<boolean
 
 async function isBrokerRunning(): Promise<BrokerHealthProbe> {
   const first = await probeBrokerHealth();
-  if (first.ok) {
-    return first;
-  }
+  if (first.ok || first.occupied) return first;
 
   const { pid } = readBrokerPidMetadata(BROKER_PID);
   if (!pid || !isProcessAlive(pid)) {
@@ -235,6 +242,7 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
     const requestId = randomUUID();
     const expectedStateId = typeof target === "string" ? undefined : target.stateId;
     let settled = false;
+    let connected = false;
     const finish = (probe: BrokerHealthProbe) => {
       if (settled) {
         return;
@@ -248,6 +256,7 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
       resolve(probe);
     };
     const onConnect = () => {
+      connected = true;
       try {
         writeMessage(socket, {
           type: "health",
@@ -255,13 +264,13 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
           ...(expectedStateId ? { stateId: expectedStateId } : {}),
         });
       } catch {
-        finish({ ok: false });
+        finish({ ok: false, occupied: true });
       }
     };
-    const onError = () => finish({ ok: false });
+    const onError = () => finish({ ok: false, ...(connected ? { occupied: true } : {}) });
     const reader = createMessageReader((message) => {
       if (!isBrokerHealthOkMessage(message, requestId)) {
-        finish({ ok: false });
+        finish({ ok: false, occupied: true });
         return;
       }
       const response = message as Record<string, unknown>;
@@ -271,11 +280,11 @@ function probeBrokerHealth(): Promise<BrokerHealthProbe> {
         ...(Number.isSafeInteger(response.pid) && Number(response.pid) > 0 ? { pid: Number(response.pid) } : {}),
         ...(Number.isSafeInteger(response.startedAt) && Number(response.startedAt) > 0 ? { startedAt: Number(response.startedAt) } : {}),
       });
-    }, () => finish({ ok: false }));
+    }, () => finish({ ok: false, occupied: true }));
     socket.on("connect", onConnect);
     socket.on("error", onError);
     socket.on("data", reader);
-    const timeout = setTimeout(() => finish({ ok: false }), 1000);
+    const timeout = setTimeout(() => finish({ ok: false, ...(connected ? { occupied: true } : {}) }), 1000);
   });
 }
 
@@ -376,9 +385,9 @@ function releaseSpawnLock(token: string): void {
 async function waitForStartedBroker(targetVersion?: string, timeoutMs = BROKER_START_TIMEOUT_MS): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (isBrokerAcceptable(await probeBrokerHealth(), targetVersion)) {
-      return;
-    }
+    const health = await probeBrokerHealth();
+    assertBrokerEndpointNotOccupied(health);
+    if (isBrokerAcceptable(health, targetVersion)) return;
     await sleep(50);
   }
   throw new Error("Broker failed to start within timeout");
@@ -388,11 +397,14 @@ async function waitForBrokerOrReclaim(targetVersion: string | undefined, timeout
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const health = await probeBrokerHealth();
+    assertBrokerEndpointNotOccupied(health);
     if (isBrokerAcceptable(health, targetVersion)) {
       return "ready";
     }
     if (!existsSync(BROKER_SPAWN_LOCK) || isSpawnLockStale()) {
-      return isBrokerAcceptable(await probeBrokerHealth(), targetVersion) ? "ready" : "reclaim";
+      const latest = await probeBrokerHealth();
+      assertBrokerEndpointNotOccupied(latest);
+      return isBrokerAcceptable(latest, targetVersion) ? "ready" : "reclaim";
     }
     await sleep(50);
   }
