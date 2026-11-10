@@ -1158,8 +1158,9 @@ class IntercomBroker {
             writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "TARGET_UNAVAILABLE: the colleague is not connected" });
             break;
           }
-          if (!peer.info.pairConsentV1) {
-            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId, error: "PEER_OUTDATED: the colleague runs an older pi-comms" });
+          if (!peer.info.pairConsentV1 || !peer.info.durableMailboxV1 || !session.info.durableMailboxV1) {
+            writeMessage(socket, { type: "pair_decision_result", requestId: clientMessage.requestId,
+              error: "PEER_OUTDATED: both sessions need the durable-mailbox-v1 protocol to approve new contact" });
             break;
           }
         }
