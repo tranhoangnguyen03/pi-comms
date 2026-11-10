@@ -37,7 +37,18 @@ export function getAgentDirPath(
   return isAbsolute(configured) ? configured : resolve(cwd, configured);
 }
 
-export function getIntercomDirPath(agentDir: string = getAgentDirPath()): string {
+/** Opt-in same-user broker address shared by independently installed Pi/PiG homes.
+ * The host's own PI_CODING_AGENT_DIR remains the owner of its sessions and keys.
+ */
+export function getIntercomDirPath(
+  agentDir: string = getAgentDirPath(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const override = env.PI_COMMS_BROKER_DIR?.trim();
+  if (override) {
+    if (!isAbsolute(override)) throw Error("PI_COMMS_BROKER_DIR must be an absolute path");
+    return resolve(override);
+  }
   return join(agentDir, "comms");
 }
 
@@ -69,18 +80,20 @@ export function getBrokerPidFilePath(intercomDir: string = getIntercomDirPath())
 export function getBrokerSocketPath(
   platform: NodeJS.Platform = process.platform,
   agentDir: string = getAgentDirPath(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
+  const dir = getIntercomDirPath(agentDir, env);
   if (platform === "win32") {
-    return `\\\\.\\pipe\\pi-comms-${sanitizePipeSegment(agentDir)}`;
+    return `\\\\.\\pipe\\pi-comms-${sanitizePipeSegment(dir)}`;
   }
 
-  return join(getIntercomDirPath(agentDir), "broker.sock");
+  return join(dir, "broker.sock");
 }
 
 export function getBrokerConnectTarget(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
-  intercomDir: string = getIntercomDirPath(getAgentDirPath(env)),
+  intercomDir: string = getIntercomDirPath(getAgentDirPath(env), env),
 ): BrokerConnectTarget {
   if (shouldUseWindowsTcpTransport(platform, env)) {
     const endpointFile = getBrokerPortFilePath(intercomDir);
@@ -105,7 +118,7 @@ export function getBrokerConnectTarget(
     return { transport: "tcp", host: endpoint.host, port: endpoint.port, stateId: endpoint.stateId };
   }
 
-  return getBrokerSocketPath(platform, getAgentDirPath(env));
+  return getBrokerSocketPath(platform, getAgentDirPath(env), env);
 }
 
 export function getBrokerListenTarget(
