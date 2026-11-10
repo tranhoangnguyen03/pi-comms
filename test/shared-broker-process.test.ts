@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fork, type ChildProcess } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { fork, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
@@ -261,6 +261,79 @@ if (process.env.PI_COMMS_CROSS_HOME_CHILD === "1") {
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("direct broker launch refuses to unlink a live foreign Unix socket", {
+    skip: process.platform === "win32" ? "Unix socket only" : undefined,
+  }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pc-direct-broker-"));
+    const shared = join(dir, "shared");
+    const sock = join(shared, "broker.sock");
+    mkdirSync(shared, { recursive: true });
+    const foreign = net.createServer(socket => socket.on("error", () => undefined));
+    await new Promise<void>((resolve, reject) => {
+      foreign.once("error", reject);
+      foreign.listen(sock, resolve);
+    });
+    const executable = process.env.PI_COMMS_TEST_BROKER
+      ?? fileURLToPath(new URL("../dist/transport/broker/broker.js", import.meta.url));
+    let child: ChildProcess | undefined;
+    try {
+      child = spawn(process.execPath, [executable], {
+        env: { ...process.env, PI_CODING_AGENT_DIR: join(dir, "private"),
+          PI_COMMS_BROKER_DIR: shared },
+        cwd: dir, stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr?.on("data", chunk => { stderr += String(chunk); });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          child?.kill("SIGKILL");
+          reject(Error("Direct broker launch did not reject occupied socket"));
+        }, 5000);
+        child!.once("error", error => { clearTimeout(timeout); reject(error); });
+        child!.once("exit", code => { clearTimeout(timeout); resolve(code); });
+      });
+      assert.notEqual(code, 0, "a directly launched broker must fail rather than serve another owner's endpoint");
+      assert.match(stderr, /BROKER_ENDPOINT_OCCUPIED/);
+      assert.equal(foreign.listening, true);
+      assert.equal(existsSync(sock), true, "foreign broker socket remains at original path");
+      assert.equal(existsSync(join(shared, "broker.pid")), false, "new broker did not claim foreign PID");
+    } finally {
+      child?.kill("SIGKILL");
+      await new Promise<void>(resolve => foreign.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unreachable endpoint with unrelated live PID never invents an occupied socket", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pc-unreachable-broker-"));
+    const shared = join(dir, "shared");
+    mkdirSync(shared, { recursive: true });
+    writeFileSync(join(shared, "broker.pid"), String(process.pid), { mode: 0o600 });
+    const child = fork(fileURLToPath(import.meta.url), [], {
+      execArgv: ["--import", "tsx"],
+      env: { ...process.env, PI_COMMS_CROSS_HOME_CHILD: "probe",
+        PI_CODING_AGENT_DIR: join(dir, "private"), PI_COMMS_BROKER_DIR: shared },
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    try {
+      const result: any = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(Error("Stale PID probe timed out")), 9000);
+        child.once("exit", code => { clearTimeout(timeout); reject(Error("Probe exited: " + code)); });
+        child.on("message", message => {
+          if (message && (message as any).type === "probe") { clearTimeout(timeout); resolve(message); }
+        });
+      });
+      assert.equal(result.unexpectedSuccess, undefined);
+      assert.doesNotMatch(result.error ?? "", /BROKER_ENDPOINT_OCCUPIED/,
+        "a live but unrelated PID is not proof that any process listens on the endpoint");
+      assert.equal(existsSync(join(shared, "broker.sock")), false);
+      assert.equal(readFileSync(join(shared, "broker.pid"), "utf8").trim(), String(process.pid));
+    } finally {
+      child.kill("SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
