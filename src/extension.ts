@@ -269,6 +269,15 @@ export default function comms(pi: ExtensionAPI) {
     } catch (error) { wakeReserved = false; ctx.ui.notify(`pi-comms could not confirm batch admission: ${String(error)}. Inspect before repeating work.`, 'error'); }
     status();
   }
+  // A held receiver must stop advertising a usable live socket. Otherwise
+  // senders get socket_delivered while current.receive rejects the payload,
+  // instead of using the same exact pair's durable offline mailbox.
+  function quarantineHeldConnection(owner: Runtime, candidate = client) {
+    if (stopped || runtime !== owner || !owner.holdReason() || !candidate) return;
+    if (client === candidate) client = undefined;
+    endAsks('interrupted');
+    if (candidate.isConnected()) void candidate.disconnect().catch(() => undefined);
+  }
   async function ensureConnection() {
     if (!ctx || !runtime || stopped) throw new Error('TARGET_UNAVAILABLE');
     runtime.assertOperational();
@@ -314,7 +323,11 @@ export default function comms(pi: ExtensionAPI) {
           else pendingSavedReceipts.add(wire.id);
           candidate.sendMessageReceipt({ messageId: wire.id, status: saved ? 'receiver_recorded' : 'queued', timestamp: Date.now() });
           admitAsks(); status();
-        } catch (error) { context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning'); status(); }
+        } catch (error) {
+          context.ui.notify(`pi-comms held or rejected incoming message: ${String(error)}`, 'warning');
+          quarantineHeldConnection(current, candidate);
+          status();
+        }
       });
       try {
         const brokerURL = new URL('./transport/broker/broker.js', import.meta.url);
@@ -324,6 +337,10 @@ export default function comms(pi: ExtensionAPI) {
         }
         // The pair_snapshot handler replaces the cache: approvals may have ended while offline.
         await candidate.listPairs();
+        if (current.holdReason()) {
+          await candidate.disconnect();
+          throw Error('RECOVERY_BLOCKED: receiver must not remain online while its records are held');
+        }
         if (runtime !== current || stopped) { await candidate.disconnect(); return; }
         client = candidate; candidate.updatePresence({ name: context.sessionManager.getSessionName() ?? current.self, status: active ? 'working' : 'idle' }); lastPresenceSentAt = Date.now();
         connectionError = undefined; connectionErrorDetail = undefined; reconnectDelay = 1000; status();
@@ -347,6 +364,7 @@ export default function comms(pi: ExtensionAPI) {
     const native = entries ?? log.nativeEntries();
     if (log.info().state === 'blocked') {
       owner.holdRecovery(log.info().reason ?? 'Native session recovery failed');
+      quarantineHeldConnection(owner);
     }
     const savedIds = new Set(native.map(entry => entry.id).filter((id): id is string => !!id));
     for (const entry of native) {
@@ -385,6 +403,7 @@ export default function comms(pi: ExtensionAPI) {
         now - lastReceiptScanAt < 1000) return;
     lastReceiptScanAt = now;
     observeSaved(owner, log);
+    if (owner.holdReason()) { quarantineHeldConnection(owner); return; }
     for (const id of pendingSavedReceipts) {
       if (!owner.isSavedIncoming(id)) continue;
       try {
@@ -431,9 +450,10 @@ export default function comms(pi: ExtensionAPI) {
     if (stopped || ctx !== context) return;
     timer = setInterval(() => {
       if (runtime !== current || stopped) return;
-      if (!current.holdReason() && !client?.isConnected() && !connecting && Date.now() >= nextReconnect) void ensureConnection().catch(() => undefined);
+      if (current.holdReason()) { quarantineHeldConnection(current); status(); return; }
+      if (!client?.isConnected() && !connecting && Date.now() >= nextReconnect) void ensureConnection().catch(() => undefined);
       try { publishActivity(); flushSavedReceipts(); offerIncoming(); admitAsks(); pump(); status(); }
-      catch (error) { current.holdRecovery(String(error)); status(); }
+      catch (error) { current.holdRecovery(String(error)); quarantineHeldConnection(current); status(); }
     }, 150); timer.unref();
     status();
   });
