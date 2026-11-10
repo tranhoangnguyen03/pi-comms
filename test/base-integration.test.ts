@@ -1,6 +1,6 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -17,6 +17,7 @@ const extensionPath = process.env.PI_COMMS_TEST_EXTENSION ?? fileURLToPath(new U
 const root = mkdtempSync(join(tmpdir(), 'pc-base-native-'));
 // Set before dynamic broker imports; the bundled extension resolves paths at startup.
 process.env.PI_CODING_AGENT_DIR = root;
+const { IntercomClient } = await import('../src/transport/broker/client.ts');
 after(async () => {
   try { process.kill(Number(readFileSync(join(root, 'comms', 'broker.pid'), 'utf8')), 'SIGTERM'); } catch {}
   await new Promise(r => setTimeout(r, 100)); rmSync(root, { recursive: true, force: true });
@@ -1623,5 +1624,63 @@ test('F12 installed Pi: remembered exact offline mail survives broker restart an
     assert.ok(inspected.facts.some((f: any) => f.kind === 'saved'), 'native save is distinct from model posting');
   } finally {
     await b.close(); await a.close();
+  }
+});
+
+test('F12 native: recovery-held receiver stops appearing online; approved async mail goes to broker disk', async () => {
+  const a = await participant('f12-hold-sender');
+  const b = await participant('f12-hold-receiver');
+  let file = '', before = '';
+  try {
+    await a.runtime.session.prompt('Save sender for an interrupted review');
+    await b.runtime.session.prompt('Save reviewer before storage failure');
+    a.confirm(true); a.remember(true);
+    await a.command(`approve ${b.id()}`);
+    await b.command('pause');
+    const bid = b.id();
+    file = b.runtime.session.sessionFile!;
+    before = readFileSync(file, 'utf8');
+    appendFileSync(file, '{INVALID_NATIVE_JSON\n');
+    const held = data(await b.tool('comms_inspect', {}));
+    assert.equal(held.data.recovery.state, 'blocked');
+    await waitFor(async () => {
+      const roster = data(await a.tool('comms_peers', { view: 'all' }));
+      return roster.ok && roster.data.items.find((p: any) => p.id === bid)?.presence === 'offline';
+    });
+    const sent = data(await a.tool('comms_message', {
+      to: bid, subject: 'Findings after reviewer held', text: 'F12_MUST_SAVE_TO_BROKER_NOT_DROP',
+    }));
+    assert.equal(sent.ok, true, JSON.stringify(sent.error));
+    assert.equal(sent.data.delivery, 'queued');
+    const saved = JSON.parse(readFileSync(join(root, 'comms', 'mailbox.json'), 'utf8'));
+    assert.ok(saved.pending.some((x: any) => x.message.id === sent.data.message.id),
+      'the exact payload must be persisted at the broker while receiver storage is blocked');
+  } finally {
+    if (file && before) writeFileSync(file, before);
+    await b.close(); await a.close();
+  }
+});
+
+test('F12 native: known older live peer gets PEER_OUTDATED before any owner contact approval', async () => {
+  const a = await participant('f12-old-peer-approval');
+  const old = new IntercomClient(); old.on('error', () => undefined);
+  const oldId = randomUUID();
+  try {
+    await old.connect({ name: 'F11-only colleague', cwd: root, model: 'legacy',
+      pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(),
+      pairConsentV1: true, runtimeId: randomUUID() }, oldId);
+    a.confirm(true);
+    const before = a.dialogs.length;
+    const sent = data(await a.tool('comms_message', {
+      to: oldId, subject: 'No wasted approval', text: 'Old protocol cannot accept F12',
+    }));
+    assert.equal(sent.error.code, 'PEER_OUTDATED');
+    assert.equal(a.dialogs.length, before, 'unsupported peer must not consume a first-contact prompt');
+    await a.command(`approve ${oldId}`);
+    assert.match(a.notifications.at(-1) ?? '', /PEER_OUTDATED/);
+    assert.equal(a.dialogs.length, before, 'explicit approve must reject before opening the owner dialog');
+    await assert.rejects(old.decidePair(a.id(), 'remembered', 'Unsupported pair'), /PEER_OUTDATED/);
+  } finally {
+    await old.disconnect().catch(() => undefined); await a.close();
   }
 });
