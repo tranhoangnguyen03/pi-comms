@@ -769,12 +769,8 @@ class IntercomBroker {
           // A replay is evidence inspection, not a renewed send authority.
           // A revoke or expiry may have happened since the earlier queued ACK.
           this.pruneMailboxMessages(brokerReceivedAt);
-          const oldMail = this.mailbox.lookup(currentKey, message.id);
-          if (oldMail && "message" in oldMail &&
-              this.pairApprovals.state(fromSession.scopeId, fromSession.info.id, oldMail.targetId).mode === "none") {
-            this.writeDeliveryFailure(socket, message.id, "The earlier pair approval ended; pending terminal storage may still be unavailable", "E_PAIR_NOT_APPROVED");
-            break;
-          }
+          // Replay validation checks the original content first, then expiry
+          // and current approval. It never treats unsettled mail as queued.
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) break;
           const exactTarget = this.sessions.get(scopedSessionKey(fromSession.scopeId, targetId));
           if (!exactTarget) {
@@ -1114,9 +1110,15 @@ class IntercomBroker {
         const items = clientMessage.ids.map(id => {
           const item = this.mailbox.lookup(currentKey!, id);
           if (!item) return { id, state: "unknown" as const, ...(this.mailbox.blocked ? { reason: "broker mailbox unreadable; delivery evidence cannot be checked" } : {}) };
-          if ("message" in item && item.expiresAt <= Date.now()) {
-            return { id, state: "unknown" as const, reason: "mail is past expiry but its terminal outcome was not saved",
-              targetId: item.targetId, at: item.queuedAt };
+          if ("message" in item) {
+            const expired = item.expiresAt <= Date.now();
+            const ended = this.pairApprovals.state(item.scope ?? undefined, item.from.id, item.targetId).mode === "none";
+            if (expired || ended) {
+              return { id, state: "unknown" as const,
+                reason: expired ? "mail expired but its terminal outcome could not be saved" :
+                  "pair approval ended but its terminal outcome could not be saved",
+                targetId: item.targetId, at: item.queuedAt };
+            }
           }
           return { id, state: ("message" in item ? "queued" : item.outcome),
             targetId: item.targetId, at: "message" in item ? item.queuedAt : item.at,
@@ -1331,7 +1333,15 @@ class IntercomBroker {
       if (persisted.fingerprint !== createHash('sha256').update(fingerprint).digest('hex')) {
         this.writeDeliveryFailure(socket, messageId, "Message ID reused with different content", "E_MESSAGE_ID_REUSE");
       } else if ("message" in persisted) {
-        this.writeDeliverySuccess(socket, messageId, "queued");
+        if (persisted.expiresAt <= Date.now()) {
+          this.writeDeliveryFailure(socket, messageId, "Queued mail expired but its terminal outcome could not be saved",
+            "MAILBOX_SAVE_FAILED", false, false);
+        } else if (this.pairApprovals.state(persisted.scope ?? undefined, persisted.from.id, persisted.targetId).mode === "none") {
+          this.writeDeliveryFailure(socket, messageId, "Queued mail was revoked but its terminal outcome could not be saved",
+            "E_PAIR_NOT_APPROVED");
+        } else {
+          this.writeDeliverySuccess(socket, messageId, "queued");
+        }
       } else if (persisted.outcome === "receiver_recorded") {
         this.writeDeliverySuccess(socket, messageId, "receiver_recorded");
       } else {
