@@ -84,3 +84,12 @@ For first contact, a caller with no native human approval UI gets `CONTACT_APPRO
 - **F09 (0.1.8+) uses v1:** Authored handovers supply an earlier exchange link through the same `send` method. Recipients are explicitly chosen; no transfer of sessions, identities, approvals or task acceptance occurs.
 
 The test suite includes a **separate organizing extension** loaded beside pi-comms in a real Pi 1.4.0 fixture. It requests the v1 interface, asks for first-contact consent on its first send, reuses approval on later sends, and reads a request-linked work report through both the integration and native inspection paths. That establishes the in-process contract; it is not a claim that another production organizing package has adopted the API.
+
+
+## Shared broker across separately installed Pi/PiG homes (0.2.0 candidate)
+
+Set one absolute `PI_COMMS_BROKER_DIR` in each participating process. Keep each `PI_CODING_AGENT_DIR` different. This only chooses the broker's socket, lock, PID, approvals, and durable offline mailbox; it does **not** merge session history, model credentials, contact grants, or task context. With no override, the broker remains at `<PI_CODING_AGENT_DIR>/comms` as before. An invalid relative override is an error, never a cwd-dependent fallback.
+
+The existing M3 organizer API (v1), four tools, exact native session IDs, F11 unordered A–B approval and F12 offline exact mail are unchanged. A PiG host is still a Pi-compatible native session, not an M5 Claude/Codex adapter. The current shared broker must be the same compatible `pi-comms` build; an incompatible live socket is preserved and reported rather than silently replaced. No auto-launch or automatic trust is introduced.
+
+The repeatable cross-home source/installed-artifact and real-TUI checks are in [PIG-CROSS-HOME-QUALIFICATION.md](PIG-CROSS-HOME-QUALIFICATION.md). Scripted brokers and synthetic provider fixtures cannot prove human acceptance or actual PiG model work.
