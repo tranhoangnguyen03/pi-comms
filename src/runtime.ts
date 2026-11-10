@@ -317,7 +317,7 @@ export class Runtime {
       // Unknown is meaningful for mail we already know was queued, or when
       // the broker supplies a concrete storage/expiry warning.
       if (item.state === 'unknown' && !item.reason &&
-          entry.delivery !== 'queued' && entry.delivery !== 'receiver_recorded') continue;
+          entry.delivery !== 'queued') continue;
       this.brokerEvidence.set(item.id, { ...item });
     }
   }
