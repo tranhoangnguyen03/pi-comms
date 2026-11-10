@@ -18,7 +18,6 @@ import {
   type BrokerConnectTarget,
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
-import { sameCwd } from "../cwd.ts";
 import { PAIR_APPROVAL_FEATURE, DURABLE_MAILBOX_FEATURE, EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
@@ -151,17 +150,6 @@ interface DisconnectedSession {
   key: string;
   scopeId?: string;
   disconnectedAt: number;
-}
-
-interface MailboxMessage {
-  from: SessionInfo;
-  fromKey: string;
-  fromScopeId?: string;
-  target: SessionInfo;
-  targetKey: string;
-  targetScopeId?: string;
-  message: Message;
-  queuedAt: number;
 }
 
 function normalizeScopeId(value: unknown): string | undefined {
@@ -1543,54 +1531,6 @@ class IntercomBroker {
     return Array.from(this.sessions.entries())
       .filter(([, session]) => sameScope(session.scopeId, scopeId) && session.info.id.startsWith(nameOrId))
       .map(([, session]) => session);
-  }
-
-  private findDisconnectedSessions(nameOrId: string, scopeId: string | undefined): DisconnectedSession[] {
-    this.pruneDisconnectedSessions();
-    const byId = this.disconnectedSessions.get(scopedSessionKey(scopeId, nameOrId));
-    if (byId) {
-      return [byId];
-    }
-
-    const lowerName = nameOrId.toLowerCase();
-    const byName = Array.from(this.disconnectedSessions.values()).filter(session => sameScope(session.scopeId, scopeId) && session.info.name?.toLowerCase() === lowerName);
-    if (byName.length > 0) {
-      return byName;
-    }
-
-    return Array.from(this.disconnectedSessions.entries())
-      .filter(([, session]) => sameScope(session.scopeId, scopeId) && session.info.id.startsWith(nameOrId))
-      .map(([, session]) => session);
-  }
-
-  private findUniqueLiveSessionForDisconnectedSession(disconnected: DisconnectedSession, senderKey?: string): ConnectedSession | null {
-    const matches = this.findLiveSessionsSharingMailboxIdentity(disconnected)
-      .filter((session) => session.key !== senderKey);
-    return matches.length === 1 ? matches[0]! : null;
-  }
-
-  /**
-   * Mailbox identity is an explicit name plus directory, never name alone. A
-   * runtime fallback alias is derived from the session id rather than chosen as
-   * a durable identity, so it must not transfer mail to another process. This
-   * also prevents two unnamed UUIDv7 sessions started close together from
-   * inheriting each other's mailbox through a shared short alias.
-   *
-   * Directories compare through sameCwd so a relaunch that reports the same
-   * directory differently (trailing slash, "."/"..", or a symlink such as macOS
-   * /tmp vs /private/tmp) still matches.
-   */
-  private findLiveSessionsSharingMailboxIdentity(sessionInfo: ConnectedSession | DisconnectedSession): ConnectedSession[] {
-    const lowerName = sessionInfo.info.name?.toLowerCase();
-    if (!lowerName || sessionInfo.info.runtimeFallbackAlias) {
-      return [];
-    }
-    return Array.from(this.sessions.values()).filter(session =>
-      sameScope(session.scopeId, sessionInfo.scopeId)
-      && !session.info.runtimeFallbackAlias
-      && session.info.name?.toLowerCase() === lowerName
-      && sameCwd(session.info.cwd, sessionInfo.info.cwd)
-    );
   }
 
   private broadcast(msg: BrokerMessage, exclude?: string, scopeId?: string): void {
