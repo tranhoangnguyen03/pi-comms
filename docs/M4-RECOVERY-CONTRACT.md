@@ -134,7 +134,7 @@ A broker may reoffer its accepted queue item with the **same ID**. Receiver reco
 | Expired / rejected / unknown | A terminal outcome or a gap that needs judgment |
 | Peer progress / blocked / complete / correction | Attributed report; never requester acceptance |
 
-Expose only evidence actually available to each participant. Do not add cross-process acknowledgments solely to fill every field, or label a broker receipt as native admission. Use existing inspection, result and card paths; reconcile identical meanings across them. Progress-only records remain quiet, corrections actionable, and human drafts/Stop/Pause retain their existing distinctions.
+Expose only evidence actually available to each participant. Broker mailbox inspection belongs to queued or uncertain async sends, never ordinary socket-delivered or rejected messages; restore known queued acceptance from native history before reconnecting. If a receiver's native records enter a recovery hold after registration, stop advertising its socket (a socket drop, not a Pi-runtime exit) so subsequent exact asynchronous traffic is queued under its current A–B approval rather than silently rejected by an unusable live receiver. When expiry or revocation cannot be settled on disk, do not report the pending item as an active queue, even for a same-ID replay. Do not add cross-process acknowledgments solely to fill every field, or label a broker receipt as native admission. Use existing inspection, result and card paths; reconcile identical meanings across them. Progress-only records remain quiet, corrections actionable, and human drafts/Stop/Pause retain their existing distinctions.
 
 ## Alternatives rejected and costs retained
 
