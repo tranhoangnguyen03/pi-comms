@@ -276,7 +276,9 @@ export default function comms(pi: ExtensionAPI) {
     if (stopped || runtime !== owner || !owner.holdReason() || !candidate) return;
     if (client === candidate) client = undefined;
     endAsks('interrupted');
-    if (candidate.isConnected()) void candidate.disconnect().catch(() => undefined);
+    // Destroy only this socket. A transient recovery hold is not a Pi runtime
+    // exit, so preserve F11 session-only approval until that runtime ends.
+    candidate.suspendForRecoveryHold();
   }
   async function ensureConnection() {
     if (!ctx || !runtime || stopped) throw new Error('TARGET_UNAVAILABLE');
@@ -338,7 +340,7 @@ export default function comms(pi: ExtensionAPI) {
         // The pair_snapshot handler replaces the cache: approvals may have ended while offline.
         await candidate.listPairs();
         if (current.holdReason()) {
-          await candidate.disconnect();
+          candidate.suspendForRecoveryHold();
           throw Error('RECOVERY_BLOCKED: receiver must not remain online while its records are held');
         }
         if (runtime !== current || stopped) { await candidate.disconnect(); return; }
